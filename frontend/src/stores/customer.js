@@ -50,7 +50,7 @@ export const useCustomerStore = defineStore('customer', {
       return data
     },
     async searchCustomersRemote(keyword, limit = 50) {
-      """实时直查简道云客户主表，关键词搜索"""
+      // 实时直查简道云客户主表，关键词搜索
       const { data } = await api.get('/api/v1/customers/search', {
         params: { keyword: keyword.trim(), limit }
       })
