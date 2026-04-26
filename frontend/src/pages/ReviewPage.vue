@@ -416,7 +416,19 @@ export default {
           company_name: this.companyName
         })
 
-        this.reviewData = response.data
+        const raw = response.data
+        // 映射 LLM 返回字段 → 前端模板绑定字段
+        this.reviewData = {
+          follow_type: raw.business_action || '',
+          review_date: raw.followup_date || '',
+          review_record: raw.background && raw.communication_details
+            ? `【跟进目的】${raw.background}\n【沟通详情】\n${raw.communication_details.map((d,i) => `${i+1}. ${d}`).join('\n')}\n【参与人】${raw.contact_person || ''}`
+            : '',
+          contact_names: raw.contact_person || '',
+          if_tuisong: '否',
+          genjin_tags: raw.genjin_tags || [],
+          company_name: raw.company_name || this.companyName,
+        }
         this.currentStep = 3
         this.showMessage('跟进记录生成成功，请审核后提交', 'success')
       } catch (error) {
