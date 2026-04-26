@@ -361,12 +361,12 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
     cursor: str | None = None
     all_rows: list[dict[str, Any]] = []
     seen_cursors: set[str] = set()
-    max_pages = 40
     page_size = 100
     error_count = 0
     max_errors = 3
+    page_num = 0
     
-    for page_num in range(max_pages):
+    while True:
         try:
             page = await client.query_data_list(
                 app_id=app_id,
@@ -399,16 +399,17 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
             else:
                 continue
         
+        page_num += 1
         if not page.get("data"):
-            logger.info(f"第 {page_num+1} 页无数据，结束获取")
+            logger.info(f"第 {page_num} 页无数据，结束获取")
             break
             
         batch = page.get("data", []) or []
         if not batch:
-            logger.info(f"第 {page_num+1} 页数据为空，结束获取")
+            logger.info(f"第 {page_num} 页数据为空，结束获取")
             break
             
-        logger.info(f"获取到第 {page_num+1} 页数据，共 {len(batch)} 条")
+        logger.info(f"获取到第 {page_num} 页数据，共 {len(batch)} 条，累计 {len(all_rows) + len(batch)} 条")
         all_rows.extend(batch)
         
         next_cursor = batch[-1].get("_id")
@@ -1131,6 +1132,132 @@ async def company_search(query: CompanySearchQuery = Depends(), db: Session = De
     if keyword:
         customers = [item for item in customers if keyword in item["company_name"].lower()]
     return {"items": customers[:50], "status": "cache" if CUSTOMER_INDEX_CACHE.get("items") else "mock"}
+
+
+@app.get("/api/v1/customers/search")
+async def search_customers(
+    keyword: str,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    """实时直查简道云客户主表，关键词搜索"""
+    limit = max(1, min(limit, 200))
+    cfg = ensure_system_config(db)
+    runtime_cfg = get_jiandaoyun_runtime_config(cfg)
+    mapping = runtime_cfg.get("mapping", {})
+    main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
+    app_id = runtime_cfg.get("app_id", "")
+    api_key = runtime_cfg.get("api_key", "")
+    entry_id = str(main_form.get("entry_id", "")).strip()
+
+    if not api_key or not app_id or not entry_id:
+        return {"customers": [], "mode": "unconfigured", "warning": "简道云未配置"}
+
+    if not keyword or not keyword.strip():
+        return {"customers": [], "mode": "search", "warning": "关键词不能为空"}
+
+    keyword_norm = keyword.strip()
+    client = JiandaoyunClient(api_key=api_key)
+    display_fields = list(main_form.get("display_fields", []) or [])
+    for f in ["comname_01", "com_name"]:
+        if f not in display_fields:
+            display_fields.append(f)
+
+    filter_condition = {
+        "rel": "or",
+        "cond": [
+            {"field": "comname_01", "type": "text", "method": "like", "value": [keyword_norm]},
+            {"field": "com_name", "type": "text", "method": "like", "value": [keyword_norm]},
+        ]
+    }
+
+    try:
+        page = await client.query_data_list(
+            app_id=app_id,
+            entry_id=entry_id,
+            fields=display_fields,
+            limit=limit,
+            filter_condition=filter_condition,
+        )
+        rows = page.get("data", []) or []
+        customers = [
+            {
+                "company_id": row.get("_id"),
+                "company_name": row.get("comname_01") or row.get("com_name") or "未知公司",
+                "comname_01": row.get("comname_01"),
+                "com_name": row.get("com_name"),
+                "raw": row,
+            }
+            for row in rows
+            if row.get("_id")
+        ]
+        return {"customers": customers, "mode": "jiandaoyun_search", "total": len(customers)}
+    except JiandaoyunClientError as exc:
+        return {"customers": [], "mode": "error", "warning": str(exc)}
+
+
+@app.get("/api/v1/customers/search")
+async def search_customers(
+    keyword: str,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    """实时直查简道云客户主表，关键词搜索"""
+    limit = max(1, min(limit, 200))
+    cfg = ensure_system_config(db)
+    runtime_cfg = get_jiandaoyun_runtime_config(cfg)
+    mapping = runtime_cfg.get("mapping", {})
+    main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
+    app_id = runtime_cfg.get("app_id", "")
+    api_key = runtime_cfg.get("api_key", "")
+    entry_id = str(main_form.get("entry_id", "")).strip()
+
+    if not api_key or not app_id or not entry_id:
+        return {"customers": [], "mode": "unconfigured", "warning": "简道云未配置"}
+
+    if not keyword or not keyword.strip():
+        return {"customers": [], "mode": "search", "warning": "关键词不能为空"}
+
+    keyword_norm = keyword.strip()
+    client = JiandaoyunClient(api_key=api_key)
+    display_fields = list(main_form.get("display_fields", []) or [])
+    for f in ["comname_01", "com_name"]:
+        if f not in display_fields:
+            display_fields.append(f)
+
+    filter_condition = {
+        "rel": "or",
+        "cond": [
+            {"field": "comname_01", "type": "text", "method": "like", "value": [keyword_norm]},
+            {"field": "com_name", "type": "text", "method": "like", "value": [keyword_norm]},
+        ]
+    }
+
+    try:
+        page = await client.query_data_list(
+            app_id=app_id,
+            entry_id=entry_id,
+            fields=display_fields,
+            limit=limit,
+            filter_condition=filter_condition,
+        )
+        rows = page.get("data", []) or []
+        customers = [
+            {
+                "company_id": row.get("_id"),
+                "company_name": row.get("comname_01") or row.get("com_name") or "未知公司",
+                "comname_01": row.get("comname_01"),
+                "com_name": row.get("com_name"),
+                "raw": row,
+            }
+            for row in rows
+            if row.get("_id")
+        ]
+        return {"customers": customers, "mode": "jiandaoyun_search", "total": len(customers)}
+    except JiandaoyunClientError as exc:
+        return {"customers": [], "mode": "error", "warning": str(exc)}
 
 
 @app.get("/api/v1/customers/{company_id}/profile")

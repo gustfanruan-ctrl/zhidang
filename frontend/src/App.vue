@@ -88,7 +88,7 @@ async function refreshAuthState() {
   if (isAuthed.value) {
     customerLoading.value = true
     try {
-      const data = await customerStore.fetchCustomers()
+      const data = await customerStore.fetchCustomers(true)
       customerWarning.value = data?.warning || ''
       customerStatusText.value = `已加载 ${customerStore.customers.length} 条客户` + (customerStore.cacheTotal ? `（索引总数 ${customerStore.cacheTotal}）` : '')
     } catch (error) {
@@ -134,32 +134,27 @@ async function searchCustomers() {
     }
     return
   }
+  // 关键词搜索：直查简道云，不走本地缓存索引
   try {
-    const data = await customerStore.fetchCustomers(true, keyword)
-    // 直接信任后端返回的搜索结果，不做二次本地过滤
-    filteredCustomers.value = customerStore.customers || []
+    const data = await customerStore.searchCustomersRemote(keyword)
+    filteredCustomers.value = data.customers || []
     customerWarning.value = data?.warning || ''
-    customerStatusText.value = `关键词 "${keyword}" 命中 ${filteredCustomers.value.length} 条`
+    if (data.mode === 'jiandaoyun_search') {
+      customerStatusText.value = `关键词 "${keyword}" 实时命中 ${filteredCustomers.value.length} 条`
+    } else {
+      customerStatusText.value = `关键词 "${keyword}" 命中 ${filteredCustomers.value.length} 条`
+    }
   } catch (error) {
     console.error('客户搜索错误:', error)
-    
-    // 尝试获取更详细的错误信息
     let errorMessage = '搜索失败'
     if (error?.response?.data?.detail) {
       errorMessage = error.response.data.detail
     } else if (error?.response?.data?.warning) {
       errorMessage = error.response.data.warning
-    } else if (error?.response?.data?.debug_info) {
-      console.log('调试信息:', error.response.data.debug_info)
-      if (error.response.data.debug_info.runtime_configured === false) {
-        errorMessage = '简道云未配置或配置无效'
-      } else if (error.response.data.debug_info.cache_items_count === 0) {
-        errorMessage = '未找到匹配的客户，请检查搜索词或简道云表单数据'
-      }
     }
-    
     customerWarning.value = errorMessage
     customerStatusText.value = errorMessage
+    filteredCustomers.value = []
   } finally {
     customerLoading.value = false
   }
