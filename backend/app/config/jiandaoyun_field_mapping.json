@@ -94,7 +94,10 @@
       "type": "radiogroup",
       "safety": "writable",
       "allowed_values": [
-        "TODO: 待补全"
+        "未启动",
+        "进行中",
+        "已达成",
+        "已作废"
       ]
     },
         "推进想法": {

@@ -118,7 +118,15 @@
             :class="{ approved: item.approved, rejected: item.rejected }"
           >
             <div class="card-header">
-              <div class="card-status">{{ item.status || '未启动' }}</div>
+              <div class="card-header-left">
+                <select v-model="item.status" class="status-select">
+                  <option value="未启动">未启动</option>
+                  <option value="进行中">进行中</option>
+                  <option value="已达成">已达成</option>
+                  <option value="已作废">已作废</option>
+                </select>
+                <span class="confidence-badge">置信度 {{ (item.confidence * 100).toFixed(0) }}%</span>
+              </div>
               <div class="card-actions">
                 <button class="action-btn edit" @click="toggleEdit('expectation', index)">
                   {{ isEditing('expectation', index) ? '取消' : '编辑' }}
@@ -154,6 +162,15 @@
               </div>
               <p v-else class="card-description">{{ item.description || '暂无描述' }}</p>
               
+              <!-- 是否第一价值 -->
+              <div class="card-field-row">
+                <span class="field-label">是否第一价值：</span>
+                <select v-model="item.is_first_value" class="mini-select">
+                  <option value="是">是</option>
+                  <option value="否">否</option>
+                </select>
+              </div>
+
               <div class="card-quote" v-if="item.source_quote">
                 <p class="quote-label">原文引用：</p>
                 <p class="quote-content">"{{ item.source_quote }}"</p>
@@ -174,7 +191,9 @@
             :class="{ approved: item.approved, rejected: item.rejected }"
           >
             <div class="card-header">
-              <div class="card-status">{{ item.status || '未启动' }}</div>
+              <div class="card-header-left">
+                <span class="confidence-badge">置信度 {{ (item.confidence * 100).toFixed(0) }}%</span>
+              </div>
               <div class="card-actions">
                 <button class="action-btn edit" @click="toggleEdit('scenario', index)">
                   {{ isEditing('scenario', index) ? '取消' : '编辑' }}
@@ -515,6 +534,8 @@ async function startAnalysis() {
         solve_what_ques: getVal('解决什么问题') || getVal('solve_what_ques'),
         solve_what_ans: getVal('怎样解决') || getVal('solve_what_ans'),
         status: getVal('预期状态') || getVal('yuqi_status') || '未启动',
+        is_first_value: getVal('是否第一价值实现预期') || '否',
+        confidence: card.confidence || 0,
         source_quote: card.source_quote || '',
         operationId: card.card_id,
         operationType: card.operation_type,
@@ -951,6 +972,30 @@ function formatTime(date) {
   color: var(--muted-dark, #757575);
 }
 
+.card-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-select {
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  background: var(--primary);
+  color: #fff;
+  cursor: pointer;
+}
+
+.confidence-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: var(--primary-weak);
+  color: var(--primary);
+}
+
 .card-actions {
   display: flex;
   gap: 8px;
@@ -1212,5 +1257,26 @@ function formatTime(date) {
   .step-connector {
     width: 20px;
   }
+}
+
+.card-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.field-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.mini-select {
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
 }
 </style>
