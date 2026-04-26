@@ -65,12 +65,13 @@ FOLLOWUP_SYSTEM_PROMPT = """你是一名 CRM 数据录入助手。从以下沟�
 
 标签推断规则（必须至少生成一个标签）：
 - 提到部署、上线、环境 → 系统部署/环境确认
-- 提到培训、学习、课程 → 数字人才服务 → 二级标签选"线下培训"或"线上课程"
-- 提到续费、合同、金额 → 续费增购
-- 提到bug、故障、问题 → 常态化跟进
+- 提到"数字人才""人才大赛""翻转课堂""业务沙盘""线上课程"等帆软培训产品 → 数字人才服务
+- 提到续费、合同、金额、ARR → 续费增购
+- 提到bug、故障、技术问题 → 常态化跟进
 - 提到高层、汇报、价值 → 价值汇报/高层触达
-- 提到方案、宣讲、介绍 → 价值宣导/方案讲解
-- 以上都不匹配时，默认使用 使用推进 → 常态化跟进
+- 提到方案、宣讲、介绍、新需求 → 价值宣导/方案讲解
+- 一般性培训沟通、需求沟通 → 常态化跟进 或 预期跟进
+- 以上都不匹配时，默认 使用推进 → 常态化跟进
 - genjin_tags 不能为空数组，至少包含一条标签
 
 ## 处理规则
@@ -223,8 +224,8 @@ class FollowupService:
         if payload.company_name:
             data["com_name"] = {"value": payload.company_name}
 
-        # 跟进人（写死）
-        data["follower"] = {"value": "Gust-张小洋"}
+        # 跟进人（写死，user类型需JSON格式）
+        data["follower"] = {"value": {"name": "Gust-张小洋", "username": "gust-zhang"}}
 
         # 跟进类型
         data["follow_type"] = {"value": payload.follow_type}
