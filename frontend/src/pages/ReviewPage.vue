@@ -4,24 +4,84 @@
     <div class="review-header">
       <h1>跟进记录生成</h1>
     </div>
-    
+
+    <!-- 步骤进度指示器 -->
+    <div class="step-indicator">
+      <div class="step" :class="{ active: currentStep >= 1, current: currentStep === 1 }">
+        <div class="step-number">1</div>
+        <div class="step-label">上传文件</div>
+      </div>
+      <div class="step-line" :class="{ active: currentStep >= 2 }"></div>
+      <div class="step" :class="{ active: currentStep >= 2, current: currentStep === 2 }">
+        <div class="step-number">2</div>
+        <div class="step-label">LLM生成</div>
+      </div>
+      <div class="step-line" :class="{ active: currentStep >= 3 }"></div>
+      <div class="step" :class="{ active: currentStep >= 3, current: currentStep === 3 }">
+        <div class="step-number">3</div>
+        <div class="step-label">审核编辑</div>
+      </div>
+      <div class="step-line" :class="{ active: currentStep >= 4 }"></div>
+      <div class="step" :class="{ active: currentStep >= 4, current: currentStep === 4 }">
+        <div class="step-number">4</div>
+        <div class="step-label">提交</div>
+      </div>
+    </div>
+
     <div class="review-input-section">
       <!-- 当前选中的客户名称 -->
       <div class="form-row">
         <label>当前客户：</label>
         <input type="text" :value="companyName" readonly />
       </div>
-      
+
+      <!-- 文件上传区域 -->
+      <div class="form-row">
+        <label>上传文件：</label>
+        <div class="upload-area-wrapper">
+          <div
+            class="upload-area"
+            :class="{ 'drag-over': isDragOver, 'has-file': uploadedFile }"
+            @dragover.prevent="onDragOver"
+            @dragleave.prevent="onDragLeave"
+            @drop.prevent="onFileDrop"
+            @click="triggerFileInput"
+          >
+            <input
+              ref="fileInput"
+              type="file"
+              accept=".txt,.jpg,.jpeg,.png,.webp"
+              style="display: none"
+              @change="onFileSelect"
+            />
+            <div v-if="!uploadedFile" class="upload-placeholder">
+              <div class="upload-icon">+</div>
+              <div class="upload-text">点击或拖拽上传文件</div>
+              <div class="upload-hint">支持 .txt, .jpg, .jpeg, .png, .webp</div>
+            </div>
+            <div v-else class="file-info">
+              <div class="file-name">{{ uploadedFile.name }}</div>
+              <button class="remove-file-btn" @click.stop="removeFile">移除</button>
+            </div>
+          </div>
+
+          <!-- 图片预览 -->
+          <div v-if="filePreview && isImageFile" class="image-preview">
+            <img :src="filePreview" alt="预览" />
+          </div>
+        </div>
+      </div>
+
       <!-- 转写内容 -->
       <div class="form-row">
         <label>转写内容：</label>
-        <textarea 
-          v-model="transcriptText" 
-          placeholder="粘贴会议转写内容..."
+        <textarea
+          v-model="transcriptText"
+          placeholder="粘贴会议转写内容，或上传 txt 文件自动填充..."
           rows="10"
         ></textarea>
       </div>
-      
+
       <!-- 生成按钮 -->
       <div class="form-row">
         <button @click="generateReview" :disabled="!canGenerate || generating" :class="{ 'loading': generating }">
@@ -161,7 +221,12 @@ export default {
       submitting: false,
       showAdvanced: false,
       message: '',
-      messageType: 'info'
+      messageType: 'info',
+      // 文件上传相关
+      uploadedFile: null,
+      filePreview: null,
+      isDragOver: false,
+      currentStep: 1
     }
   },
   computed: {
@@ -176,6 +241,11 @@ export default {
     canGenerate() {
       return this.transcriptText.trim() && this.companyName
     },
+    isImageFile() {
+      if (!this.uploadedFile) return false
+      const ext = this.uploadedFile.name.split('.').pop().toLowerCase()
+      return ['jpg', 'jpeg', 'png', 'webp'].includes(ext)
+    },
     canSubmit() {
       return this.reviewData && this.reviewData.follow_type && this.reviewData.review_date && this.reviewData.review_record
     }
@@ -185,6 +255,87 @@ export default {
     await this.loadConfig()
   },
   methods: {
+    // --- 文件上传相关方法 ---
+    triggerFileInput() {
+      this.$refs.fileInput.click()
+    },
+
+    onDragOver(e) {
+      this.isDragOver = true
+    },
+
+    onDragLeave(e) {
+      this.isDragOver = false
+    },
+
+    onFileDrop(e) {
+      this.isDragOver = false
+      const files = e.dataTransfer.files
+      if (files.length > 0) {
+        this.handleFile(files[0])
+      }
+    },
+
+    onFileSelect(e) {
+      const files = e.target.files
+      if (files.length > 0) {
+        this.handleFile(files[0])
+      }
+    },
+
+    validateFile(file) {
+      const allowedTypes = ['.txt', '.jpg', '.jpeg', '.png', '.webp']
+      const ext = '.' + file.name.split('.').pop().toLowerCase()
+      return allowedTypes.includes(ext)
+    },
+
+    handleFile(file) {
+      if (!this.validateFile(file)) {
+        this.showMessage('不支持的文件类型，请上传 .txt, .jpg, .jpeg, .png, .webp 文件', 'error')
+        return
+      }
+
+      this.uploadedFile = file
+      this.filePreview = null
+
+      const ext = file.name.split('.').pop().toLowerCase()
+
+      if (ext === 'txt') {
+        // 读取文本内容
+        const reader = new FileReader()
+        reader.onload = (e) => {
+          this.transcriptText = e.target.result
+          this.showMessage('文本文件读取成功', 'success')
+          this.currentStep = 1
+        }
+        reader.onerror = () => {
+          this.showMessage('读取文本文件失败', 'error')
+        }
+        reader.readAsText(file)
+      } else {
+        // 图片文件：生成预览并设置占位文本
+        const reader = new FileReader()
+        reader.onload = (e) => {
+          this.filePreview = e.target.result
+          this.transcriptText = `[图片上传: ${file.name}]`
+          this.showMessage('图片上传成功，请确认后生成', 'success')
+          this.currentStep = 1
+        }
+        reader.onerror = () => {
+          this.showMessage('读取图片文件失败', 'error')
+        }
+        reader.readAsDataURL(file)
+      }
+    },
+
+    removeFile() {
+      this.uploadedFile = null
+      this.filePreview = null
+      this.transcriptText = ''
+      this.$refs.fileInput.value = ''
+    },
+    // --- 文件上传方法结束 ---
+
     async loadTagTree() {
       try {
         const response = await api.get('/api/v1/review/tags')
@@ -193,7 +344,7 @@ export default {
         this.showMessage('加载跟进标签失败', 'error')
       }
     },
-    
+
     async loadConfig() {
       try {
         const response = await api.get('/api/v1/admin/config')
@@ -206,21 +357,23 @@ export default {
     
     async generateReview() {
       if (!this.canGenerate) {
-        this.showMessage('请先在顶部选择客户', 'error')
+        this.showMessage('请先在顶部选择客户并输入转写内容', 'error')
         return
       }
-      
+
       this.generating = true
-      
+      this.currentStep = 2
+
       try {
         const response = await api.post('/api/v1/review/generate', {
           transcript_text: this.transcriptText,
           company_id: this.companyId,
           company_name: this.companyName
         })
-        
+
         if (response.data.error) {
           this.showMessage(`生成失败: ${response.data.error}`, 'error')
+          this.currentStep = 1
         } else {
           this.reviewData = response.data
           // 为新生成的数据添加空的标签
@@ -228,9 +381,11 @@ export default {
             this.reviewData.genjin_tags = []
           }
           this.showMessage('跟进记录生成成功', 'success')
+          this.currentStep = 3
         }
       } catch (error) {
         this.showMessage('生成跟进记录失败', 'error')
+        this.currentStep = 1
       } finally {
         this.generating = false
       }
@@ -276,20 +431,22 @@ export default {
     async submitReview() {
       if (!this.canSubmit) return
       if (this.submitting) return
-      
+
       this.submitting = true
-      
+      this.currentStep = 4
+
       try {
         const payload = {
           ...this.reviewData,
           com_name: this.companyName,
           comid: this.companyId
         }
-        
+
         const response = await api.post('/api/v1/review/submit', payload)
         this.showMessage('跟进记录已成功提交到简道云', 'success')
       } catch (error) {
         this.showMessage('提交到简道云失败', 'error')
+        this.currentStep = 3
       } finally {
         this.submitting = false
       }
@@ -341,6 +498,169 @@ export default {
   padding: 20px;
   border: 1px solid #eee;
   border-radius: 5px;
+}
+
+/* 步骤进度指示器 */
+.step-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 30px;
+  padding: 0 20px;
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: #999;
+}
+
+.step.active {
+  color: #007bff;
+}
+
+.step.current .step-number {
+  background-color: #007bff;
+  color: white;
+  border-color: #007bff;
+}
+
+.step-number {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid #ccc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  margin-bottom: 5px;
+  background-color: white;
+}
+
+.step.active .step-number {
+  border-color: #007bff;
+  color: #007bff;
+}
+
+.step.current .step-number {
+  color: white;
+}
+
+.step-label {
+  font-size: 12px;
+}
+
+.step-line {
+  flex: 1;
+  height: 2px;
+  background-color: #ccc;
+  margin: 0 10px;
+  margin-bottom: 20px;
+  max-width: 80px;
+}
+
+.step-line.active {
+  background-color: #007bff;
+}
+
+/* 文件上传区域 */
+.upload-area-wrapper {
+  flex: 1;
+}
+
+.upload-area {
+  border: 2px dashed #ccc;
+  border-radius: 8px;
+  padding: 30px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  background-color: #fafafa;
+}
+
+.upload-area:hover {
+  border-color: #007bff;
+  background-color: #f0f8ff;
+}
+
+.upload-area.drag-over {
+  border-color: #007bff;
+  background-color: #e6f2ff;
+}
+
+.upload-area.has-file {
+  border-style: solid;
+  border-color: #28a745;
+  background-color: #f0fff4;
+  padding: 15px 30px;
+}
+
+.upload-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.upload-icon {
+  font-size: 36px;
+  color: #999;
+  line-height: 1;
+}
+
+.upload-text {
+  font-size: 14px;
+  color: #666;
+}
+
+.upload-hint {
+  font-size: 12px;
+  color: #999;
+}
+
+.file-info {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 15px;
+}
+
+.file-name {
+  font-size: 14px;
+  color: #333;
+  font-weight: 500;
+}
+
+.remove-file-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  background-color: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.remove-file-btn:hover {
+  background-color: #c82333;
+}
+
+/* 图片预览 */
+.image-preview {
+  margin-top: 15px;
+  border: 1px solid #eee;
+  border-radius: 8px;
+  padding: 10px;
+  background-color: #fafafa;
+  text-align: center;
+}
+
+.image-preview img {
+  max-width: 100%;
+  max-height: 300px;
+  border-radius: 4px;
 }
 
 .review-preview-section {
