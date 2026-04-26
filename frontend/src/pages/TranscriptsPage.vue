@@ -43,9 +43,9 @@
       </div>
       
       <!-- 当前客户信息 -->
-      <div class="customer-info" v-if="currentCustomer">
+      <div class="customer-info" v-if="customerStore.currentCustomer">
         <label>当前客户：</label>
-        <div class="customer-display">{{ currentCustomer.company_name }}</div>
+        <div class="customer-display">{{ customerStore.currentCustomer.company_name }}</div>
       </div>
       <div v-else class="customer-warning">
         <p>⚠️ 请先在侧边栏选择一个客户</p>
@@ -61,6 +61,29 @@
       <div v-if="transcriptText" class="transcript-preview">
         <h3>转写内容预览</h3>
         <div class="preview-content">{{ transcriptText.slice(0, 500) }}{{ transcriptText.length > 500 ? '...' : '' }}</div>
+      </div>
+      
+      <!-- 解析链路步骤条 -->
+      <div v-if="analysisStatus !== 'idle' && analysisStatus !== 'pending'" class="pipeline-steps">
+        <div class="step" :class="{ active: stepActive('upload'), done: stepDone('upload') }">
+          <span class="step-icon">{{ stepDone('upload') ? '✓' : '1' }}</span>
+          <span class="step-label">上传文件</span>
+        </div>
+        <div class="step-connector" :class="{ done: stepDone('upload') }"></div>
+        <div class="step" :class="{ active: stepActive('extract'), done: stepDone('extract') }">
+          <span class="step-icon">{{ stepDone('extract') ? '✓' : '2' }}</span>
+          <span class="step-label">语义提取</span>
+        </div>
+        <div class="step-connector" :class="{ done: stepDone('extract') }"></div>
+        <div class="step" :class="{ active: stepActive('compare'), done: stepDone('compare') }">
+          <span class="step-icon">{{ stepDone('compare') ? '✓' : '3' }}</span>
+          <span class="step-label">档案比对</span>
+        </div>
+        <div class="step-connector" :class="{ done: stepDone('compare') }"></div>
+        <div class="step" :class="{ active: stepActive('completed'), done: stepDone('completed') }">
+          <span class="step-icon">{{ stepDone('completed') ? '✓' : '4' }}</span>
+          <span class="step-label">完成</span>
+        </div>
       </div>
       
       <!-- 开始分析按钮 -->
@@ -85,25 +108,31 @@
       </div>
       
       <!-- 预期结果 -->
-      <div v-if="analysisResult.expectations" class="result-area">
+      <div v-if="analysisResult.expectations && analysisResult.expectations.length" class="result-area">
         <h3>客户预期 ({{ analysisResult.expectations.length }})</h3>
         <div class="result-cards">
           <div 
             v-for="(item, index) in analysisResult.expectations" 
             :key="index"
             class="result-card"
+            :class="{ approved: item.approved, rejected: item.rejected }"
           >
             <div class="card-header">
               <div class="card-status">{{ item.status || '未启动' }}</div>
               <div class="card-actions">
+                <button class="action-btn edit" @click="toggleEdit('expectation', index)">
+                  {{ isEditing('expectation', index) ? '取消' : '编辑' }}
+                </button>
                 <button 
                   class="action-btn approve"
+                  :class="{ active: item.approved }"
                   @click="markForApproval('expectation', index, 'approve')"
                 >
                   ✓ 批准
                 </button>
                 <button 
                   class="action-btn reject"
+                  :class="{ active: item.rejected }"
                   @click="markForApproval('expectation', index, 'reject')"
                 >
                   ✗ 拒绝
@@ -111,8 +140,20 @@
               </div>
             </div>
             <div class="card-content">
-              <p class="card-title">{{ item.summary || '未命名预期' }}</p>
-              <p class="card-description">{{ item.description || '暂无描述' }}</p>
+              <!-- 标题 -->
+              <div v-if="isEditing('expectation', index)" class="edit-field">
+                <label>标题</label>
+                <input v-model="item.summary" type="text" class="edit-input">
+              </div>
+              <p v-else class="card-title">{{ item.summary || '未命名预期' }}</p>
+              
+              <!-- 描述 -->
+              <div v-if="isEditing('expectation', index)" class="edit-field">
+                <label>描述</label>
+                <textarea v-model="item.description" class="edit-textarea" rows="3"></textarea>
+              </div>
+              <p v-else class="card-description">{{ item.description || '暂无描述' }}</p>
+              
               <div class="card-quote" v-if="item.source_quote">
                 <p class="quote-label">原文引用：</p>
                 <p class="quote-content">"{{ item.source_quote }}"</p>
@@ -123,25 +164,31 @@
       </div>
       
       <!-- 场景结果 -->
-      <div v-if="analysisResult.scenarios" class="result-area">
+      <div v-if="analysisResult.scenarios && analysisResult.scenarios.length" class="result-area">
         <h3>业务场景 ({{ analysisResult.scenarios.length }})</h3>
         <div class="result-cards">
           <div 
             v-for="(item, index) in analysisResult.scenarios" 
             :key="index"
             class="result-card"
+            :class="{ approved: item.approved, rejected: item.rejected }"
           >
             <div class="card-header">
               <div class="card-status">{{ item.status || '未启动' }}</div>
               <div class="card-actions">
+                <button class="action-btn edit" @click="toggleEdit('scenario', index)">
+                  {{ isEditing('scenario', index) ? '取消' : '编辑' }}
+                </button>
                 <button 
                   class="action-btn approve"
+                  :class="{ active: item.approved }"
                   @click="markForApproval('scenario', index, 'approve')"
                 >
                   ✓ 批准
                 </button>
                 <button 
                   class="action-btn reject"
+                  :class="{ active: item.rejected }"
                   @click="markForApproval('scenario', index, 'reject')"
                 >
                   ✗ 拒绝
@@ -149,8 +196,20 @@
               </div>
             </div>
             <div class="card-content">
-              <p class="card-title">{{ item.title || '未命名场景' }}</p>
-              <p class="card-description">{{ item.description || '暂无描述' }}</p>
+              <!-- 标题 -->
+              <div v-if="isEditing('scenario', index)" class="edit-field">
+                <label>标题</label>
+                <input v-model="item.title" type="text" class="edit-input">
+              </div>
+              <p v-else class="card-title">{{ item.title || '未命名场景' }}</p>
+              
+              <!-- 描述 -->
+              <div v-if="isEditing('scenario', index)" class="edit-field">
+                <label>描述</label>
+                <textarea v-model="item.description" class="edit-textarea" rows="3"></textarea>
+              </div>
+              <p v-else class="card-description">{{ item.description || '暂无描述' }}</p>
+              
               <div class="card-quote" v-if="item.source_quote">
                 <p class="quote-label">原文引用：</p>
                 <p class="quote-content">"{{ item.source_quote }}"</p>
@@ -207,15 +266,15 @@ const logs = ref([])
 const message = ref('')
 const messageType = ref('info')
 const analysisTaskId = ref(null)
-const analysisStatus = ref('pending')
+const analysisStatus = ref('idle')
+const editingItems = ref(new Set()) // 跟踪正在编辑的卡片
 
 // 客户 store
 const customerStore = useCustomerStore()
-const { currentCustomer } = customerStore
 
 // 计算属性
 const canStartAnalysis = computed(() => {
-  return file.value && currentCustomer.value && transcriptTitle.value
+  return !!file.value && !!customerStore.currentCustomer && !!transcriptTitle.value.trim()
 })
 
 const canSubmit = computed(() => {
@@ -227,9 +286,10 @@ const canSubmit = computed(() => {
 
 const analysisStatusText = computed(() => {
   switch (analysisStatus.value) {
-    case 'pending': return '未开始'
-    case 'processing': return '处理中'
-    case 'comparison': return '比对分析中'
+    case 'idle': return '未开始'
+    case 'uploading': return '上传中'
+    case 'extracting': return '语义提取中'
+    case 'comparing': return '档案比对中'
     case 'completed': return '已完成'
     case 'error': return '分析失败'
     default: return '未知状态'
@@ -289,10 +349,10 @@ async function processFile(fileObj) {
       showErrorMessage('读取文件内容失败')
       return
     }
+  } else {
+    // 如果是图片等二进制文件，标记为已上传
+    transcriptText.value = '图片文件已上传，将在分析时处理'
   }
-  
-  // 如果是图片，设置为已上传，但不显示内容
-  transcriptText.value = '图片文件已上传，将在分析时处理'
   
   // 如果未设置标题，使用文件名
   if (!transcriptTitle.value) {
@@ -301,13 +361,13 @@ async function processFile(fileObj) {
 }
 
 // 监听当前客户变化，自动更新标题
-watch(currentCustomer, () => {
+watch(() => customerStore.currentCustomer, () => {
   updateTranscriptTitle()
 })
 
 function updateTranscriptTitle() {
-  if (!transcriptTitle.value && currentCustomer.value) {
-    transcriptTitle.value = `${currentCustomer.value.company_name} 会议转写`
+  if (!transcriptTitle.value && customerStore.currentCustomer) {
+    transcriptTitle.value = `${customerStore.currentCustomer.company_name} 会议转写`
   }
 }
 
@@ -342,14 +402,49 @@ function showSuccessMessage(msg) {
   }, 3000)
 }
 
+// 步骤条相关
+function stepActive(step) {
+  const map = {
+    'upload': ['uploading'],
+    'extract': ['extracting'],
+    'compare': ['comparing'],
+    'completed': ['completed']
+  }
+  return map[step]?.includes(analysisStatus.value) || false
+}
+
+function stepDone(step) {
+  const order = ['upload', 'extract', 'compare', 'completed']
+  const current = analysisStatus.value
+  const currentIdx = order.findIndex(s => stepActive(s))
+  const stepIdx = order.indexOf(step)
+  if (current === 'error') return false
+  return stepIdx < currentIdx
+}
+
+// 编辑相关
+function isEditing(type, index) {
+  return editingItems.value.has(`${type}_${index}`)
+}
+
+function toggleEdit(type, index) {
+  const key = `${type}_${index}`
+  if (editingItems.value.has(key)) {
+    editingItems.value.delete(key)
+  } else {
+    editingItems.value.add(key)
+  }
+}
+
 async function startAnalysis() {
   if (!canStartAnalysis.value) return
   
   addLog('开始分析转写内容')
+  analysisStatus.value = 'uploading'
   
   try {
     // 获取客户名称
-    const customer = currentCustomer.value
+    const customer = customerStore.currentCustomer
     const companyName = customer ? customer.company_name : '未知客户'
     
     // 上传转写文件
@@ -374,8 +469,8 @@ async function startAnalysis() {
     }
     
     // 执行提取任务
+    analysisStatus.value = 'extracting'
     addLog('启动预期和场景提取任务')
-    analysisStatus.value = 'extraction'
     
     const extractionResponse = await api.post('/api/v1/agent/extraction/task', {
       transcript_id: analysisTaskId.value,
@@ -385,15 +480,15 @@ async function startAnalysis() {
       transcript: uploadResult || { title: transcriptTitle.value }
     })
     
-    addLog('提取任务启动成功')
-    analysisStatus.value = 'comparison'
+    addLog('提取任务完成')
     
     // 执行比对任务
+    analysisStatus.value = 'comparing'
     addLog('启动与客户档案比对任务')
     
     const comparisonResponse = await api.post('/api/v1/agent/comparison/task', {
       transcript_id: analysisTaskId.value,
-      company_id: currentCustomer.value.company_id,
+      company_id: customerStore.currentCustomer.company_id,
       existing_record: customer,
       extraction_result: extractionResponse.data.result
     })
@@ -470,7 +565,7 @@ async function submitToJiandaoyun() {
     
     if (analysisResult.value.expectations) {
       analysisResult.value.expectations.forEach((item, index) => {
-        if (item.approved && !approvalStatus.value[`expectation_${index}`].includes('reject')) {
+        if (item.approved && approvalStatus.value[`expectation_${index}`] !== 'reject') {
           approvedOperations.push(item.operationId)
         }
       })
@@ -478,7 +573,7 @@ async function submitToJiandaoyun() {
     
     if (analysisResult.value.scenarios) {
       analysisResult.value.scenarios.forEach((item, index) => {
-        if (item.approved && !approvalStatus.value[`scenario_${index}`].includes('reject')) {
+        if (item.approved && approvalStatus.value[`scenario_${index}`] !== 'reject') {
           approvedOperations.push(item.operationId)
         }
       })
@@ -688,6 +783,82 @@ function formatTime(date) {
   line-height: 1.5;
 }
 
+/* 解析链路步骤条 */
+.pipeline-steps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 20px 0;
+  padding: 16px;
+  background: var(--surface-soft, #f5f7fa);
+  border-radius: 10px;
+  gap: 0;
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+}
+
+.step-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--muted, #ccc);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.3s;
+}
+
+.step-label {
+  font-size: 12px;
+  color: var(--muted-dark, #757575);
+  white-space: nowrap;
+}
+
+.step.active .step-icon {
+  background: var(--primary, #007bff);
+  animation: pulse 1.5s infinite;
+}
+
+.step.active .step-label {
+  color: var(--primary, #007bff);
+  font-weight: 600;
+}
+
+.step.done .step-icon {
+  background: var(--success, #4caf50);
+}
+
+.step.done .step-label {
+  color: var(--success-dark, #388e3c);
+}
+
+.step-connector {
+  width: 40px;
+  height: 2px;
+  background: var(--muted, #ccc);
+  margin: 0 4px;
+  transition: all 0.3s;
+}
+
+.step-connector.done {
+  background: var(--success, #4caf50);
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(0, 123, 255, 0.4); }
+  70% { box-shadow: 0 0 0 8px rgba(0, 123, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 123, 255, 0); }
+}
+
 .result-header {
   display: flex;
   justify-content: space-between;
@@ -702,12 +873,12 @@ function formatTime(date) {
   font-weight: 500;
 }
 
-.analysis-status.pending {
+.analysis-status.idle, .analysis-status.pending {
   background-color: var(--muted, #f5f5f5);
   color: var(--muted-dark, #757575);
 }
 
-.analysis-status.processing, .analysis-status.comparison {
+.analysis-status.uploading, .analysis-status.extracting, .analysis-status.comparing {
   background-color: var(--info-light, #e1f5fe);
   color: var(--info-dark, #0277bd);
 }
@@ -733,6 +904,18 @@ function formatTime(date) {
   border: 1px solid var(--line, #e1e5e9);
   border-radius: 8px;
   overflow: hidden;
+  transition: all 0.2s;
+}
+
+.result-card.approved {
+  border-color: var(--success, #4caf50);
+  box-shadow: 0 0 0 1px var(--success, #4caf50);
+}
+
+.result-card.rejected {
+  border-color: var(--error, #f44336);
+  box-shadow: 0 0 0 1px var(--error, #f44336);
+  opacity: 0.7;
 }
 
 .card-header {
@@ -767,21 +950,39 @@ function formatTime(date) {
 }
 
 .action-btn.approve {
+  background-color: var(--success-weak, #e8f5e9);
+  color: var(--success-dark, #2e7d32);
+  border: 1px solid var(--success, #4caf50);
+}
+
+.action-btn.approve.active,
+.action-btn.approve:hover {
   background-color: var(--success, #4caf50);
   color: white;
 }
 
-.action-btn.approve:hover {
-  background-color: var(--success-dark, #388e3c);
+.action-btn.reject {
+  background-color: var(--error-weak, #ffebee);
+  color: var(--error-dark, #c62828);
+  border: 1px solid var(--error, #f44336);
 }
 
-.action-btn.reject {
+.action-btn.reject.active,
+.action-btn.reject:hover {
   background-color: var(--error, #f44336);
   color: white;
 }
 
-.action-btn.reject:hover {
-  background-color: var(--error-dark, #d32f2f);
+.action-btn.edit {
+  background-color: var(--surface-soft, #f5f7fa);
+  color: var(--text, #333);
+  border: 1px solid var(--line, #e1e5e9);
+}
+
+.action-btn.edit:hover {
+  background-color: var(--primary-weak, #e3f2fd);
+  color: var(--primary, #007bff);
+  border-color: var(--primary, #007bff);
 }
 
 .card-content {
@@ -817,6 +1018,40 @@ function formatTime(date) {
   font-style: italic;
   font-size: 14px;
   color: var(--text-secondary, #555);
+}
+
+/* 编辑区域 */
+.edit-field {
+  margin-bottom: 10px;
+}
+
+.edit-field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-dark, #757575);
+  margin-bottom: 4px;
+}
+
+.edit-input, .edit-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--primary, #007bff);
+  border-radius: 6px;
+  font-size: 14px;
+  box-sizing: border-box;
+  background: var(--surface, #fff);
+  color: var(--text, #333);
+}
+
+.edit-input:focus, .edit-textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.2);
+}
+
+.edit-textarea {
+  resize: vertical;
+  min-height: 60px;
 }
 
 .action-buttons {
@@ -951,6 +1186,15 @@ function formatTime(date) {
     border: 1px solid #ffeaa7;
     border-radius: 4px;
     color: #856404;
+  }
+
+  .pipeline-steps {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .step-connector {
+    width: 20px;
   }
 }
 </style>

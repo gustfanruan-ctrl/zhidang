@@ -1143,69 +1143,6 @@ async def search_customers(
     db: Session = Depends(get_db),
     user: dict[str, Any] = Depends(require_auth),
 ):
-    """实时直查简道云客户主表，关键词搜索"""
-    limit = max(1, min(limit, 200))
-    cfg = ensure_system_config(db)
-    runtime_cfg = get_jiandaoyun_runtime_config(cfg)
-    mapping = runtime_cfg.get("mapping", {})
-    main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
-    app_id = runtime_cfg.get("app_id", "")
-    api_key = runtime_cfg.get("api_key", "")
-    entry_id = str(main_form.get("entry_id", "")).strip()
-
-    if not api_key or not app_id or not entry_id:
-        return {"customers": [], "mode": "unconfigured", "warning": "简道云未配置"}
-
-    if not keyword or not keyword.strip():
-        return {"customers": [], "mode": "search", "warning": "关键词不能为空"}
-
-    keyword_norm = keyword.strip()
-    client = JiandaoyunClient(api_key=api_key)
-    display_fields = list(main_form.get("display_fields", []) or [])
-    for f in ["comname_01", "com_name"]:
-        if f not in display_fields:
-            display_fields.append(f)
-
-    filter_condition = {
-        "rel": "or",
-        "cond": [
-            {"field": "comname_01", "type": "text", "method": "like", "value": [keyword_norm]},
-            {"field": "com_name", "type": "text", "method": "like", "value": [keyword_norm]},
-        ]
-    }
-
-    try:
-        page = await client.query_data_list(
-            app_id=app_id,
-            entry_id=entry_id,
-            fields=display_fields,
-            limit=limit,
-            filter_condition=filter_condition,
-        )
-        rows = page.get("data", []) or []
-        customers = [
-            {
-                "company_id": row.get("_id"),
-                "company_name": row.get("comname_01") or row.get("com_name") or "未知公司",
-                "comname_01": row.get("comname_01"),
-                "com_name": row.get("com_name"),
-                "raw": row,
-            }
-            for row in rows
-            if row.get("_id")
-        ]
-        return {"customers": customers, "mode": "jiandaoyun_search", "total": len(customers)}
-    except JiandaoyunClientError as exc:
-        return {"customers": [], "mode": "error", "warning": str(exc)}
-
-
-@app.get("/api/v1/customers/search")
-async def search_customers(
-    keyword: str,
-    limit: int = 50,
-    db: Session = Depends(get_db),
-    user: dict[str, Any] = Depends(require_auth),
-):
     """从本地缓存索引中模糊搜索客户，不再直查简道云"""
     limit = max(1, min(limit, 200))
     keyword_norm = keyword.strip().lower()
