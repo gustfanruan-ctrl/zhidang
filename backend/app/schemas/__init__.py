@@ -1,13 +1,12 @@
+"""
+智档 · Schema 层（含 US-2 跟进记录生成）
+"""
 from __future__ import annotations
-
 from typing import Any, Literal
-
 from pydantic import BaseModel, Field, field_validator, model_validator
-
 
 class BaseAPIModel(BaseModel):
     model_config = {"extra": "forbid"}
-
 
 class SystemInitPayload(BaseAPIModel):
     username: str = Field(min_length=2, max_length=50)
@@ -21,11 +20,9 @@ class SystemInitPayload(BaseAPIModel):
             raise ValueError("username 不能为空")
         return value.strip()
 
-
 class LoginPayload(BaseAPIModel):
     username: str = Field(min_length=2, max_length=50)
     password: str = Field(min_length=1, max_length=128)
-
 
 class AdminConfigPayload(BaseAPIModel):
     jiandaoyun_api_key: str | None = None
@@ -42,7 +39,6 @@ class AdminConfigPayload(BaseAPIModel):
     agent_b_max_rounds: int | None = Field(default=None, ge=1, le=20)
     data_retention_days: int | None = Field(default=None, ge=30, le=3650)
 
-
 class LlmConfigPayload(BaseAPIModel):
     api_key: str | None = None
     provider: str | None = None
@@ -57,22 +53,18 @@ class LlmConfigPayload(BaseAPIModel):
     nl_query_prompt: str | None = None
     nl_modify_prompt: str | None = None
 
-
 class AgentTaskBase(BaseAPIModel):
     task_id: str | None = None
-
 
 class TranscriptPayload(BaseAPIModel):
     id: str | None = None
     company_name_hint: str | None = None
     raw_text: str | None = None
 
-
 class ImageInputItem(BaseAPIModel):
     type: Literal["base64"] = "base64"
     media_type: str
     data: str
-
 
 class AgentExtractionPayload(AgentTaskBase):
     transcript: TranscriptPayload = Field(default_factory=TranscriptPayload)
@@ -86,17 +78,14 @@ class AgentExtractionPayload(AgentTaskBase):
     agent_tool_timeout_seconds: int | None = Field(default=None, ge=5, le=300)
     agent_max_iterations: int | None = Field(default=None, ge=1, le=20)
 
-
 class ComparisonTaskPayload(AgentTaskBase):
     extraction_result: dict[str, Any]
     existing_record: dict[str, Any]
     transcript_id: str | None = None
     company_id: str | None = None
 
-
 class AgentComparisonPayload(ComparisonTaskPayload):
     pass
-
 
 class ReviewActionPayload(BaseAPIModel):
     operation_id: str
@@ -107,7 +96,6 @@ class ReviewActionPayload(BaseAPIModel):
     card_position: int = Field(ge=1)
     total_cards: int = Field(ge=1)
     edit_details: dict[str, Any] | None = None
-
 
 class ReviewSessionPayload(BaseAPIModel):
     transcript_id: str | None = None
@@ -125,17 +113,14 @@ class ReviewSessionPayload(BaseAPIModel):
             raise ValueError("审核统计不合法")
         return self
 
-
 class SsoGeneratePayload(BaseAPIModel):
     user_name: str = Field(min_length=1, max_length=100)
     user_id: str = Field(min_length=1, max_length=255)
     company_id: str = Field(min_length=1, max_length=255)
 
-
 class SsoEntryQuery(BaseAPIModel):
     token: str = Field(min_length=1)
     company_id: str = Field(min_length=1, max_length=255)
-
 
 class OperationItem(BaseAPIModel):
     op_id: str | None = None
@@ -144,13 +129,11 @@ class OperationItem(BaseAPIModel):
     source_quote: str | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
 
-
 class ExecuteOperationsPayload(BaseAPIModel):
     transcript_id: str | None = None
     company_id: str | None = None
     session_id: str | None = None
     operations: list[OperationItem] = Field(default_factory=list)
-
 
 class ChatPayload(BaseAPIModel):
     message: str = Field(min_length=1, max_length=4000)
@@ -166,7 +149,6 @@ class ChatPayload(BaseAPIModel):
             raise ValueError("message 不能为空")
         return normalized
 
-
 class LlmTestPayload(BaseAPIModel):
     target: str = Field(min_length=1, max_length=100)
     transcript_text: str | None = None
@@ -177,7 +159,6 @@ class LlmTestPayload(BaseAPIModel):
     department: str | None = None
     company_name: str | None = None
 
-
 class TranscriptUploadResponse(BaseAPIModel):
     transcript_id: str
     title: str
@@ -185,26 +166,33 @@ class TranscriptUploadResponse(BaseAPIModel):
     status: str
     preview: str
 
-
 class CompanySearchQuery(BaseAPIModel):
     q: str = Field(default="", max_length=100)
-
 
 class CustomerSwitchPayload(BaseAPIModel):
     company_id_from: str | None = None
     company_id_to: str
     trigger: str = Field(default="manual", max_length=20)
 
-
 class DingtalkFetchPayload(BaseAPIModel):
     conference_id: str = Field(min_length=1, max_length=255)
     raw_text: str | None = None
     title: str | None = Field(default=None, max_length=255)
 
-
 class AdminFetchWidgetsPayload(BaseAPIModel):
     form_name: str = Field(min_length=1, max_length=100)
     entry_id: str = Field(min_length=1, max_length=100)
 
-
 ConfigPayload = AdminConfigPayload
+
+# ── US-2 跟进记录生成 ──────────────────────────────────────
+from .followup import (  # noqa: E402, F401
+    ACTION_PURPOSES,
+    BUSINESS_ACTIONS,
+    GENJIN_TAGS,
+    FollowupActionItem,
+    FollowupGenerateRequest,
+    FollowupRecord,
+    FollowupSubmitRequest,
+    GenjinTag,
+)
