@@ -1376,7 +1376,7 @@ async def _run_extraction_openai_compatible(
     )
     messages = _to_openai_messages(system_prompt + "\n\n" + prompt, user_message)
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": model_name, "messages": messages, "temperature": 0.1}
+    payload = {"model": model_name, "messages": messages, "temperature": 0.1, "max_tokens": 8192, "response_format": {"type": "json_object"}}
 
     _append_llm_line(transcript_id, "调用 OpenAI-compatible /chat/completions")
     try:
