@@ -42,17 +42,13 @@
         >
       </div>
       
-      <!-- 客户选择 -->
-      <div class="customer-select">
-        <label>选择客户：</label>
-        <select v-model="selectedCustomer" @change="updateTranscriptTitle">
-          <option value="">请选择客户</option>
-          <option 
-            v-for="customer in customerOptions" 
-            :key="customer.company_id" 
-            :value="customer.company_id"
-          >{{ customer.company_name }}</option>
-        </select>
+      <!-- 当前客户信息 -->
+      <div class="customer-info" v-if="currentCustomer">
+        <label>当前客户：</label>
+        <div class="customer-display">{{ currentCustomer.company_name }}</div>
+      </div>
+      <div v-else class="customer-warning">
+        <p>⚠️ 请先在侧边栏选择一个客户</p>
       </div>
       
       <!-- 转写标题 -->
@@ -195,14 +191,14 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
+import { useCustomerStore } from '../stores/customer'
 
 // 基础数据
 const fileInput = ref(null)
 const dragover = ref(false)
 const file = ref(null)
-const selectedCustomer = ref('')
 const transcriptTitle = ref('')
 const transcriptText = ref('')
 const analysisResult = ref(null)
@@ -210,13 +206,16 @@ const approvalStatus = ref({}) // 记录用户对各项的批准/拒绝状态
 const logs = ref([])
 const message = ref('')
 const messageType = ref('info')
-const customerOptions = ref([])
 const analysisTaskId = ref(null)
 const analysisStatus = ref('pending')
 
+// 客户 store
+const customerStore = useCustomerStore()
+const { currentCustomer } = customerStore
+
 // 计算属性
 const canStartAnalysis = computed(() => {
-  return file.value && selectedCustomer.value && transcriptTitle.value
+  return file.value && currentCustomer.value && transcriptTitle.value
 })
 
 const canSubmit = computed(() => {
@@ -239,18 +238,16 @@ const analysisStatusText = computed(() => {
 
 // 生命周期钩子
 onMounted(async () => {
-  await loadCustomers()
+  // 恢复当前选中的客户
+  customerStore.hydrateCurrentCustomer()
+  // 确保客户列表已加载
+  await customerStore.fetchCustomers()
+  // 自动更新标题
+  updateTranscriptTitle()
 })
 
 // 方法
-async function loadCustomers() {
-  try {
-    const response = await api.get('/api/v1/customers/list')
-    customerOptions.value = response.data.customers || []
-  } catch (error) {
-    showErrorMessage('加载客户列表失败')
-  }
-}
+// 这里不再需要 loadCustomers 函数，使用 customerStore
 
 function triggerFileSelect() {
   fileInput.value.click()
@@ -303,12 +300,14 @@ async function processFile(fileObj) {
   }
 }
 
+// 监听当前客户变化，自动更新标题
+watch(currentCustomer, () => {
+  updateTranscriptTitle()
+})
+
 function updateTranscriptTitle() {
-  if (!transcriptTitle.value && selectedCustomer.value) {
-    const customer = customerOptions.value.find(c => c.company_id === selectedCustomer.value)
-    if (customer) {
-      transcriptTitle.value = `${customer.company_name} 会议转写`
-    }
+  if (!transcriptTitle.value && currentCustomer.value) {
+    transcriptTitle.value = `${currentCustomer.value.company_name} 会议转写`
   }
 }
 
@@ -350,7 +349,7 @@ async function startAnalysis() {
   
   try {
     // 获取客户名称
-    const customer = customerOptions.value.find(c => c.company_id === selectedCustomer.value)
+    const customer = currentCustomer.value
     const companyName = customer ? customer.company_name : '未知客户'
     
     // 上传转写文件
@@ -394,7 +393,7 @@ async function startAnalysis() {
     
     const comparisonResponse = await api.post('/api/v1/agent/comparison/task', {
       transcript_id: analysisTaskId.value,
-      company_id: selectedCustomer.value,
+      company_id: currentCustomer.value.company_id,
       existing_record: customer,
       extraction_result: extractionResponse.data.result
     })
@@ -923,6 +922,35 @@ function formatTime(date) {
   .primary-button {
     width: 100%;
     max-width: 300px;
+  }
+  
+  .customer-info {
+    margin: 15px 0;
+    padding: 10px;
+    background-color: #f8f9fa;
+    border-radius: 4px;
+  }
+  
+  .customer-info label {
+    display: block;
+    font-weight: bold;
+    margin-bottom: 5px;
+  }
+  
+  .customer-display {
+    padding: 5px 10px;
+    background-color: #e9ecef;
+    border-radius: 4px;
+    font-weight: normal;
+  }
+  
+  .customer-warning {
+    margin: 15px 0;
+    padding: 10px;
+    background-color: #fff3cd;
+    border: 1px solid #ffeaa7;
+    border-radius: 4px;
+    color: #856404;
   }
 }
 </style>

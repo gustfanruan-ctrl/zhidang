@@ -145,15 +145,6 @@
     "跟进记录": {
       "entry_id": "670a28334883adafb152a869",
       "display_fields": ["com_name", "follow_type", "review_date", "review_record", "if_tuisong", "genjin"]
-    },
-    "跟进记录表": {
-      "entry_id": "",
-      "lookup_customer": {
-        "widget": "",
-        "resolve_by": "comname_01"
-      },
-      "field_mapping": {},
-      "forbidden_fields": []
     }
   }
 }
