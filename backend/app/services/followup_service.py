@@ -223,9 +223,8 @@ class FollowupService:
         if payload.company_name:
             data["com_name"] = {"value": payload.company_name}
 
-        # 跟进人
-        if payload.follower:
-            data["follower"] = {"value": payload.follower}
+        # 跟进人（写死）
+        data["follower"] = {"value": "Gust-张小洋"}
 
         # 跟进类型
         data["follow_type"] = {"value": payload.follow_type}
