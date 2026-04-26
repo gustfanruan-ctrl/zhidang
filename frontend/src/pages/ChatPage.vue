@@ -106,7 +106,10 @@ const changjingList = ref([])
 const activeTab = ref('basic')
 const input = ref('')
 const messages = ref([])
-const chatSessionId = ref(crypto.randomUUID())
+function safeUUID() {
+  try { return crypto.randomUUID() } catch { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random()*16|0; return (c==='x'?r:r&0x3|0x8).toString(16) }) }
+}
+const chatSessionId = ref(safeUUID())
 const needsConfirm = ref(false)
 
 function formatValue(value) {
@@ -198,7 +201,7 @@ watch(() => customerStore.resetVersion, () => {
   profile.value = null
   yuqiList.value = []
   changjingList.value = []
-  chatSessionId.value = crypto.randomUUID()
+  chatSessionId.value = safeUUID()
 })
 
 onMounted(async () => {
