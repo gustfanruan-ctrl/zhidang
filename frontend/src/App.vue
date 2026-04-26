@@ -160,10 +160,14 @@ async function searchCustomers() {
   }
 }
 
-async function onCustomerChange(event) {
+ async function onCustomerChange(event) {
   const companyId = event.target.value
   selectedCustomerId.value = companyId
-  const selected = customerStore.customers.find((c) => c.company_id === companyId)
+  // 先在全量列表中查找，搜索模式下可能只在 filteredCustomers 中
+  let selected = customerStore.customers.find((c) => c.company_id === companyId)
+  if (!selected) {
+    selected = filteredCustomers.value.find((c) => c.company_id === companyId)
+  }
   if (selected) {
     await customerStore.switchCustomer(selected, 'manual')
   } else {
