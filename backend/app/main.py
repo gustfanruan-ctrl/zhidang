@@ -1,6 +1,7 @@
 # CR-FINAL-FIX: 修复后端关键流程的鉴权、错误提示、健康检查和安全写入路径。
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import json
@@ -336,6 +337,8 @@ def get_jiandaoyun_runtime_config(cfg: SystemConfig) -> dict[str, Any]:
     api_key = (decrypt_secret(cfg.jiandaoyun_api_key_encrypted) if cfg.jiandaoyun_api_key_encrypted else "") or ""
     return {"api_key": api_key.strip(), "app_id": app_id, "mapping": seed, "main_entry_id": effective_main_entry_id}
 
+
+_REFRESH_LOCK = asyncio.Lock()
 
 async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str, Any]:
     mapping = runtime_cfg.get("mapping", {})
@@ -1013,10 +1016,9 @@ async def customers_list(
             CUSTOMERS_CACHE["at"] = now
         return {"mode": "mock", "customers": customers, "cached_at": (CUSTOMERS_CACHE.get("at") or now).isoformat()}
     now = now_utc()
-    cache_at = CUSTOMER_INDEX_CACHE.get("at")
-    cache_stale = not isinstance(cache_at, datetime) or (now - cache_at).total_seconds() > CUSTOMER_INDEX_CACHE_TTL_SECONDS
     warning: str | None = None
-    if refresh or cache_stale or not CUSTOMER_INDEX_CACHE.get("items"):
+    # 只在显式刷新或缓存为空时触发全量查询；缓存过期不自动刷，避免重复查询
+    if refresh or not CUSTOMER_INDEX_CACHE.get("items"):
         try:
             await refresh_customer_index_cache(runtime_cfg)
         except JiandaoyunClientError as exc:
@@ -1204,60 +1206,34 @@ async def search_customers(
     db: Session = Depends(get_db),
     user: dict[str, Any] = Depends(require_auth),
 ):
-    """实时直查简道云客户主表，关键词搜索"""
+    """从本地缓存索引中模糊搜索客户，不再直查简道云"""
     limit = max(1, min(limit, 200))
-    cfg = ensure_system_config(db)
-    runtime_cfg = get_jiandaoyun_runtime_config(cfg)
-    mapping = runtime_cfg.get("mapping", {})
-    main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
-    app_id = runtime_cfg.get("app_id", "")
-    api_key = runtime_cfg.get("api_key", "")
-    entry_id = str(main_form.get("entry_id", "")).strip()
+    keyword_norm = keyword.strip().lower()
+    cached_items = CUSTOMER_INDEX_CACHE.get("items", []) or []
 
-    if not api_key or not app_id or not entry_id:
-        return {"customers": [], "mode": "unconfigured", "warning": "简道云未配置"}
+    if not cached_items:
+        # 缓存为空时回退到 customers_list 的逻辑刷新一次
+        return await customers_list(keyword=keyword, limit=limit, refresh=True, db=db, user=user)
 
-    if not keyword or not keyword.strip():
-        return {"customers": [], "mode": "search", "warning": "关键词不能为空"}
+    if not keyword_norm:
+        return {"customers": cached_items[:limit], "mode": "cache", "total": len(cached_items)}
 
-    keyword_norm = keyword.strip()
-    client = JiandaoyunClient(api_key=api_key)
-    display_fields = list(main_form.get("display_fields", []) or [])
-    for f in ["comname_01", "com_name"]:
-        if f not in display_fields:
-            display_fields.append(f)
-
-    filter_condition = {
-        "rel": "or",
-        "cond": [
-            {"field": "comname_01", "type": "text", "method": "like", "value": [keyword_norm]},
-            {"field": "com_name", "type": "text", "method": "like", "value": [keyword_norm]},
-        ]
-    }
-
-    try:
-        page = await client.query_data_list(
-            app_id=app_id,
-            entry_id=entry_id,
-            fields=display_fields,
-            limit=limit,
-            filter_condition=filter_condition,
-        )
-        rows = page.get("data", []) or []
-        customers = [
-            {
-                "company_id": row.get("_id"),
-                "company_name": row.get("comname_01") or row.get("com_name") or "未知公司",
-                "comname_01": row.get("comname_01"),
-                "com_name": row.get("com_name"),
-                "raw": row,
-            }
-            for row in rows
-            if row.get("_id")
-        ]
-        return {"customers": customers, "mode": "jiandaoyun_search", "total": len(customers)}
-    except JiandaoyunClientError as exc:
-        return {"customers": [], "mode": "error", "warning": str(exc)}
+    filtered = [
+        item
+        for item in cached_items
+        if keyword_norm
+        in " ".join(
+            [
+                str(item.get("company_name", "")),
+                str(item.get("comname_01", "")),
+                str(item.get("com_name", "")),
+                str(item.get("企业名称", "")),
+                str(item.get("客户名称", "")),
+                str(item.get("公司名称", "")),
+            ]
+        ).lower()
+    ]
+    return {"customers": filtered[:limit], "mode": "cache_search", "total": len(filtered)}
 
 
 @app.get("/api/v1/customers/{company_id}/profile")
@@ -2179,6 +2155,31 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("detail", "写入简道云失败"))
     return {"message": "跟进记录已成功提交到简道云", "data": result.get("data")}
+
+
+@app.on_event("startup")
+async def startup_refresh_customer_index():
+    """应用启动时自动全量刷新一次客户索引（仅在配置完整时）"""
+    from sqlalchemy.orm import sessionmaker
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = SessionLocal()
+    try:
+        cfg = db.query(SystemConfig).first()
+        if cfg:
+            runtime_cfg = get_jiandaoyun_runtime_config(cfg)
+            api_key = runtime_cfg.get("api_key", "")
+            app_id = runtime_cfg.get("app_id", "")
+            mapping = runtime_cfg.get("mapping", {})
+            main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
+            entry_id = str(main_form.get("entry_id", "")).strip()
+            if api_key and app_id and entry_id:
+                logger.info("启动时自动刷新客户索引...")
+                await refresh_customer_index_cache(runtime_cfg)
+                logger.info(f"启动刷新完成，共缓存 {len(CUSTOMER_INDEX_CACHE.get('items', []))} 条客户")
+    except Exception as exc:
+        logger.warning(f"启动时自动刷新客户索引失败: {exc}")
+    finally:
+        db.close()
 
 
 @app.middleware("http")
