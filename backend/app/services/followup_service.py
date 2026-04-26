@@ -219,6 +219,9 @@ class FollowupService:
         # lookup 关联公司
         if payload.company_id:
             data["_widget_1744600409845"] = {"value": payload.company_id}
+        # 公司名称
+        if payload.company_name:
+            data["com_name"] = {"value": payload.company_name}
 
         # 跟进人
         if payload.follower:

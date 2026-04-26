@@ -90,6 +90,8 @@ class FollowupSubmitRequest(BaseAPIModel):
     """提交跟进记录到简道云"""
     # lookup 关联公司 → _widget_1744600409845
     company_id: str
+    # 公司名称 → com_name (combo)
+    company_name: str = ""
     # 跟进人 → follower (user)
     follower: str = ""
     # 跟进类型 → follow_type (combo)

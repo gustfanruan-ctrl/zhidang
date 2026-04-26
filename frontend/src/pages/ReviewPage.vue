@@ -439,6 +439,7 @@ export default {
       try {
         const payload = {
           company_id: this.companyId,
+          company_name: this.companyName,
           follower: this.reviewData.follower || '',
           follow_type: this.reviewData.follow_type,
           review_date: this.reviewData.review_date,
