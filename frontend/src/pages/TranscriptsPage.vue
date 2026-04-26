@@ -537,7 +537,7 @@ async function startAnalysis() {
   }
 }
 
-function markForApproval(type, index, status) {
+async function markForApproval(type, index, status) {
   if (!analysisResult.value) return
   
   const item = analysisResult.value[`${type}s`][index]
@@ -553,6 +553,17 @@ function markForApproval(type, index, status) {
   } else if (status === 'reject') {
     item.approved = false
     item.rejected = true
+  }
+
+  // 同步到后端 OPERATION_CARD_STORE
+  try {
+    await api.post('/api/v1/operations/review', {
+      transcript_id: analysisTaskId.value,
+      card_id: item.operationId,
+      action: status === 'approve' ? 'approve' : 'reject',
+    })
+  } catch (e) {
+    console.warn('同步审核状态失败:', e)
   }
   
   addLog(`${type === 'expectation' ? '预期' : '场景'} "${item.summary || item.title}" 被标记为${status === 'approve' ? '批准' : '拒绝'}`)
