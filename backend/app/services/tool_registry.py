@@ -525,14 +525,17 @@ async def _exec_chat_query_records(params: dict[str, Any], runtime_cfg: dict[str
     if not (company_id and entry_id and lookup_widget and api_key and app_id):
         return {"records": [], "total": 0, "warning": "缺少查询必要配置"}
     client = JiandaoyunClient(api_key=api_key)
-    page = await client.query_data_list(
-        app_id=app_id,
-        entry_id=entry_id,
-        filter_condition={"rel": "and", "cond": [{"field": lookup_widget, "type": "lookup", "method": "eq", "value": [company_id]}]},
-        limit=20,
-    )
-    data = page.get("data", []) or []
-    return {"records": data, "total": len(data)}
+    try:
+        page = await client.query_data_list(
+            app_id=app_id,
+            entry_id=entry_id,
+            filter_condition={"rel": "and", "cond": [{"field": lookup_widget, "type": "lookup", "method": "eq", "value": [company_id]}]},
+            limit=20,
+        )
+        data = page.get("data", []) or []
+        return {"records": data, "total": len(data)}
+    except JiandaoyunClientError as exc:
+        return {"records": [], "total": 0, "error": str(exc), "hint": "简道云 API 调用失败，可能是频率限制或配置问题，请稍后重试"}
 
 
 def build_chat_executors(runtime_cfg: dict[str, Any]) -> dict[str, ToolExecutor]:
