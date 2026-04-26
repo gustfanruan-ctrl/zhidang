@@ -218,7 +218,9 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def hash_company_id(company_id: str) -> str:
+def hash_company_id(company_id: str | None) -> str:
+    if not company_id:
+        company_id = ""
     return hashlib.sha256(company_id.encode("utf-8")).hexdigest()
 
 
@@ -1407,8 +1409,8 @@ async def run_extraction_task(payload: AgentExtractionPayload, cfg: SystemConfig
     input_type = payload_data.get("input_type", "text")
     content = payload_data.get("content") or transcript_obj.get("raw_text")
     images = payload_data.get("images") or []
-    llm_request_timeout = int(payload_data.get("llm_request_timeout_seconds") or 120)
-    llm_connect_timeout = int(payload_data.get("llm_connect_timeout_seconds") or 20)
+    llm_request_timeout = int(payload_data.get("llm_request_timeout_seconds") or 300)
+    llm_connect_timeout = int(payload_data.get("llm_connect_timeout_seconds") or 30)
     agent_total_timeout = int(payload_data.get("agent_total_timeout_seconds") or AgentRunner.TOTAL_TIMEOUT_SECONDS)
     agent_tool_timeout = int(payload_data.get("agent_tool_timeout_seconds") or AgentRunner.TOOL_TIMEOUT_SECONDS)
     agent_max_iterations = int(payload_data.get("agent_max_iterations") or AgentRunner.MAX_ITERATIONS)
@@ -1795,7 +1797,7 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         model_name=cfg.nl_chat_model or llm_cfg.get("model_name") or ("auto" if provider in {"dashscope", "openai_compatible"} else "claude-sonnet-4-5-20250929"),
         max_iterations=8,
         tool_timeout_seconds=30,
-        total_timeout_seconds=120,
+        total_timeout_seconds=300,
         write_tools={"create_customer_record", "update_customer_record", "delete_customer_record"},
         write_form_configs=forms_cfg,
         write_preview_builder=build_preview_text,

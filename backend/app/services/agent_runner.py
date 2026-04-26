@@ -27,7 +27,7 @@ class AgentResult:
 class AgentRunner:
     MAX_ITERATIONS = 8
     TOOL_TIMEOUT_SECONDS = 30
-    TOTAL_TIMEOUT_SECONDS = 120
+    TOTAL_TIMEOUT_SECONDS = 300
 
     def __init__(
         self,

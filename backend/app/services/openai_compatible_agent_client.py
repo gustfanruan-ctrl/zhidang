@@ -28,7 +28,7 @@ class OpenAICompatibleResponse:
 
 
 class OpenAICompatibleAgentClient:
-    def __init__(self, *, base_url: str, api_key: str, request_timeout_seconds: int = 120, connect_timeout_seconds: int = 20) -> None:
+    def __init__(self, *, base_url: str, api_key: str, request_timeout_seconds: int = 300, connect_timeout_seconds: int = 30) -> None:
         base = (base_url or "").rstrip("/")
         if not base:
             raise ValueError("OpenAI-compatible base_url 未配置")
