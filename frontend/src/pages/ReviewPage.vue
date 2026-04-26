@@ -130,7 +130,7 @@
       
       <!-- 提交按钮 -->
       <div class="form-row">
-        <button @click="submitReview" :disabled="!canSubmit" class="submit-btn">提交到简道云</button>
+        <button @click="submitReview" :disabled="!canSubmit || submitting" class="submit-btn">{{ submitting ? '提交中...' : '提交到简道云' }}</button>
       </div>
     </div>
     
@@ -158,6 +158,7 @@ export default {
         review_system_prompt: ''
       },
       generating: false,
+      submitting: false,
       showAdvanced: false,
       message: '',
       messageType: 'info'
@@ -274,6 +275,9 @@ export default {
     
     async submitReview() {
       if (!this.canSubmit) return
+      if (this.submitting) return
+      
+      this.submitting = true
       
       try {
         const payload = {
@@ -286,6 +290,8 @@ export default {
         this.showMessage('跟进记录已成功提交到简道云', 'success')
       } catch (error) {
         this.showMessage('提交到简道云失败', 'error')
+      } finally {
+        this.submitting = false
       }
     },
     

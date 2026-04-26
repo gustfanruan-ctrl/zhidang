@@ -44,22 +44,22 @@
             "未知"
           ]
         },
-        "跟进形式": {
-          "widget": "follow_form",
-          "type": "radiogroup",
-          "safety": "restricted",
-          "allowed_values": [
-            "TODO: 待补全"
-          ]
-        },
-        "客户合作级别": {
-          "widget": "comcooplevel",
-          "type": "radiogroup",
-          "safety": "restricted",
-          "allowed_values": [
-            "TODO: 待补全"
-          ]
-        }
+    "跟进形式": {
+      "widget": "follow_form",
+      "type": "radiogroup",
+      "safety": "writable",
+      "allowed_values": [
+        "TODO: 待补全"
+      ]
+    },
+    "客户合作级别": {
+      "widget": "comcooplevel",
+      "type": "radiogroup",
+      "safety": "writable",
+      "allowed_values": [
+        "TODO: 待补全"
+      ]
+    }
       },
       "forbidden_fields": [
         "com_id",
@@ -89,14 +89,14 @@
           "type": "textarea",
           "safety": "writable"
         },
-        "预期状态": {
-          "widget": "yuqi_status",
-          "type": "radiogroup",
-          "safety": "restricted",
-          "allowed_values": [
-            "TODO: 待补全"
-          ]
-        },
+    "预期状态": {
+      "widget": "yuqi_status",
+      "type": "radiogroup",
+      "safety": "writable",
+      "allowed_values": [
+        "TODO: 待补全"
+      ]
+    },
         "推进想法": {
           "widget": "promote_idea",
           "type": "textarea",

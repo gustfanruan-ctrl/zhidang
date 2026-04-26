@@ -33,7 +33,8 @@ export const useCustomerStore = defineStore('customer', {
     },
     async fetchCustomers(force = false, keyword = '') {
       const normalizedKeyword = (keyword || '').trim()
-      if (!force && !normalizedKeyword && this.loadCache()) return
+      // 只有当缓存非空时才允许命中缓存（避免缓存空结果）
+      if (!force && !normalizedKeyword && this.loadCache() && this.customers.length > 0) return
       const params = normalizedKeyword
         ? { keyword: normalizedKeyword, limit: 200 }
         : { limit: 500 }

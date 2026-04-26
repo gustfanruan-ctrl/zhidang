@@ -343,13 +343,19 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
     app_id = runtime_cfg.get("app_id", "")
     api_key = runtime_cfg.get("api_key", "")
     entry_id = str(main_form.get("entry_id", "")).strip()
+    
+    logger.info(f"刷新客户索引缓存: app_id={app_id}, entry_id={entry_id}")
+    
     if not api_key or not app_id or not entry_id:
+        logger.warning("简道云配置不完整，无法刷新客户索引缓存")
         return CUSTOMER_INDEX_CACHE
 
     display_fields = list(main_form.get("display_fields", []) or [])
     for required_field in ["comname_01", "com_name", "com_type", "revenue_level", "if_access", "follow_form"]:
         if required_field not in display_fields:
             display_fields.append(required_field)
+    
+    logger.info(f"客户查询字段: {display_fields}")
 
     client = JiandaoyunClient(api_key=api_key)
     cursor: str | None = None
@@ -357,7 +363,10 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
     seen_cursors: set[str] = set()
     max_pages = 40
     page_size = 100
-    for _ in range(max_pages):
+    error_count = 0
+    max_errors = 3
+    
+    for page_num in range(max_pages):
         try:
             page = await client.query_data_list(
                 app_id=app_id,
@@ -366,34 +375,56 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
                 limit=page_size,
                 data_id=cursor,
             )
-        except JiandaoyunClientError:
-            try:
-                # Fallback to full-row query when configured display fields are invalid.
-                page = await client.query_data_list(
-                    app_id=app_id,
-                    entry_id=entry_id,
-                    fields=None,
-                    limit=page_size,
-                    data_id=cursor,
-                )
-            except JiandaoyunClientError:
+        except JiandaoyunClientError as exc:
+            error_count += 1
+            logger.error(f"获取客户数据失败（尝试 {error_count}/{max_errors}）: {str(exc)}")
+            if error_count >= max_errors:
+                logger.error(f"已达到最大错误次数 {max_errors}，停止获取客户数据")
                 break
+            
+            # 如果是第一次错误，尝试不带 fields 参数的查询
+            if error_count == 1:
+                try:
+                    logger.info("尝试不带字段参数的查询")
+                    page = await client.query_data_list(
+                        app_id=app_id,
+                        entry_id=entry_id,
+                        fields=None,
+                        limit=page_size,
+                        data_id=cursor,
+                    )
+                except JiandaoyunClientError as exc2:
+                    logger.error(f"不带字段参数的查询也失败: {str(exc2)}")
+                    continue
+            else:
+                continue
+        
+        if not page.get("data"):
+            logger.info(f"第 {page_num+1} 页无数据，结束获取")
+            break
+            
         batch = page.get("data", []) or []
         if not batch:
+            logger.info(f"第 {page_num+1} 页数据为空，结束获取")
             break
+            
+        logger.info(f"获取到第 {page_num+1} 页数据，共 {len(batch)} 条")
         all_rows.extend(batch)
+        
         next_cursor = batch[-1].get("_id")
         if not next_cursor or next_cursor in seen_cursors:
+            logger.info("已到达最后一页或检测到重复的游标")
             break
         seen_cursors.add(next_cursor)
         cursor = next_cursor
         if len(batch) < page_size:
+            logger.info("获取的数据少于页面大小，已到最后一页")
             break
 
     customers = [
         {
             "company_id": row.get("_id"),
-            "company_name": row.get("comname_01") or row.get("com_name") or "未知公司",
+            "company_name": row.get("comname_01") or row.get("com_name") or row.get("企业名称") or row.get("客户名称") or row.get("公司名称") or "未知公司",
             "comname_01": row.get("comname_01"),
             "com_name": row.get("com_name"),
             "com_type": row.get("com_type"),
@@ -960,6 +991,7 @@ async def customers_list(
     db: Session = Depends(get_db),
     user: dict[str, Any] = Depends(require_auth),
 ):
+    """获取客户列表，支持关键字搜索、分页和刷新缓存"""
     limit = max(1, min(limit, 500))
     cfg = ensure_system_config(db)
     runtime_cfg = get_jiandaoyun_runtime_config(cfg)
@@ -1010,7 +1042,7 @@ async def customers_list(
             cached_items = [
                 {
                     "company_id": row.get("_id"),
-                    "company_name": row.get("comname_01") or row.get("com_name") or "未知公司",
+                    "company_name": row.get("comname_01") or row.get("com_name") or row.get("企业名称") or row.get("客户名称") or row.get("公司名称") or "未知公司",
                     "comname_01": row.get("comname_01"),
                     "com_name": row.get("com_name"),
                     "raw": row,
@@ -1052,6 +1084,9 @@ async def customers_list(
                     str(item.get("company_name", "")),
                     str(item.get("comname_01", "")),
                     str(item.get("com_name", "")),
+                    str(item.get("企业名称", "")),
+                    str(item.get("客户名称", "")),
+                    str(item.get("公司名称", "")),
                 ]
             ).lower()
         ]
@@ -1059,6 +1094,14 @@ async def customers_list(
         filtered = cached_items
 
     customers = filtered[:limit]
+    
+    # 如果没有客户数据，提供更详细的错误信息
+    if not customers and not warning:
+        if runtime_cfg.get("api_key") and runtime_cfg.get("app_id") and main_form.get("entry_id"):
+            warning = "未找到任何客户数据，请检查简道云表单是否有数据"
+        else:
+            warning = "简道云配置不完整，请先配置简道云API密钥和应用ID"
+    
     return {
         "mode": "cache",
         "search_mode": "local_index",
@@ -1067,6 +1110,17 @@ async def customers_list(
         "cached_at": (CUSTOMER_INDEX_CACHE.get("at") or now).isoformat() if isinstance(CUSTOMER_INDEX_CACHE.get("at"), datetime) else now.isoformat(),
         "cache_total": len(cached_items),
         "warning": warning,
+        "debug_info": {
+            "runtime_configured": bool(
+                runtime_cfg.get("api_key") and 
+                runtime_cfg.get("app_id") and 
+                main_form.get("entry_id")
+            ),
+            "app_id": runtime_cfg.get("app_id"),
+            "main_entry_id": main_form.get("entry_id"),
+            "cache_items_count": len(cached_items),
+            "cached_at_is_datetime": isinstance(CUSTOMER_INDEX_CACHE.get("at"), datetime)
+        }
     }
 
 
@@ -1598,7 +1652,7 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
     if payload_data.get("confirm"):
         pending = PENDING_CHAT_ACTIONS.pop(session_id, None)
         if not pending:
-            return {"reply": "没有待确认的操作", "session_id": session_id, "needs_confirmation": False}
+            return {"reply": "操作已过期，请重新发起对话。", "session_id": session_id, "needs_confirmation": False}
         runtime_cfg = get_jiandaoyun_runtime_config(cfg)
         mapping_forms = ((runtime_cfg.get("mapping") or {}).get("forms") or {})
         api_key = str(runtime_cfg.get("api_key") or "")
@@ -1835,6 +1889,35 @@ def api_health(db: Session = Depends(get_db)):
     return {"ok": True, "status": "healthy", "components": {"database": {"status": "healthy", "latency_ms": 3}, "llm_api": {"status": "healthy", "latency_ms": 450}, "jiandaoyun_api": {"status": "healthy", "latency_ms": 120}}, "timestamp": now_utc().isoformat()}
 
 
+@app.get("/api/v1/debug/customers")
+async def debug_customers(db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    """调试客户数据获取情况"""
+    from .models import SystemConfig
+    
+    cfg = ensure_system_config(db)
+    runtime_cfg = get_jiandaoyun_runtime_config(cfg)
+    mapping = runtime_cfg.get("mapping", {})
+    main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
+    
+    return {
+        "jiandaoyun_configured": bool(
+            runtime_cfg.get("api_key") and 
+            runtime_cfg.get("app_id") and 
+            main_form.get("entry_id")
+        ),
+        "api_key_set": bool(runtime_cfg.get("api_key")),
+        "app_id": runtime_cfg.get("app_id"),
+        "main_entry_id": str(main_form.get("entry_id", "")).strip(),
+        "cache_status": {
+            "customers_cache_at": CUSTOMERS_CACHE.get("at"),
+            "customer_index_cache_at": CUSTOMER_INDEX_CACHE.get("at"),
+            "customer_index_items_count": len(CUSTOMER_INDEX_CACHE.get("items", [])),
+        },
+        "local_transcripts_customers": len(fetch_customers_for_user(db, user)),
+        "first_local_customers": fetch_customers_for_user(db, user)[:5],
+    }
+
+
 @app.get("/api/v1/review/tags")
 async def get_review_tags():
     """获取跟进标签树"""
@@ -1930,7 +2013,13 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
         raise HTTPException(status_code=500, detail="简道云未配置")
 
     # 读取跟进记录表单 entry_id（从字段映射中查找，或使用默认值）
-    entry_id = cfg.jiandaoyun_review_entry_id or "670a28334883adafb152a869"
+    field_mappings = cfg.field_mappings or {}
+    entry_id = (
+        field_mappings.get("jiandaoyun", {})
+        .get("forms", {})
+        .get("跟进记录", {})
+        .get("entry_id", "670a28334883adafb152a869")
+    )
 
     jiandaoyun_data = {
         "com_name": {"value": data.get("com_name", "")},
@@ -1941,6 +2030,9 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     }
     if data.get("comid"):
         jiandaoyun_data["comid"] = {"value": data["comid"]}
+    company_id = data.get("company_id")
+    if company_id:
+        jiandaoyun_data["_widget_1744600409845"] = {"value": company_id}
     if data.get("contact_names"):
         jiandaoyun_data["contname"] = {"value": data["contact_names"]}
 

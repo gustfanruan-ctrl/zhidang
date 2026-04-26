@@ -136,16 +136,30 @@ async function searchCustomers() {
   }
   try {
     const data = await customerStore.fetchCustomers(true, keyword)
-    // 双保险：后端关键词查询 + 前端本地过滤，确保下拉不会退化成全量列表。
-    const k = keyword.toLowerCase()
-    filteredCustomers.value = (customerStore.customers || []).filter((c) =>
-      String(c.company_name || '').toLowerCase().includes(k),
-    )
+    // 直接信任后端返回的搜索结果，不做二次本地过滤
+    filteredCustomers.value = customerStore.customers || []
     customerWarning.value = data?.warning || ''
     customerStatusText.value = `关键词 "${keyword}" 命中 ${filteredCustomers.value.length} 条`
   } catch (error) {
-    customerWarning.value = error?.response?.data?.detail || error?.message || '搜索失败'
-    customerStatusText.value = '搜索失败'
+    console.error('客户搜索错误:', error)
+    
+    // 尝试获取更详细的错误信息
+    let errorMessage = '搜索失败'
+    if (error?.response?.data?.detail) {
+      errorMessage = error.response.data.detail
+    } else if (error?.response?.data?.warning) {
+      errorMessage = error.response.data.warning
+    } else if (error?.response?.data?.debug_info) {
+      console.log('调试信息:', error.response.data.debug_info)
+      if (error.response.data.debug_info.runtime_configured === false) {
+        errorMessage = '简道云未配置或配置无效'
+      } else if (error.response.data.debug_info.cache_items_count === 0) {
+        errorMessage = '未找到匹配的客户，请检查搜索词或简道云表单数据'
+      }
+    }
+    
+    customerWarning.value = errorMessage
+    customerStatusText.value = errorMessage
   } finally {
     customerLoading.value = false
   }
@@ -170,8 +184,23 @@ async function refreshCustomers() {
     customerWarning.value = data?.warning || ''
     customerStatusText.value = `刷新完成，共 ${filteredCustomers.value.length} 条`
   } catch (error) {
-    customerWarning.value = error?.response?.data?.detail || error?.message || '刷新失败'
-    customerStatusText.value = '刷新失败'
+    console.error('客户列表刷新错误:', error)
+    
+    // 尝试获取更详细的错误信息
+    let errorMessage = '刷新失败'
+    if (error?.response?.data?.detail) {
+      errorMessage = error.response.data.detail
+    } else if (error?.response?.data?.debug_info) {
+      console.log('调试信息:', error.response.data.debug_info)
+      if (error.response.data.debug_info.runtime_configured === false) {
+        errorMessage = '简道云未配置或配置无效'
+      } else if (error.response.data.debug_info.cache_items_count === 0) {
+        errorMessage = '客户数据为空，请检查简道云表单是否有数据'
+      }
+    }
+    
+    customerWarning.value = errorMessage
+    customerStatusText.value = errorMessage
   } finally {
     customerLoading.value = false
   }

@@ -70,10 +70,24 @@ class JiandaoyunClient:
         timeout = httpx.Timeout(30.0)
 
         async with httpx.AsyncClient(timeout=timeout) as client:
+            # 首先尝试 V5 API
             v5_url = f"{self.v5_base_url}/app/entry/widget/list"
-            v5_response = await client.post(v5_url, headers=self._headers, json=payload)
-            if v5_response.status_code < 400:
-                return v5_response.json()
+            try:
+                v5_response = await client.post(v5_url, headers=self._headers, json=payload)
+                if v5_response.status_code < 400:
+                    return v5_response.json()
+                # 处理特定的错误代码
+                if v5_response.status_code == 400:
+                    try:
+                        error_data = v5_response.json()
+                        if error_data.get("code") == 3005:
+                            # 参数错误，可能 entry_id 不存在
+                            raise JiandaoyunClientError(f"表单ID无效: {entry_id}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                if isinstance(e, JiandaoyunClientError):
+                    raise
 
             # Fallback to V2 when V5 request fails.
             v2_url = f"{self.v2_base_url}/app/{app_id}/entry/{entry_id}/widgets"
@@ -96,7 +110,7 @@ class JiandaoyunClient:
         payload: dict[str, Any] = {
             "app_id": app_id,
             "entry_id": entry_id,
-            "limit": limit,
+            "limit": max(1, min(limit, 100)),  # 确保 limit 在 1-100 之间
         }
         if fields:
             payload["fields"] = fields
@@ -107,14 +121,30 @@ class JiandaoyunClient:
 
         url = f"{self.v5_base_url}/app/entry/data/list"
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            v5_response = await client.post(url, headers=self._headers, json=payload)
-            if v5_response.status_code < 400:
-                return v5_response.json()
+            try:
+                v5_response = await client.post(url, headers=self._headers, json=payload)
+                if v5_response.status_code < 400:
+                    return v5_response.json()
+                # 处理特定的错误代码
+                if v5_response.status_code == 400:
+                    try:
+                        error_data = v5_response.json()
+                        if error_data.get("code") == 3005:
+                            # 参数错误，可能 entry_id 不存在
+                            raise JiandaoyunClientError(f"表单ID无效: {entry_id}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                if isinstance(e, JiandaoyunClientError):
+                    raise
+
+            # Fallback to V2 when V5 request fails.
             v2_url = f"{self.v2_base_url}/app/{app_id}/entry/{entry_id}/data/list"
             v2_response = await client.post(v2_url, headers=self._headers, json=payload)
             if v2_response.status_code < 400:
                 return v2_response.json()
-        self._raise_for_status(v5_response.status_code, v5_response.text)
+        self._raise_for_status(v5_response.status_code if 'v5_response' in locals() else 500, 
+                               v5_response.text if 'v5_response' in locals() else "Failed to query data")
 
     async def query_single_data(self, app_id: str, entry_id: str, data_id: str) -> dict[str, Any]:
         payload = {"app_id": app_id, "entry_id": entry_id, "data_id": data_id}

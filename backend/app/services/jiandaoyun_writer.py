@@ -18,14 +18,14 @@ class JiandaoyunWriter:
     async def create_record(self, entry_id: str, data: dict[str, Any]) -> dict[str, Any]:
         try:
             result = await self.client.create_data(self.app_id, entry_id, data)
-            return {"success": True, "data": result}
+            return {"success": True, **result}
         except JiandaoyunClientError as exc:
             return _err("create_failed", str(exc))
 
     async def update_record(self, entry_id: str, data_id: str, data: dict[str, Any]) -> dict[str, Any]:
         try:
             result = await self.client.update_data(self.app_id, entry_id, data_id, data)
-            return {"success": True, "data": result}
+            return {"success": True, **result}
         except JiandaoyunClientError as exc:
             return _err("update_failed", str(exc))
 
@@ -51,7 +51,12 @@ class JiandaoyunWriter:
             for row in existing_rows:
                 if not isinstance(row, dict):
                     continue
-                sanitized = {k: {"value": v} for k, v in row.items() if k != "_id"}
+                sanitized: dict[str, Any] = {}
+                for k, v in row.items():
+                    if k == "_id":
+                        sanitized["_id"] = {"value": v}
+                    else:
+                        sanitized[k] = {"value": v}
                 sanitized_existing.append(sanitized)
             final_rows = sanitized_existing + new_rows
             payload = {subform_widget: {"value": final_rows}}
