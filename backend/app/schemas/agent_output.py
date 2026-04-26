@@ -80,6 +80,10 @@ class OperationCard(BaseModel):
     review_status: Literal["pending", "approved", "rejected"] = "pending"
     execute_status: Literal["pending", "success", "failed", "skipped"] = "pending"
     change_items: list[RecordChangeItem] = []
+    # 写入时需要的关联字段
+    customer_id: str | None = None
+    lookup_widget: str | None = None
+    data_id: str | None = None
 
     @field_validator("field_name")
     @classmethod
