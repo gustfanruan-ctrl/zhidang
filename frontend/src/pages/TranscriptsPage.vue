@@ -477,7 +477,7 @@ async function startAnalysis() {
       input_type: file.value.name.endsWith('.pdf') || file.value.name.endsWith('.doc') || file.value.name.endsWith('.docx') ? 'text' : 
                    file.value.name.endsWith('.jpg') || file.value.name.endsWith('.jpeg') || file.value.name.endsWith('.png') || file.value.name.endsWith('.webp') ? 'image' : 'text',
       content: transcriptText.value,
-      transcript: uploadResult || { title: transcriptTitle.value }
+      transcript: uploadResult ? { id: uploadResult.transcript_id, raw_text: transcriptText.value } : { raw_text: transcriptText.value }
     })
     
     addLog('提取任务完成')
