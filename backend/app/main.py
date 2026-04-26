@@ -1534,7 +1534,8 @@ async def run_extraction_task(payload: AgentExtractionPayload, cfg: SystemConfig
                     tmpl = EXTRACTION_EXPAND_EXPECTATION_PROMPT
                 else:
                     tmpl = EXTRACTION_EXPAND_SCENARIO_PROMPT
-                prompt = tmpl.format(title=title, brief=brief, source_quote=quote, transcript=transcript_text[:6000])
+                # 用 replace 代替 format，避免值中的花括号干扰
+                prompt = tmpl.replace("{title}", title).replace("{brief}", brief).replace("{source_quote}", quote).replace("{transcript}", transcript_text[:6000])
                 try:
                     r = await _call_llm_json(
                         transcript_id=transcript_id,
@@ -1545,7 +1546,15 @@ async def run_extraction_task(payload: AgentExtractionPayload, cfg: SystemConfig
                         connect_timeout_seconds=llm_connect_timeout,
                         label=f"Phase2-{title[:20]}",
                     )
-                    return r.get("facts", [])
+                    facts = r.get("facts")
+                    if isinstance(facts, list):
+                        return facts
+                    # LLM 可能直接返回 fact 对象而非 {"facts":[...]}
+                    if isinstance(r, dict) and "field_name" in r:
+                        return [r]
+                    # LLM 可能返回了其他结构，尝试提取
+                    _append_llm_line(transcript_id, f"Phase2 返回异常结构 [{title[:20]}]: {str(r)[:100]}")
+                    return []
                 except Exception as e:
                     _append_llm_line(transcript_id, f"展开失败 [{title[:30]}]: {e}")
                     return []
