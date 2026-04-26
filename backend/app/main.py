@@ -40,6 +40,14 @@ from .services.tool_registry import build_chat_executors, get_chat_tools, get_ex
 from .sso import build_sso_token, verify_sso_token
 from .validators import validate_operations
 from .writeflow import merge_and_write
+from .services.followup_service import FollowupService
+from .schemas.followup import (
+    ACTION_PURPOSES as FOLLOWUP_ACTION_PURPOSES,
+    BUSINESS_ACTIONS as FOLLOWUP_BUSINESS_ACTIONS,
+    GENJIN_TAGS as FOLLOWUP_GENJIN_TAGS,
+    FollowupGenerateRequest,
+    FollowupSubmitRequest,
+)
 
 try:
     from anthropic import AsyncAnthropic
@@ -2136,6 +2144,49 @@ async def request_logger(request: Request, call_next):
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("unhandled error on %s", request.url.path)
     return JSONResponse(status_code=500, content={"detail": "系统异常"})
+
+
+# ── US-2 跟进记录生成路由 ──────────────────────────────────
+
+@app.get("/api/v1/followup/tags")
+def followup_tags(user: dict[str, Any] = Depends(require_auth)):
+    return {"tags": FOLLOWUP_GENJIN_TAGS}
+
+
+@app.get("/api/v1/followup/enums")
+def followup_enums(user: dict[str, Any] = Depends(require_auth)):
+    return {
+        "business_actions": FOLLOWUP_BUSINESS_ACTIONS,
+        "action_purposes": FOLLOWUP_ACTION_PURPOSES,
+    }
+
+
+@app.post("/api/v1/followup/generate")
+async def followup_generate(payload: FollowupGenerateRequest, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    cfg = ensure_system_config(db)
+    runtime_cfg = get_jiandaoyun_runtime_config(cfg)
+    api_key = runtime_cfg.get("api_key", "")
+    app_id = runtime_cfg.get("app_id", "")
+    llm_key = decrypt_secret(cfg.llm_api_key_encrypted) or ""
+    llm_base = cfg.llm_base_url or ""
+    llm_model = cfg.nl_chat_model or cfg.agent_a_model or "qwen-plus"
+    svc = FollowupService(api_key=api_key, app_id=app_id, llm_api_key=llm_key, llm_base_url=llm_base, llm_model=llm_model)
+    record = await svc.generate(payload)
+    return record.model_dump()
+
+
+@app.post("/api/v1/followup/submit")
+async def followup_submit(payload: FollowupSubmitRequest, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    cfg = ensure_system_config(db)
+    runtime_cfg = get_jiandaoyun_runtime_config(cfg)
+    api_key = runtime_cfg.get("api_key", "")
+    app_id = runtime_cfg.get("app_id", "")
+    llm_key = decrypt_secret(cfg.llm_api_key_encrypted) or ""
+    llm_base = cfg.llm_base_url or ""
+    llm_model = cfg.nl_chat_model or cfg.agent_a_model or "qwen-plus"
+    svc = FollowupService(api_key=api_key, app_id=app_id, llm_api_key=llm_key, llm_base_url=llm_base, llm_model=llm_model)
+    result = await svc.submit(payload, db)
+    return result
 
 
 @app.get("/{full_path:path}")

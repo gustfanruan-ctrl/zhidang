@@ -496,31 +496,31 @@ async function startAnalysis() {
     addLog('比对任务完成')
     analysisStatus.value = 'completed'
     
-    // 设置分析结果
+    // 设置分析结果：适配后端 operation_cards 格式
     const result = comparisonResponse.data.result
-    analysisResult.value = result
-    
-    if (result.operations) {
-      analysisResult.value.expectations = result.operations
-        .filter(op => op.type === 'create_expectation' || op.type === 'update_expectation')
-        .map(op => ({
-          ...op.data,
-          operationId: op.op_id,
-          operationType: op.type,
-          approved: false,
-          rejected: false
-        }))
-        
-      analysisResult.value.scenarios = result.operations
-        .filter(op => op.type === 'create_scenario' || op.type === 'update_scenario')
-        .map(op => ({
-          ...op.data,
-          operationId: op.op_id,
-          operationType: op.type,
-          approved: false,
-          rejected: false
-        }))
+    const cards = comparisonResponse.data.cards_with_safety || result.operation_cards || []
+    const expectations = []
+    const scenarios = []
+    for (const card of cards) {
+      const tf = card.target_form || ''
+      const item = {
+        summary: card.field_name === 'detail_brief' ? card.new_value : '',
+        description: card.field_name === 'detail' ? card.new_value : '',
+        title: card.field_name === 'title' ? card.new_value : '',
+        solve_what_ques: card.field_name === 'solve_what_ques' ? card.new_value : '',
+        solve_what_ans: card.field_name === 'solve_what_ans' ? card.new_value : '',
+        status: card.field_name === 'yuqi_status' ? card.new_value : '未启动',
+        source_quote: card.source_quote || '',
+        operationId: card.card_id,
+        operationType: card.operation_type,
+        approved: false,
+        rejected: false,
+        safety_status: card.safety_status,
+      }
+      if (tf === '预期表') expectations.push(item)
+      else if (tf === '场景表') scenarios.push(item)
     }
+    analysisResult.value = { ...result, expectations, scenarios }
     
     showSuccessMessage('分析完成，请审核各项内容')
     addLog('分析流程完成')
