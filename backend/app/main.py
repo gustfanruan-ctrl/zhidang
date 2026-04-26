@@ -1563,7 +1563,7 @@ async def run_extraction_task(payload: AgentExtractionPayload, cfg: SystemConfig
                 llm_config=llm_config,
                 system_prompt=EXTRACTION_SCAN_PROMPT,
                 user_message=transcript_text,
-                request_timeout_seconds=min(llm_request_timeout, 60),
+                request_timeout_seconds=max(llm_request_timeout, 120),
                 connect_timeout_seconds=llm_connect_timeout,
                 label="Phase1-扫描",
             )
