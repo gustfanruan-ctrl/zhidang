@@ -189,7 +189,7 @@
               </tr>
             </tbody>
           </table>
-          <button @click="addTag">新墟标签</button>
+          <button @click="addTag">新增标签</button>
         </div>
       </div>
       
