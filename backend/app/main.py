@@ -1385,6 +1385,8 @@ async def _run_extraction_openai_compatible(
     if isinstance(text, list):
         text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
     raw = text.strip()
+    # Strip model-specific tags (e.g. Qwen, DeepSeek box tags)
+    raw = raw.removeprefix("<|begin_of_box|>").removeprefix("<|box_start|>").removesuffix("<|end_of_box|>").removesuffix("<|box_end|>").strip()
     if raw.startswith("```"):
         lines = raw.splitlines()
         if lines and lines[0].startswith("```"):
