@@ -1835,6 +1835,133 @@ def api_health(db: Session = Depends(get_db)):
     return {"ok": True, "status": "healthy", "components": {"database": {"status": "healthy", "latency_ms": 3}, "llm_api": {"status": "healthy", "latency_ms": 450}, "jiandaoyun_api": {"status": "healthy", "latency_ms": 120}}, "timestamp": now_utc().isoformat()}
 
 
+@app.get("/api/v1/review/tags")
+async def get_review_tags():
+    """获取跟进标签树"""
+    import json as _json
+    tag_tree_path = Path(__file__).resolve().parent / "config" / "review_tag_tree.json"
+    try:
+        return _json.loads(tag_tree_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"无法加载标签树: {exc}")
+
+
+@app.post("/api/v1/review/generate")
+async def generate_review(data: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    """调用 LLM 生成跟进记录"""
+    from .models import SystemConfig
+    from .progress import now_utc
+    
+    transcript_text = (data.get("transcript_text") or "").strip()
+    company_name = (data.get("company_name") or "").strip()
+    if not transcript_text or not company_name:
+        raise HTTPException(status_code=400, detail="缺少 transcript_text 或 company_name")
+
+    cfg = db.scalars(select(SystemConfig)).first()
+    if not cfg:
+        cfg = SystemConfig()
+        db.add(cfg)
+        db.commit()
+    
+    api_key = decrypt_secret(cfg.llm_api_key_encrypted) if cfg.llm_api_key_encrypted else ""
+    base_url = (cfg.llm_base_url or "").rstrip("/")
+    model = cfg.agent_a_model or ""
+    if not api_key or not base_url or not model:
+        raise HTTPException(status_code=500, detail="LLM 未配置，请在管理页面完成配置")
+
+    tag_tree_path = Path(__file__).resolve().parent / "config" / "review_tag_tree.json"
+    try:
+        tag_tree_data = json.loads(tag_tree_path.read_text(encoding="utf-8"))
+    except Exception:
+        tag_tree_data = []
+
+    system_prompt = f"""你是帆软内部的客户成功记录员。
+从会议转写中提取结构化跟进记录。
+输出纯 JSON，包含以下字段：
+follow_type：从"线上跟进/线下跟进/内部沟通"选一个
+review_date：YYYY-MM-DD，识别不到用今天日期
+review_record：严格按以下格式输出：
+【跟进目的】一句话概括，10字以内
+【沟通详情】客观详细记录沟通内容，保留所有数字、版本号、规模等具体信息
+【附件/kms链接】暂无
+【参与人】我方：xxx  客户方：xxx（职位/部门）
+genjin_tags：数组，每项 {{level1, level2, level3}}，从以下选项中选择，level3 可为空字符串：
+{json.dumps(tag_tree_data, ensure_ascii=False, indent=2)}
+contact_names：字符串，客户侧参与人
+if_tuisong：默认"否"
+请只输出纯 JSON，不要用 markdown 代码块包裹，不要添加任何额外文字。"""
+
+    user_prompt = f"会议转写内容：\n{transcript_text}\n\n客户名称：\n{company_name}\n\n请生成结构化的跟进记录。"
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], "stream": False},
+            )
+        if resp.status_code != 200:
+            return {"error": f"LLM 返回 HTTP {resp.status_code}"}
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return {"error": "LLM 返回内容不是有效 JSON"}
+    except Exception as exc:
+        return {"error": f"调用 LLM 失败: {exc}"}
+
+
+@app.post("/api/v1/review/submit")
+async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    """提交跟进记录到简道云"""
+    from .models import SystemConfig
+    
+    cfg = db.scalars(select(SystemConfig)).first()
+    if not cfg:
+        cfg = SystemConfig()
+        db.add(cfg)
+        db.commit()
+    
+    # 获取简道云运行时配置
+    jiandaoyun_api_key = decrypt_secret(cfg.jiandaoyun_api_key_encrypted) if cfg.jiandaoyun_api_key_encrypted else ""
+    jiandaoyun_app_id = cfg.jiandaoyun_app_id or ""
+    if not jiandaoyun_api_key or not jiandaoyun_app_id:
+        raise HTTPException(status_code=500, detail="简道云未配置")
+
+    # 读取跟进记录表单 entry_id（从字段映射中查找，或使用默认值）
+    entry_id = cfg.jiandaoyun_review_entry_id or "670a28334883adafb152a869"
+
+    jiandaoyun_data = {
+        "com_name": {"value": data.get("com_name", "")},
+        "follow_type": {"value": data.get("follow_type", "")},
+        "review_date": {"value": data.get("review_date", "")},
+        "review_record": {"value": data.get("review_record", "")},
+        "if_tuisong": {"value": data.get("if_tuisong", "否")},
+    }
+    if data.get("comid"):
+        jiandaoyun_data["comid"] = {"value": data["comid"]}
+    if data.get("contact_names"):
+        jiandaoyun_data["contname"] = {"value": data["contact_names"]}
+
+    genjin_tags = data.get("genjin_tags", [])
+    if genjin_tags:
+        subform_rows = []
+        for tag in genjin_tags:
+            subform_rows.append({
+                "genjin_level1": {"value": tag.get("level1", "")},
+                "genjin_level2": {"value": tag.get("level2", "")},
+                "genjin_level3": {"value": tag.get("level3", "")},
+            })
+        jiandaoyun_data["genjin"] = {"value": subform_rows}
+
+    writer = JiandaoyunWriter(api_key=jiandaoyun_api_key, app_id=jiandaoyun_app_id)
+    result = await writer.create_record(entry_id, jiandaoyun_data)
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("detail", "写入简道云失败"))
+    return {"message": "跟进记录已成功提交到简道云", "data": result.get("data")}
+
+
 @app.middleware("http")
 async def request_logger(request: Request, call_next):
     start = datetime.now(timezone.utc)

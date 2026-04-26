@@ -143,15 +143,12 @@
 
 <script>
 import { api } from '../api'
+import { useCustomerStore } from '../stores/customer'
 
 export default {
   name: 'ReviewPage',
   data() {
     return {
-      // 从路由或全局状态获取的客户信息
-      companyId: this.$route.query.company_id || localStorage.getItem('zhidang_company_id') || '',
-      companyName: this.$route.query.company_name || localStorage.getItem('zhidang_company_name') || '',
-      
       // 页面数据
       transcriptText: '',
       reviewData: null,
@@ -167,14 +164,19 @@ export default {
     }
   },
   computed: {
+    companyId() {
+      const store = useCustomerStore()
+      return store.currentCustomer?.company_id || ''
+    },
+    companyName() {
+      const store = useCustomerStore()
+      return store.currentCustomer?.company_name || ''
+    },
     canGenerate() {
       return this.transcriptText.trim() && this.companyName
     },
     canSubmit() {
-      return this.reviewData && 
-             this.reviewData.follow_type && 
-             this.reviewData.review_date && 
-             this.reviewData.review_record
+      return this.reviewData && this.reviewData.follow_type && this.reviewData.review_date && this.reviewData.review_record
     }
   },
   async mounted() {
@@ -194,10 +196,10 @@ export default {
     async loadConfig() {
       try {
         const response = await api.get('/api/v1/admin/config')
-        this.config.review_entry_id = response.data.jiandaoyun.review_entry_id || '670a28334883adafb152a869'
-        this.config.review_system_prompt = response.data.review_system_prompt || ''
+        // admin config 返回的是扁平结构
+        this.config.review_entry_id = response.data.main_entry_id || '670a28334883adafb152a869'
       } catch (error) {
-        // 如果加载失败，使用默认值
+        // 使用默认值
       }
     },
     
