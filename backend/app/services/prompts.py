@@ -109,6 +109,65 @@ solve_what_ans:
 - field_name 为 comname_01、com_type、revenue_level、if_access、follow_form → target_form="客户主表"
 - 无法判断时填 "未知"，但不得填 null 或空字符串
 """
+# ── 多 Phase 提取架构 ──────────────────────────────────────
+
+EXTRACTION_SCAN_PROMPT = """\
+从以下会议转写中，快速列出所有客户预期和业务场景。只给标题和一句话简述，不要展开详情。
+
+## 区分规则
+- 预期：客户中长期目标/方向（如"实现财务部自助分析"）
+- 场景：具体落地动作（如"自动化质量周报推送"）
+
+返回 JSON：
+{"items":[{"type":"expectation|scenario","title":"简短标题","brief":"一句话简述","source_quote":"原文关键引用"}]}
+"""
+
+EXTRACTION_EXPAND_EXPECTATION_PROMPT = """\
+你是客户成功会议分析专家。将以下客户预期展开为完整结构化记录。
+
+## 格式要求
+- detail_brief：一句话概括，格式"动词+目标对象+期望状态"
+- detail：三段式，用【】标记：
+【预期背景】为什么有这个目标，业务驱动力
+【预期需求内容】具体要做哪些事，分阶段说明
+【预计达成状态/输出物】可验证的交付标准
+- detail 里只写方向性内容，不写具体报表名/数据源/权限设计等细节
+
+## 待展开的预期
+标题：{title}
+简述：{brief}
+原文引用：{source_quote}
+
+## 转写全文（供参考）
+{transcript}
+
+返回 JSON：
+{"facts":[{"field_name":"detail_brief","value":"...","confidence":0.9,"source_quote":"...","source_type":"text","category":"requirements","target_form":"预期表"},{"field_name":"detail","value":"...","confidence":0.9,"source_quote":"...","source_type":"text","category":"requirements","target_form":"预期表"}]}
+"""
+
+EXTRACTION_EXPAND_SCENARIO_PROMPT = """\
+你是客户成功会议分析专家。将以下业务场景展开为完整结构化记录。
+
+## 格式要求
+- title：【功能模块】+ 具体场景描述
+- solve_what_ques：三段式，用【】标记：
+【现状】当前业务流程的实际状态
+【痛点】具体问题、效率瓶颈
+【方案目标】期望达成的改进效果
+- solve_what_ans：数据源/功能模块/使用范围/业务价值
+
+## 待展开的场景
+标题：{title}
+简述：{brief}
+原文引用：{source_quote}
+
+## 转写全文（供参考）
+{transcript}
+
+返回 JSON：
+{"facts":[{"field_name":"title","value":"...","confidence":0.9,"source_quote":"...","source_type":"text","category":"requirements","target_form":"场景表"},{"field_name":"solve_what_ques","value":"...","confidence":0.9,"source_quote":"...","source_type":"text","category":"requirements","target_form":"场景表"},{"field_name":"solve_what_ans","value":"...","confidence":0.9,"source_quote":"...","source_type":"text","category":"requirements","target_form":"场景表"}]}
+"""
+
 COMPARISON_SYSTEM_PROMPT = """\
 你是一位客户档案维护专家。你的任务是将新提取事实与现有档案比对，输出操作卡片。
 流程：

@@ -34,7 +34,7 @@ from .services.jiandaoyun_client import JiandaoyunClient, JiandaoyunClientError
 from .services.jiandaoyun_writer import JiandaoyunWriter
 from .services.openai_compatible_agent_client import OpenAICompatibleAgentClient
 from .services.operation_executor import execute_cards
-from .services.prompts import CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
+from .services.prompts import CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT, EXTRACTION_SCAN_PROMPT, EXTRACTION_EXPAND_EXPECTATION_PROMPT, EXTRACTION_EXPAND_SCENARIO_PROMPT
 from .services.chat_executor import OP_LABELS, build_jiandaoyun_payload, build_preview_text, get_entry_id, log_operation
 from .services.tool_registry import build_chat_executors, get_chat_tools, get_executors, get_tools
 from .sso import build_sso_token, verify_sso_token
@@ -1355,6 +1355,58 @@ def _to_openai_messages(system_prompt: str, user_blocks: list[dict[str, Any]]) -
     ]
 
 
+async def _call_llm_json(
+    *,
+    transcript_id: str,
+    llm_config: dict[str, str],
+    system_prompt: str,
+    user_message: str | list[dict[str, Any]],
+    request_timeout_seconds: int,
+    connect_timeout_seconds: int,
+    label: str = "",
+) -> dict[str, Any]:
+    """通用 LLM 调用 → JSON 解析，含自动剥 markdown/box tag。"""
+    base_url = llm_config.get("base_url", "").rstrip("/")
+    api_key = llm_config.get("api_key", "")
+    model_name = llm_config.get("model_name", "")
+    if not base_url:
+        raise ValueError("LLM base_url 未配置")
+    url = f"{base_url}/chat/completions"
+    msgs = _to_openai_messages(system_prompt, [{"role": "user", "content": user_message}])
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {"model": model_name, "messages": msgs, "temperature": 0.1, "max_tokens": 4096}
+
+    tag = f" [{label}]" if label else ""
+    _append_llm_line(transcript_id, f"调用 LLM{tag}")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(float(request_timeout_seconds), connect=float(connect_timeout_seconds))) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+    except httpx.TimeoutException as exc:
+        raise RuntimeError(f"LLM 调用超时（{request_timeout_seconds}s）") from exc
+    if resp.status_code >= 400:
+        raise RuntimeError(f"LLM 调用失败: HTTP {resp.status_code} {resp.text[:200]}")
+    data = resp.json()
+    text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+    if not text:
+        raise RuntimeError("LLM 返回空内容")
+    if isinstance(text, list):
+        text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
+    raw = text.strip()
+    raw = raw.removeprefix("<|begin_of_box|>").removeprefix("<|box_start|>").removesuffix("<|end_of_box|>").removesuffix("<|box_end|>").strip()
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        snippet = raw[:240].replace("\n", " ")
+        raise RuntimeError(f"LLM 返回非 JSON，片段: {snippet}") from exc
+
+
 async def _run_extraction_openai_compatible(
     *,
     transcript_id: str,
@@ -1451,25 +1503,75 @@ async def run_extraction_task(payload: AgentExtractionPayload, cfg: SystemConfig
         processed_images = validate_and_preprocess(images) if images else []
         user_message = build_user_message(input_type, content, processed_images)
         if provider in {"dashscope", "openai_compatible"}:
-            validated = await _run_extraction_openai_compatible(
+            # ── 多 Phase 提取 ──
+            transcript_text = content if isinstance(content, str) else str(content or "")
+
+            # Phase 1: 快速扫描
+            _append_llm_line(transcript_id, "Phase 1: 快速扫描预期与场景")
+            TASK_PROGRESS[transcript_id].update({"extraction_status": "scanning"})
+            scan_result = await _call_llm_json(
                 transcript_id=transcript_id,
                 llm_config=llm_config,
-                system_prompt=EXTRACTION_SYSTEM_PROMPT,
-                user_message=user_message,
-                request_timeout_seconds=llm_request_timeout,
+                system_prompt=EXTRACTION_SCAN_PROMPT,
+                user_message=transcript_text,
+                request_timeout_seconds=min(llm_request_timeout, 60),
                 connect_timeout_seconds=llm_connect_timeout,
+                label="Phase1-扫描",
             )
+            items = scan_result.get("items", [])
+            _append_llm_line(transcript_id, f"Phase 1 完成: 识别到 {len(items)} 个条目")
+
+            # Phase 2: 并行展开
+            _append_llm_line(transcript_id, f"Phase 2: 并行展开 {len(items)} 个条目")
+            TASK_PROGRESS[transcript_id].update({"extraction_status": "expanding"})
+
+            async def expand_one(item: dict) -> list[dict]:
+                typ = item.get("type", "scenario")
+                title = item.get("title", "")
+                brief = item.get("brief", "")
+                quote = item.get("source_quote", "")
+                if typ == "expectation":
+                    tmpl = EXTRACTION_EXPAND_EXPECTATION_PROMPT
+                else:
+                    tmpl = EXTRACTION_EXPAND_SCENARIO_PROMPT
+                prompt = tmpl.format(title=title, brief=brief, source_quote=quote, transcript=transcript_text[:6000])
+                try:
+                    r = await _call_llm_json(
+                        transcript_id=transcript_id,
+                        llm_config=llm_config,
+                        system_prompt=prompt,
+                        user_message="请展开",
+                        request_timeout_seconds=min(llm_request_timeout, 90),
+                        connect_timeout_seconds=llm_connect_timeout,
+                        label=f"Phase2-{title[:20]}",
+                    )
+                    return r.get("facts", [])
+                except Exception as e:
+                    _append_llm_line(transcript_id, f"展开失败 [{title[:30]}]: {e}")
+                    return []
+
+            expand_tasks = [expand_one(item) for item in items]
+            all_fact_lists = await asyncio.gather(*expand_tasks)
+            all_facts = [f for flist in all_fact_lists for f in flist]
+
+            # Phase 3: 聚合 + target_form 兜底
+            from .services.target_form_fallback import patch_target_form
+            all_facts = patch_target_form(all_facts)
+            result_data = {"facts": all_facts, "total_extracted": len(all_facts)}
+            validated = validate_extraction_output(result_data)
+            _append_llm_line(transcript_id, f"Phase 3 完成: 共 {len(all_facts)} 条事实")
+
             TASK_PROGRESS[transcript_id].update(
                 {
                     "mode": "llm",
                     "input_type": input_type,
-                    "current_turn": 1,
-                    "max_turns": 1,
+                    "current_turn": 2,
+                    "max_turns": 2,
                     "extraction_status": "completed",
                     "comparison_status": "pending",
                 }
             )
-            _append_llm_line(transcript_id, "识别完成：OpenAI-compatible 路径")
+            _append_llm_line(transcript_id, "识别完成：多 Phase 路径")
             return {
                 "task_id": payload_data.get("task_id", f"ext-{transcript_id}"),
                 "status": "completed",
