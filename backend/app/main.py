@@ -204,7 +204,40 @@ TASK_PROGRESS: dict[str, dict[str, Any]] = {}
 JIANYDAOYUN_MAPPING_PATH = Path(__file__).resolve().parent / "config" / "jiandaoyun_field_mapping.json"
 CUSTOMER_INDEX_CACHE_TTL_SECONDS = 300
 CUSTOMER_INDEX_CACHE: dict[str, Any] = {"at": None, "items": [], "source": "empty"}
+CUSTOMER_INDEX_CACHE_FILE = Path(__file__).resolve().parent / "output" / "customer_index_cache.json"
 OPERATION_CARD_STORE: dict[str, list[dict[str, Any]]] = {}
+
+
+def _save_customer_index_cache() -> None:
+    try:
+        CUSTOMER_INDEX_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "at": CUSTOMER_INDEX_CACHE["at"].isoformat() if isinstance(CUSTOMER_INDEX_CACHE.get("at"), datetime) else None,
+            "items": CUSTOMER_INDEX_CACHE.get("items", []),
+            "source": CUSTOMER_INDEX_CACHE.get("source", "empty"),
+        }
+        CUSTOMER_INDEX_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+        logger.info("客户索引已保存到本地缓存: %d 条", len(payload["items"]))
+    except Exception:
+        logger.warning("保存客户索引本地缓存失败", exc_info=True)
+
+
+def _load_customer_index_cache() -> bool:
+    try:
+        if not CUSTOMER_INDEX_CACHE_FILE.exists():
+            return False
+        data = json.loads(CUSTOMER_INDEX_CACHE_FILE.read_text(encoding="utf-8"))
+        items = data.get("items", [])
+        if not items:
+            return False
+        CUSTOMER_INDEX_CACHE["items"] = items
+        CUSTOMER_INDEX_CACHE["at"] = data.get("at")
+        CUSTOMER_INDEX_CACHE["source"] = data.get("source", "local_cache")
+        logger.info("从本地缓存加载客户索引: %d 条", len(items))
+        return True
+    except Exception:
+        logger.warning("加载客户索引本地缓存失败", exc_info=True)
+        return False
 
 
 def _append_llm_line(transcript_id: str, line: str) -> None:
@@ -457,6 +490,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
         CUSTOMER_INDEX_CACHE["items"] = list(uniq.values())
         CUSTOMER_INDEX_CACHE["at"] = now_utc()
         CUSTOMER_INDEX_CACHE["source"] = "jiandaoyun"
+        _save_customer_index_cache()
     return CUSTOMER_INDEX_CACHE
 
 
@@ -2234,11 +2268,17 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
 
 @app.on_event("startup")
 async def startup_refresh_customer_index():
-    """应用启动时自动全量刷新一次客户索引（仅在配置完整时）"""
+    """应用启动时加载客户索引（优先本地缓存，避免每次重启全量拉取）"""
     from sqlalchemy.orm import sessionmaker
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     db = SessionLocal()
     try:
+        # 1) 先尝试本地缓存
+        if _load_customer_index_cache():
+            db.close()
+            return
+
+        # 2) 本地缓存不可用，从简道云拉取
         cfg = db.query(SystemConfig).first()
         if cfg:
             runtime_cfg = get_jiandaoyun_runtime_config(cfg)
@@ -2248,11 +2288,12 @@ async def startup_refresh_customer_index():
             main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
             entry_id = str(main_form.get("entry_id", "")).strip()
             if api_key and app_id and entry_id:
-                logger.info("启动时自动刷新客户索引...")
+                logger.info("本地缓存不可用，从简道云拉取客户索引...")
                 await refresh_customer_index_cache(runtime_cfg)
+                _save_customer_index_cache()
                 logger.info(f"启动刷新完成，共缓存 {len(CUSTOMER_INDEX_CACHE.get('items', []))} 条客户")
     except Exception as exc:
-        logger.warning(f"启动时自动刷新客户索引失败: {exc}")
+        logger.warning(f"启动时加载客户索引失败: {exc}")
     finally:
         db.close()
 
