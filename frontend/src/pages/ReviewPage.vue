@@ -289,32 +289,32 @@ export default {
     },
 
     validateFile(file) {
-      const allowedTypes = [&#39;.txt&#39;, &#39;.jpg&#39;, &#39;.jpeg&#39;, &#39;.png&#39;, &#39;.webp&#39;]
-      const ext = &#39;.&#39; + file.name.split(&#39;.&#39;).pop().toLowerCase()
+      const allowedTypes = ['.txt', '.jpg', '.jpeg', '.png', '.webp']
+      const ext = '.' + file.name.split('.').pop().toLowerCase()
       return allowedTypes.includes(ext)
     },
 
     handleFile(file) {
       if (!this.validateFile(file)) {
-        this.showMessage(&#39;不支持的文件类型，请上传 .txt, .jpg, .jpeg, .png, .webp 文件&#39;, &#39;error&#39;)
+        this.showMessage('不支持的文件类型，请上传 .txt, .jpg, .jpeg, .png, .webp 文件', 'error')
         return
       }
 
       this.uploadedFile = file
       this.filePreview = null
 
-      const ext = file.name.split(&#39;.&#39;).pop().toLowerCase()
+      const ext = file.name.split('.').pop().toLowerCase()
 
-      if (ext === &#39;txt&#39;) {
+      if (ext === 'txt') {
         // 读取文本内容
         const reader = new FileReader()
         reader.onload = (e) => {
           this.transcriptText = e.target.result
-          this.showMessage(&#39;文本文件读取成功&#39;, &#39;success&#39;)
+          this.showMessage('文本文件读取成功', 'success')
           this.currentStep = 1
         }
         reader.onerror = () => {
-          this.showMessage(&#39;读取文本文件失败&#39;, &#39;error&#39;)
+          this.showMessage('读取文本文件失败', 'error')
         }
         reader.readAsText(file)
       } else {
@@ -323,7 +323,7 @@ export default {
         reader.onload = (e) => {
           this.filePreview = e.target.result
           this.transcriptText = `[图片上传: ${file.name}]`
-          this.showMessage(&#39;图片上传成功，请确认后生成&#39;, &#39;success&#39;)
+          this.showMessage('图片上传成功，请确认后生成', 'success')
           this.currentStep = 1
         }
         reader.readAsDataURL(file)
@@ -333,14 +333,14 @@ export default {
     removeFile() {
       this.uploadedFile = null
       this.filePreview = null
-      this.transcriptText = &#39;&#39;
+      this.transcriptText = ''
       this.currentStep = 1
     },
 
     // --- 标签劳数据方法 ---
     async loadTagTree() {
       try {
-        const response = await api.get(&#39;/api/v1/followup/tags&#39;)
+        const response = await api.get('/api/v1/followup/tags')
         // 后端返回 {&#34;使用推进&#34;: {&#34;常态化跟进&#34;: [], ...}}
         // 转为前端需要的 [{level1, children: [{label, children}]}]
         const raw = response.data.tags || {}
@@ -352,7 +352,7 @@ export default {
           }))
         }))
       } catch (error) {
-        console.error(&#39;初始化标签失败&#39;, error)
+        console.error('初始化标签失败', error)
         this.tagTree = []
       }
     },
@@ -370,12 +370,12 @@ export default {
     },
 
     updateTagLevel2(index) {
-      this.reviewData.genjin_tags[index].level2 = &#39;&#39;
-      this.reviewData.genjin_tags[index].level3 = &#39;&#39;
+      this.reviewData.genjin_tags[index].level2 = ''
+      this.reviewData.genjin_tags[index].level3 = ''
     },
 
     updateTagLevel3(index) {
-      this.reviewData.genjin_tags[index].level3 = &#39;&#39;
+      this.reviewData.genjin_tags[index].level3 = ''
     },
 
     addTag() {
@@ -383,7 +383,7 @@ export default {
       if (!this.reviewData.genjin_tags) {
         this.reviewData.genjin_tags = []
       }
-      this.reviewData.genjin_tags.push({ level1: &#39;&#39;, level2: &#39;&#39;, level3: &#39;&#39; })
+      this.reviewData.genjin_tags.push({ level1: '', level2: '', level3: '' })
     },
 
     removeTag(index) {
@@ -393,7 +393,7 @@ export default {
     // --- 配置方法 ---
     async loadConfig() {
       try {
-        const response = await api.get(&#39;/api/v1/admin/config&#39;)
+        const response = await api.get('/api/v1/admin/config')
         if (response.data.field_mappings) {
           this.config = {
             ...this.config,
@@ -401,7 +401,7 @@ export default {
           }
         }
       } catch (error) {
-        console.error(&#39;自定义配置失败&#39;, error)
+        console.error('自定义配置失败', error)
       }
     },
 
@@ -410,12 +410,12 @@ export default {
       if (!this.canGenerate) return
 
       this.generating = true
-      this.message = &#39;&#39;
+      this.message = ''
       this.currentStep = 2
 
       try {
-        const response = await api.post(&#39;/api/v1/followup/generate&#39;, {
-          input_type: this.uploadedFile && this.isImageFile ? &#39;screenshot&#39; : &#39;text&#39;,
+        const response = await api.post('/api/v1/followup/generate', {
+          input_type: this.uploadedFile && this.isImageFile ? 'screenshot' : 'text',
           content: this.transcriptText,
           company_id: this.companyId,
           company_name: this.companyName
@@ -423,10 +423,10 @@ export default {
 
         this.reviewData = response.data
         this.currentStep = 3
-        this.showMessage(&#39;跟进记录生成成功，请审核后提交&#39;, &#39;success&#39;)
+        this.showMessage('跟进记录生成成功，请审核后提交', 'success')
       } catch (error) {
-        console.error(&#39;生成失败&#39;, error)
-        this.showMessage(&#39;生成失败：&#39; + (error.response?.data?.detail || error.message), &#39;error&#39;)
+        console.error('生成失败', error)
+        this.showMessage('生成失败：' + (error.response?.data?.detail || error.message), 'error')
         this.currentStep = 1
       } finally {
         this.generating = false
@@ -438,28 +438,28 @@ export default {
       if (!this.canSubmit) return
 
       this.submitting = true
-      this.message = &#39;&#39;
+      this.message = ''
       this.currentStep = 4
 
       try {
         const payload = {
           company_id: this.companyId,
-          follower: this.reviewData.follower || &#39;&#39;,
+          follower: this.reviewData.follower || '',
           follow_type: this.reviewData.follow_type,
           review_date: this.reviewData.review_date,
           review_record: this.reviewData.review_record,
           genjin_tags: this.reviewData.genjin_tags || [],
-          if_tuisong: this.reviewData.if_tuisong || &#39;否&#39;,
-          contname: this.reviewData.contact_names || &#39;&#39;,
-          contid: &#39;&#39;,
-          yuqi_id: &#39;&#39;
+          if_tuisong: this.reviewData.if_tuisong || '否',
+          contname: this.reviewData.contact_names || '',
+          contid: '',
+          yuqi_id: ''
         }
 
-        await api.post(&#39;/api/v1/followup/submit&#39;, payload)
-        this.showMessage(&#39;成功提交到简道云&#39;, &#39;success&#39;)
+        await api.post('/api/v1/followup/submit', payload)
+        this.showMessage('成功提交到简道云', 'success')
       } catch (error) {
-        console.error(&#39;提交失败&#39;, error)
-        this.showMessage(&#39;提交失败：&#39; + (error.response?.data?.detail || error.message), &#39;error&#39;)
+        console.error('提交失败', error)
+        this.showMessage('提交失败：' + (error.response?.data?.detail || error.message), 'error')
         this.currentStep = 3
       } finally {
         this.submitting = false
@@ -467,11 +467,11 @@ export default {
     },
 
     // --- 关闭方法 ---
-    showMessage(text, type = &#39;info&#39;) {
+    showMessage(text, type = 'info') {
       this.message = text
       this.messageType = type
       setTimeout(() => {
-        this.message = &#39;&#39;
+        this.message = ''
       }, 3000)
     }
   }
