@@ -1381,7 +1381,13 @@ async def _call_llm_json(
     if not base_url:
         raise ValueError("LLM base_url 未配置")
     url = f"{base_url}/chat/completions"
-    msgs = _to_openai_messages(system_prompt, [{"role": "user", "content": user_message}])
+    if isinstance(user_message, str):
+        msgs = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+    else:
+        msgs = _to_openai_messages(system_prompt, user_message)
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {"model": model_name, "messages": msgs, "temperature": 0.1, "max_tokens": 4096}
 
