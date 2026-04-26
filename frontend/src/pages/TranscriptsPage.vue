@@ -496,20 +496,25 @@ async function startAnalysis() {
     addLog('比对任务完成')
     analysisStatus.value = 'completed'
     
-    // 设置分析结果：适配后端 operation_cards 格式
+    // 设置分析结果：从 change_items 中提取字段值
     const result = comparisonResponse.data.result
     const cards = comparisonResponse.data.cards_with_safety || result.operation_cards || []
     const expectations = []
     const scenarios = []
     for (const card of cards) {
       const tf = card.target_form || ''
+      const items = card.change_items || []
+      const getVal = (name) => {
+        const ci = items.find(i => i.field_name === name || i.widget_name === name)
+        return ci ? ci.new_value : ''
+      }
       const item = {
-        summary: card.field_name === 'detail_brief' ? card.new_value : '',
-        description: card.field_name === 'detail' ? card.new_value : '',
-        title: card.field_name === 'title' ? card.new_value : '',
-        solve_what_ques: card.field_name === 'solve_what_ques' ? card.new_value : '',
-        solve_what_ans: card.field_name === 'solve_what_ans' ? card.new_value : '',
-        status: card.field_name === 'yuqi_status' ? card.new_value : '未启动',
+        summary: getVal('预期简述') || getVal('detail_brief'),
+        description: getVal('预期详情') || getVal('detail'),
+        title: getVal('场景标题') || getVal('title'),
+        solve_what_ques: getVal('解决什么问题') || getVal('solve_what_ques'),
+        solve_what_ans: getVal('怎样解决') || getVal('solve_what_ans'),
+        status: getVal('预期状态') || getVal('yuqi_status') || '未启动',
         source_quote: card.source_quote || '',
         operationId: card.card_id,
         operationType: card.operation_type,
