@@ -1,0 +1,396 @@
+{
+  "widgets": [
+    {
+      "name": "_widget_1757578251950",
+      "widgetName": "_widget_1757578251950",
+      "label": "是否加载最近一次参数",
+      "type": "radiogroup"
+    },
+    {
+      "name": "_widget_1744600409845",
+      "widgetName": "_widget_1744600409845",
+      "label": "关联公司",
+      "type": "lookup"
+    },
+    {
+      "name": "review_yuqi_id",
+      "widgetName": "_widget_1757576851902",
+      "label": "关联预期id",
+      "type": "text"
+    },
+    {
+      "name": "follower",
+      "widgetName": "_widget_1729136058210",
+      "label": "跟进人",
+      "type": "user"
+    },
+    {
+      "name": "_widget_1728719176239",
+      "widgetName": "_widget_1728719176239",
+      "label": "客户名称模糊搜索",
+      "type": "text"
+    },
+    {
+      "name": "com_name",
+      "widgetName": "_widget_1729131590698",
+      "label": "客户名称",
+      "type": "combo"
+    },
+    {
+      "name": "follow_type",
+      "widgetName": "_widget_1728875178461",
+      "label": "跟进类型",
+      "type": "combo"
+    },
+    {
+      "name": "comid",
+      "widgetName": "_widget_1728870619695",
+      "label": "客户id",
+      "type": "text"
+    },
+    {
+      "name": "review_id",
+      "widgetName": "_widget_1728897713154",
+      "label": "review_id",
+      "type": "text"
+    },
+    {
+      "name": "en_name",
+      "widgetName": "_widget_1746603722617",
+      "label": "跟进人英文名",
+      "type": "text"
+    },
+    {
+      "name": "_widget_1754649194205",
+      "widgetName": "_widget_1754649194205",
+      "label": "触发出差查询",
+      "type": "text"
+    },
+    {
+      "name": "task",
+      "widgetName": "_widget_1746603722615",
+      "label": "绑定出差",
+      "type": "subform",
+      "items": [
+        {
+          "name": "son_task_choose",
+          "widgetName": "_widget_1746603722619",
+          "label": "是否选择",
+          "type": "radiogroup"
+        },
+        {
+          "name": "son_task_id",
+          "widgetName": "_widget_1746603722618",
+          "label": "task_id",
+          "type": "text"
+        },
+        {
+          "name": "son_task_date",
+          "widgetName": "_widget_1746603722623",
+          "label": "日期",
+          "type": "text"
+        },
+        {
+          "name": "son_task_action",
+          "widgetName": "_widget_1746670142053",
+          "label": "目的",
+          "type": "text"
+        },
+        {
+          "name": "son_task_remarks",
+          "widgetName": "_widget_1746603722624",
+          "label": "备注",
+          "type": "text"
+        },
+        {
+          "name": "son_task_choose_id",
+          "widgetName": "_widget_1746603722625",
+          "label": "选中的task_id",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "_widget_1747726615527",
+      "widgetName": "_widget_1747726615527",
+      "label": "【辅助字段】校验唯一出差",
+      "type": "text"
+    },
+    {
+      "name": "task_id",
+      "widgetName": "_widget_1746603722621",
+      "label": "选择后的task_id",
+      "type": "text"
+    },
+    {
+      "name": "_widget_1728719176240",
+      "widgetName": "_widget_1728719176240",
+      "label": "公司查询选择",
+      "type": "subform",
+      "items": [
+        {
+          "name": "_widget_1728719176242",
+          "widgetName": "_widget_1728719176242",
+          "label": "是否选中",
+          "type": "radiogroup"
+        },
+        {
+          "name": "_widget_1728719176243",
+          "widgetName": "_widget_1728719176243",
+          "label": "客户名称",
+          "type": "text"
+        },
+        {
+          "name": "_widget_1728719176244",
+          "widgetName": "_widget_1728719176244",
+          "label": "客户ID",
+          "type": "text"
+        },
+        {
+          "name": "_widget_1728719176245",
+          "widgetName": "_widget_1728719176245",
+          "label": "是否选中",
+          "type": "text"
+        },
+        {
+          "name": "_widget_1728719176246",
+          "widgetName": "_widget_1728719176246",
+          "label": "选中客户ID",
+          "type": "text"
+        },
+        {
+          "name": "_widget_1728719176247",
+          "widgetName": "_widget_1728719176247",
+          "label": "选中客户名称",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "_widget_1728719176248",
+      "widgetName": "_widget_1728719176248",
+      "label": "联系人模糊查询",
+      "type": "text"
+    },
+    {
+      "name": "_widget_1740447115253",
+      "widgetName": "_widget_1740447115253",
+      "label": "最终联动字段",
+      "type": "text"
+    },
+    {
+      "name": "contact",
+      "widgetName": "_widget_1728719176250",
+      "label": "联系人查询选择",
+      "type": "subform",
+      "items": [
+        {
+          "name": "son_contact_choose",
+          "widgetName": "_widget_1728719176251",
+          "label": "是否选中",
+          "type": "radiogroup"
+        },
+        {
+          "name": "son_contact_name",
+          "widgetName": "_widget_1728719176252",
+          "label": "联系人姓名",
+          "type": "text"
+        },
+        {
+          "name": "son_contact_id",
+          "widgetName": "_widget_1728719176253",
+          "label": "联系人ID",
+          "type": "text"
+        },
+        {
+          "name": "son_contact_choose_name",
+          "widgetName": "_widget_1728719176255",
+          "label": "选中联系人ID",
+          "type": "text"
+        },
+        {
+          "name": "son_contact_choose_id",
+          "widgetName": "_widget_1728719176256",
+          "label": "选中联系人姓名",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "contid",
+      "widgetName": "_widget_1728897480807",
+      "label": "联系人id",
+      "type": "text"
+    },
+    {
+      "name": "contname",
+      "widgetName": "_widget_1728975380631",
+      "label": "联系人姓名",
+      "type": "text"
+    },
+    {
+      "name": "review_date",
+      "widgetName": "_widget_1728875178457",
+      "label": "跟进日期",
+      "type": "datetime"
+    },
+    {
+      "name": "review_record",
+      "widgetName": "_widget_1728875178458",
+      "label": "跟进记录",
+      "type": "textarea"
+    },
+    {
+      "name": "genjin",
+      "widgetName": "_widget_1770345584646",
+      "label": "跟进标签",
+      "type": "subform",
+      "items": [
+        {
+          "name": "genjin_id",
+          "widgetName": "_widget_1770345584648",
+          "label": "选择数据",
+          "type": "linkdata"
+        },
+        {
+          "name": "genjin_level1",
+          "widgetName": "_widget_1770345584649",
+          "label": "一级标签",
+          "type": "radiogroup"
+        },
+        {
+          "name": "genjin_level2",
+          "widgetName": "_widget_1770345584651",
+          "label": "二级标签",
+          "type": "radiogroup"
+        },
+        {
+          "name": "genjin_level3",
+          "widgetName": "_widget_1770345584653",
+          "label": "三级标签",
+          "type": "radiogroup"
+        },
+        {
+          "name": "genjin_uuid",
+          "widgetName": "_widget_1772006363743",
+          "label": "uuid",
+          "type": "text"
+        },
+        {
+          "name": "_widget_1773986788645",
+          "widgetName": "_widget_1773986788645",
+          "label": "标签汇总",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "_widget_1757576851901",
+      "widgetName": "_widget_1757576851901",
+      "label": "关联预期",
+      "type": "lookup"
+    },
+    {
+      "name": "if_tuisong",
+      "widgetName": "_widget_1728875178463",
+      "label": "推送前方",
+      "type": "radiogroup"
+    },
+    {
+      "name": "file",
+      "widgetName": "_widget_1728876469370",
+      "label": "附件",
+      "type": "upload"
+    },
+    {
+      "name": "_widget_1753238246354",
+      "widgetName": "_widget_1753238246354",
+      "label": "【辅助字段】空值",
+      "type": "text"
+    },
+    {
+      "name": "_widget_1773986788644",
+      "widgetName": "_widget_1773986788644",
+      "label": "标签汇总-信息化",
+      "type": "text"
+    },
+    {
+      "name": "_widget_1758699350508",
+      "widgetName": "_widget_1758699350508",
+      "label": "信息组测试，忽略",
+      "type": "text"
+    },
+    {
+      "name": "upgrade_willing",
+      "widgetName": "_widget_1728955969267",
+      "label": "升级意愿-已下架",
+      "type": "combo"
+    },
+    {
+      "name": "un_upgrade_reason",
+      "widgetName": "_widget_1728955969270",
+      "label": "无升级意愿的原因-已下架",
+      "type": "combocheck"
+    },
+    {
+      "name": "renew_willing",
+      "widgetName": "_widget_1728955969262",
+      "label": "续费机会-已下架",
+      "type": "combo"
+    },
+    {
+      "name": "unrenew_reason",
+      "widgetName": "_widget_1728955969264",
+      "label": "不续费原因-已下架",
+      "type": "combo"
+    },
+    {
+      "name": "renew_remarls",
+      "widgetName": "_widget_1728955969266",
+      "label": "续费备注-已下架",
+      "type": "textarea"
+    },
+    {
+      "name": "review_genjin_label",
+      "widgetName": "_widget_1750149938671",
+      "label": "相关性标签id【辅助字段】",
+      "type": "text"
+    },
+    {
+      "name": "_widget_1772006363782",
+      "widgetName": "_widget_1772006363782",
+      "label": "原相关性标签id【辅助字段】-已下架",
+      "type": "text"
+    },
+    {
+      "name": "relevent_tag",
+      "widgetName": "_widget_1728955969245",
+      "label": "相关性标签-已下架",
+      "type": "combocheck"
+    }
+  ],
+  "sysWidgets": [
+    {
+      "name": "creator"
+    },
+    {
+      "name": "updater"
+    },
+    {
+      "name": "deleter"
+    },
+    {
+      "name": "ext"
+    },
+    {
+      "name": "createTime"
+    },
+    {
+      "name": "updateTime"
+    },
+    {
+      "name": "deleteTime"
+    }
+  ],
+  "dataModifyTime": "2026-04-25T02:40:22.553Z"
+}

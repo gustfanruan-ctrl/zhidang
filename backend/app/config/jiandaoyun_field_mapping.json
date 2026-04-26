@@ -1,0 +1,155 @@
+{
+  "api_key": "",
+  "app_id": "5dcbcb63d6e30c000692464e",
+  "forms": {
+    "客户主表": {
+      "entry_id": "677f345fdbd89090059a10c7",
+      "match_field": "comname_01",
+      "display_fields": [
+        "comname_01",
+        "com_type",
+        "revenue_level",
+        "if_access",
+        "follow_form"
+      ],
+      "field_mapping": {
+        "企业情况描述": {
+          "widget": "_widget_1736822031712",
+          "type": "textarea",
+          "safety": "writable"
+        },
+        "客户行业": {
+          "widget": "label_name",
+          "type": "text",
+          "safety": "writable"
+        },
+        "客户营收分层": {
+          "widget": "revenue_level",
+          "type": "radiogroup",
+          "safety": "restricted",
+          "allowed_values": [
+            "头部客户",
+            "大腰客户",
+            "小腰客户",
+            "尾部客户"
+          ]
+        },
+        "是否接入": {
+          "widget": "if_access",
+          "type": "radiogroup",
+          "safety": "restricted",
+          "allowed_values": [
+            "是",
+            "否",
+            "未知"
+          ]
+        },
+        "跟进形式": {
+          "widget": "follow_form",
+          "type": "radiogroup",
+          "safety": "restricted",
+          "allowed_values": [
+            "TODO: 待补全"
+          ]
+        },
+        "客户合作级别": {
+          "widget": "comcooplevel",
+          "type": "radiogroup",
+          "safety": "restricted",
+          "allowed_values": [
+            "TODO: 待补全"
+          ]
+        }
+      },
+      "forbidden_fields": [
+        "com_id",
+        "com_name",
+        "com_salesman",
+        "success",
+        "total_amount",
+        "near_year_amount",
+        "sev_enddate",
+        "total_it_budget"
+      ]
+    },
+    "预期表": {
+      "entry_id": "69e836f10bc8756eea476a1f",
+      "lookup_customer": {
+        "widget": "relation",
+        "resolve_by": "comname_01"
+      },
+      "field_mapping": {
+        "预期简述": {
+          "widget": "detail_brief",
+          "type": "textarea",
+          "safety": "writable"
+        },
+        "预期详情": {
+          "widget": "detail",
+          "type": "textarea",
+          "safety": "writable"
+        },
+        "预期状态": {
+          "widget": "yuqi_status",
+          "type": "radiogroup",
+          "safety": "restricted",
+          "allowed_values": [
+            "TODO: 待补全"
+          ]
+        },
+        "推进想法": {
+          "widget": "promote_idea",
+          "type": "textarea",
+          "safety": "writable"
+        }
+      },
+      "subforms": {
+        "预期进度": {
+          "widget": "_widget_1773297739599",
+          "mode": "append"
+        }
+      },
+      "forbidden_fields": [
+        "com_name"
+      ]
+    },
+    "场景表": {
+      "entry_id": "69e836fd206c3a2d9ffb5cf4",
+      "lookup_customer": {
+        "widget": "_widget_1737335801798",
+        "resolve_by": "comname_01"
+      },
+      "lookup_yuqi": {
+        "widget": "_widget_1751435602563",
+        "resolve_by": "_id"
+      },
+      "field_mapping": {
+        "场景标题": {
+          "widget": "title",
+          "type": "text",
+          "safety": "writable"
+        },
+        "解决什么问题": {
+          "widget": "solve_what_ques",
+          "type": "textarea",
+          "safety": "writable"
+        },
+        "怎样解决": {
+          "widget": "solve_what_ans",
+          "type": "textarea",
+          "safety": "writable"
+        }
+      },
+      "forbidden_fields": []
+    },
+    "跟进记录表": {
+      "entry_id": "",
+      "lookup_customer": {
+        "widget": "",
+        "resolve_by": "comname_01"
+      },
+      "field_mapping": {},
+      "forbidden_fields": []
+    }
+  }
+}

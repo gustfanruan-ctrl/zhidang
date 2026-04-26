@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+frontend/node_modules/
+frontend/dist/
+zhidang.db
+backend/scripts/output/
+
+browser_data/
+
+freellmapi/

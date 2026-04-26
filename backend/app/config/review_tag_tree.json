@@ -1,0 +1,31 @@
+[
+  {
+    "level1": "使用推进",
+    "children": [
+      {"label": "常态化跟进", "children": []},
+      {"label": "预期跟进", "children": []},
+      {"label": "系统部署/环境确认", "children": []},
+      {"label": "价值汇报/高层触达", "children": []},
+      {"label": "价值宣导/方案讲解", "children": []}
+    ]
+  },
+  {
+    "level1": "数字人才服务",
+    "children": [
+      {"label": "线上课程", "children": ["意愿触达", "过程执行"]},
+      {"label": "线下培训", "children": ["过程执行"]},
+      {"label": "业务沙盘", "children": ["意愿触达", "过程执行"]},
+      {"label": "翻转课堂", "children": ["意愿触达", "过程执行"]},
+      {"label": "人才大赛", "children": ["意愿触达", "过程执行"]}
+    ]
+  },
+  {
+    "level1": "续费增购",
+    "children": [
+      {"label": "服务ARR推动", "children": []},
+      {"label": "年费续费推动", "children": []},
+      {"label": "增购推动", "children": []},
+      {"label": "签单辅助", "children": []}
+    ]
+  }
+]
