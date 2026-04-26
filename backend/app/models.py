@@ -109,9 +109,6 @@ class ConfigChangeLog(Base, TimestampMixin):
 
 class AnalyticsEvent(Base, TimestampMixin):
     __tablename__ = "analytics_events"
-    __table_args__ = (
-        Index("ix_analytics_payload_gin", "payload", postgresql_using="gin"),
-    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
