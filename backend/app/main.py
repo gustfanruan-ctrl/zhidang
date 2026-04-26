@@ -1313,12 +1313,21 @@ def _build_agent_llm_client(llm_cfg: dict[str, str]) -> Any:
 
 def _fallback_extraction(transcript_id: str, transcript: dict[str, Any], reason: str) -> dict[str, Any]:
     mock_data = agent_a_mock(transcript)
+    # 转为标准 facts 格式，与 LLM 提取结果一致
+    facts: list[dict[str, Any]] = []
+    for exp in mock_data.get("expectations", []):
+        facts.append({"field_name": "detail_brief", "value": exp.get("summary", ""), "confidence": 0.7, "source_quote": exp.get("source_quote", ""), "source_type": "text", "category": "requirements", "target_form": "预期表"})
+        facts.append({"field_name": "detail", "value": exp.get("description", ""), "confidence": 0.7, "source_quote": exp.get("source_quote", ""), "source_type": "text", "category": "requirements", "target_form": "预期表"})
+    for sce in mock_data.get("scenarios", []):
+        facts.append({"field_name": "title", "value": sce.get("title", ""), "confidence": 0.7, "source_quote": sce.get("source_quote", ""), "source_type": "text", "category": "requirements", "target_form": "场景表"})
+        facts.append({"field_name": "solve_what_ques", "value": sce.get("pain_point", ""), "confidence": 0.7, "source_quote": sce.get("source_quote", ""), "source_type": "text", "category": "requirements", "target_form": "场景表"})
+        facts.append({"field_name": "solve_what_ans", "value": sce.get("core_metric_solution", ""), "confidence": 0.7, "source_quote": sce.get("source_quote", ""), "source_type": "text", "category": "requirements", "target_form": "场景表"})
     return {
         "task_id": f"ext-{transcript_id}",
         "status": "completed",
         "mode": "fallback",
         "fallback_reason": reason,
-        "result": mock_data,
+        "result": {"facts": facts, "total_extracted": len(facts)},
     }
 
 
