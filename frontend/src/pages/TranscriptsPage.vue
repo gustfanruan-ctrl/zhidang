@@ -478,7 +478,7 @@ async function startAnalysis() {
                    file.value.name.endsWith('.jpg') || file.value.name.endsWith('.jpeg') || file.value.name.endsWith('.png') || file.value.name.endsWith('.webp') ? 'image' : 'text',
       content: transcriptText.value,
       transcript: uploadResult ? { id: uploadResult.transcript_id, raw_text: transcriptText.value } : { raw_text: transcriptText.value }
-    })
+    }, { timeout: 300000 })
     
     addLog('提取任务完成')
     
@@ -491,7 +491,7 @@ async function startAnalysis() {
       company_id: customerStore.currentCustomer.company_id,
       existing_record: customer,
       extraction_result: extractionResponse.data.result
-    })
+    }, { timeout: 300000 })
     
     addLog('比对任务完成')
     analysisStatus.value = 'completed'

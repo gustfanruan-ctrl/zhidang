@@ -183,7 +183,7 @@ async function send(confirm) {
     company_id: customerStore.currentCustomer?.company_id || null,
     session_id: chatSessionId.value,
     confirm,
-  })
+  }, { timeout: 300000 })
   messages.value.push({ role: 'assistant', text: data.reply })
   chatSessionId.value = data.session_id || chatSessionId.value
   needsConfirm.value = !!data.needs_confirmation

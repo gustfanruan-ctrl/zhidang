@@ -369,7 +369,7 @@ export default {
           transcript_text: this.transcriptText,
           company_id: this.companyId,
           company_name: this.companyName
-        })
+        }, { timeout: 300000 })
 
         if (response.data.error) {
           this.showMessage(`生成失败: ${response.data.error}`, 'error')
