@@ -33,20 +33,27 @@ FOLLOWUP_SYSTEM_PROMPT = """你是一名 CRM 数据录入助手。从以下沟�
 
 ## 输出格式（只输出 JSON，不要 markdown 代码块）
 {
-  "company_name": "公司名",
+  "company_name": "公司名（优先用上下文提供的客户名）",
   "contact_person": "联系人姓名",
   "followup_date": "YYYY-MM-DD",
-  "business_action": "枚举值",
+  "business_action": "线上跟进|线下跟进|内部沟通",
   "action_purpose": "枚举值",
-  "background": "【背景】一句话说明本次沟通的起因",
+  "background": "【跟进目的】一句话说明本次沟通的起因和目标",
   "communication_details": ["要点1", "要点2"],
   "conclusion": "【结论】本次沟通达成的共识或结果",
   "followup_actions": [{"person":"负责人","task":"待办事项","deadline":"YYYY-MM-DD"}],
   "genjin_tags": [{"level1":"一级","level2":"二级","level3":"三级"}]
 }
 
+## review_record 标准三段式（最终写入简道云的格式）
+【跟进目的】xxx
+【沟通详情】
+1. 要点1
+2. 要点2
+【参与人】客户方参与人
+
 ## 商务行为枚举（必须从中选择）
-线上沟通 / 电话沟通 / 邮件跟进 / 现场拜访 / 问题处理 / 需求跟进 / 资料发送 / 其他
+线上跟进 / 线下跟进 / 内部沟通
 
 ## 行为目的枚举（必须从中选择）
 问题解决 / 需求收集 / 关系维护 / 续费推进 / 增购推进 / 培训支持 / 其他
@@ -103,33 +110,21 @@ def _parse_date(text: str, date_hint: str | None = None) -> str:
 
 
 def _build_review_record_text(record: FollowupRecord) -> str:
-    """将 FollowupRecord 转为 review_record Markdown 文本"""
+    """将 FollowupRecord 转为标准三段式 review_record 文本"""
     parts: list[str] = []
 
-    # 行为目的
-    if record.action_purpose:
-        parts.append(f"**行为目的**：{record.action_purpose}")
+    # 【跟进目的】
+    purpose = record.background or record.action_purpose or ""
+    parts.append(f"【跟进目的】{purpose}")
 
-    # 背景
-    if record.background:
-        parts.append(f"## 【背景】\n{record.background}")
-
-    # 沟通详情
+    # 【沟通详情】
     if record.communication_details:
-        items = "\n".join(f"- {item}" for item in record.communication_details)
-        parts.append(f"## 【沟通详情】\n{items}")
+        items = "\n".join(f"{i+1}. {item}" for i, item in enumerate(record.communication_details))
+        parts.append(f"【沟通详情】\n{items}")
 
-    # 结论
-    if record.conclusion:
-        parts.append(f"## 【结论】\n{record.conclusion}")
-
-    # 后续行动
-    if record.followup_actions:
-        actions = "\n".join(
-            f"- {a.person}：{a.task}（{a.deadline}）"
-            for a in record.followup_actions
-        )
-        parts.append(f"## 【后续行动】\n{actions}")
+    # 【参与人】
+    if record.contact_person:
+        parts.append(f"【参与人】{record.contact_person}")
 
     return "\n\n".join(parts)
 
@@ -202,7 +197,8 @@ class FollowupService:
             )
 
         # 2. 调用 LLM
-        raw_json = await self._call_llm(content)
+        company_name = payload.company_name or ""
+        raw_json = await self._call_llm(content, company_name)
 
         # 3. 解析并校验
         record = self._parse_llm_output(raw_json, content, payload.date_hint)
@@ -319,11 +315,12 @@ class FollowupService:
             logger.exception("OCR request failed")
             return ""
 
-    async def _call_llm(self, content: str) -> str:
+    async def _call_llm(self, content: str, company_name: str = "") -> str:
         """调用 LLM 生成结构化跟进记录"""
+        user_content = f"## 当前客户\n{company_name}\n\n## 输入内容\n{content}" if company_name else f"## 输入内容\n{content}"
         messages = [
             {"role": "system", "content": FOLLOWUP_SYSTEM_PROMPT},
-            {"role": "user", "content": f"## 输入内容\n{content}"},
+            {"role": "user", "content": user_content},
         ]
 
         try:

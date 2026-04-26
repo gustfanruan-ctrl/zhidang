@@ -98,14 +98,9 @@
       <div class="form-row">
         <label>跟进类型：</label>
         <select v-model="reviewData.follow_type">
-          <option value="线上沟通">线上沟通</option>
-          <option value="电话沟通">电话沟通</option>
-          <option value="邮件跟进">邮件跟进</option>
-          <option value="现场拜访">现场拜访</option>
-          <option value="问题处理">问题处理</option>
-          <option value="需求跟进">需求跟进</option>
-          <option value="资料发送">资料发送</option>
-          <option value="其他">其他</option>
+          <option value="线上跟进">线上跟进</option>
+          <option value="线下跟进">线下跟进</option>
+          <option value="内部沟通">内部沟通</option>
         </select>
       </div>
       
