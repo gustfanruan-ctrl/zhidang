@@ -549,12 +549,52 @@ def require_auth(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, 
     return user
 
 
+def patch_field_mapping_allowed_values(cfg: SystemConfig, db: Session) -> None:
+    """修复数据库中已存在的 field_mappings，将 TODO: 待补全 替换为正确枚举值。"""
+    changed = False
+    mappings = dict(cfg.field_mappings or {})
+    jdy = dict(mappings.get("jiandaoyun", {}) or {})
+    forms = dict(jdy.get("forms", {}) or {})
+
+    patches = {
+        "预期表": {
+            "预期状态": ["未启动", "进行中", "已达成", "已作废"],
+        },
+        "客户主表": {
+            "跟进形式": ["月度回访", "季度回访", "按需跟进", "无需跟进"],
+            "客户合作级别": ["战略合作", "深度合作", "普通合作", "初步接触"],
+        },
+    }
+    for form_name, field_patches in patches.items():
+        form = dict(forms.get(form_name, {}) or {})
+        fm = dict(form.get("field_mapping", {}) or {})
+        for field_name, new_values in field_patches.items():
+            rule = dict(fm.get(field_name, {}) or {})
+            old_vals = rule.get("allowed_values", [])
+            if old_vals and any("TODO" in str(v) for v in old_vals):
+                rule["allowed_values"] = new_values
+                fm[field_name] = rule
+                changed = True
+                logger.info("已修复 %s.%s allowed_values: %s → %s", form_name, field_name, old_vals, new_values)
+        if changed:
+            form["field_mapping"] = fm
+            forms[form_name] = form
+
+    if changed:
+        jdy["forms"] = forms
+        mappings["jiandaoyun"] = jdy
+        cfg.field_mappings = mappings
+        db.commit()
+        db.refresh(cfg)
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
     with Session(engine) as db:
         cfg = ensure_system_config(db)
         seed_jiandaoyun_mapping_if_missing(cfg, db)
+        patch_field_mapping_allowed_values(cfg, db)
         sync_prompt_defaults(cfg, db)
     logger.info("startup complete")
 
