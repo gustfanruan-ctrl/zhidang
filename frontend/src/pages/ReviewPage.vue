@@ -98,9 +98,14 @@
       <div class="form-row">
         <label>跟进类型：</label>
         <select v-model="reviewData.follow_type">
-          <option value="线上跟进">线上跟进</option>
-          <option value="线下跟进">线下跟进</option>
-          <option value="内部沟通">内部沟通</option>
+          <option value="线上沟通">线上沟通</option>
+          <option value="电话沟通">电话沟通</option>
+          <option value="邮件跟进">邮件跟进</option>
+          <option value="现场拜访">现场拜访</option>
+          <option value="问题处理">问题处理</option>
+          <option value="需求跟进">需求跟进</option>
+          <option value="资料发送">资料发送</option>
+          <option value="其他">其他</option>
         </select>
       </div>
       
@@ -184,7 +189,7 @@
               </tr>
             </tbody>
           </table>
-          <button @click="addTag">新增标签</button>
+          <button @click="addTag">新墟标签</button>
         </div>
       </div>
       
@@ -222,7 +227,7 @@ export default {
       showAdvanced: false,
       message: '',
       messageType: 'info',
-      // 文件上传相关
+      // 文延上传相关
       uploadedFile: null,
       filePreview: null,
       isDragOver: false,
@@ -284,45 +289,42 @@ export default {
     },
 
     validateFile(file) {
-      const allowedTypes = ['.txt', '.jpg', '.jpeg', '.png', '.webp']
-      const ext = '.' + file.name.split('.').pop().toLowerCase()
+      const allowedTypes = [&#39;.txt&#39;, &#39;.jpg&#39;, &#39;.jpeg&#39;, &#39;.png&#39;, &#39;.webp&#39;]
+      const ext = &#39;.&#39; + file.name.split(&#39;.&#39;).pop().toLowerCase()
       return allowedTypes.includes(ext)
     },
 
     handleFile(file) {
       if (!this.validateFile(file)) {
-        this.showMessage('不支持的文件类型，请上传 .txt, .jpg, .jpeg, .png, .webp 文件', 'error')
+        this.showMessage(&#39;不支持的文件类型，请上传 .txt, .jpg, .jpeg, .png, .webp 文件&#39;, &#39;error&#39;)
         return
       }
 
       this.uploadedFile = file
       this.filePreview = null
 
-      const ext = file.name.split('.').pop().toLowerCase()
+      const ext = file.name.split(&#39;.&#39;).pop().toLowerCase()
 
-      if (ext === 'txt') {
+      if (ext === &#39;txt&#39;) {
         // 读取文本内容
         const reader = new FileReader()
         reader.onload = (e) => {
           this.transcriptText = e.target.result
-          this.showMessage('文本文件读取成功', 'success')
+          this.showMessage(&#39;文本文件读取成功&#39;, &#39;success&#39;)
           this.currentStep = 1
         }
         reader.onerror = () => {
-          this.showMessage('读取文本文件失败', 'error')
+          this.showMessage(&#39;读取文本文件失败&#39;, &#39;error&#39;)
         }
         reader.readAsText(file)
       } else {
-        // 图片文件：生成预览并设置占位文本
+        // 图片文件：生成预览并设置位文本
         const reader = new FileReader()
         reader.onload = (e) => {
           this.filePreview = e.target.result
           this.transcriptText = `[图片上传: ${file.name}]`
-          this.showMessage('图片上传成功，请确认后生成', 'success')
+          this.showMessage(&#39;图片上传成功，请确认后生成&#39;, &#39;success&#39;)
           this.currentStep = 1
-        }
-        reader.onerror = () => {
-          this.showMessage('读取图片文件失败', 'error')
         }
         reader.readAsDataURL(file)
       }
@@ -331,150 +333,145 @@ export default {
     removeFile() {
       this.uploadedFile = null
       this.filePreview = null
-      this.transcriptText = ''
-      this.$refs.fileInput.value = ''
+      this.transcriptText = &#39;&#39;
+      this.currentStep = 1
     },
-    // --- 文件上传方法结束 ---
 
+    // --- 标签劳数据方法 ---
     async loadTagTree() {
       try {
-        const response = await api.get('/api/v1/review/tags')
-        this.tagTree = response.data
+        const response = await api.get(&#39;/api/v1/followup/tags&#39;)
+        // 后端返回 {&#34;使用推进&#34;: {&#34;常态化跟进&#34;: [], ...}}
+        // 转为前端需要的 [{level1, children: [{label, children}]}]
+        const raw = response.data.tags || {}
+        this.tagTree = Object.entries(raw).map(([level1, children]) => ({
+          level1,
+          children: Object.entries(children).map(([label, subChildren]) => ({
+            label,
+            children: subChildren || []
+          }))
+        }))
       } catch (error) {
-        this.showMessage('加载跟进标签失败', 'error')
+        console.error(&#39;初始化标签失败&#39;, error)
+        this.tagTree = []
       }
     },
 
-    async loadConfig() {
-      try {
-        const response = await api.get('/api/v1/admin/config')
-        // admin config 返回的是扁平结构
-        this.config.review_entry_id = response.data.main_entry_id || '670a28334883adafb152a869'
-      } catch (error) {
-        // 使用默认值
-      }
-    },
-    
-    async generateReview() {
-      if (!this.canGenerate) {
-        this.showMessage('请先在顶部选择客户并输入转写内容', 'error')
-        return
-      }
-
-      this.generating = true
-      this.currentStep = 2
-
-      try {
-        const response = await api.post('/api/v1/review/generate', {
-          transcript_text: this.transcriptText,
-          company_id: this.companyId,
-          company_name: this.companyName
-        }, { timeout: 300000 })
-
-        if (response.data.error) {
-          this.showMessage(`生成失败: ${response.data.error}`, 'error')
-          this.currentStep = 1
-        } else {
-          this.reviewData = response.data
-          // 为新生成的数据添加空的标签
-          if (!this.reviewData.genjin_tags) {
-            this.reviewData.genjin_tags = []
-          }
-          this.showMessage('跟进记录生成成功', 'success')
-          this.currentStep = 3
-        }
-      } catch (error) {
-        this.showMessage('生成跟进记录失败', 'error')
-        this.currentStep = 1
-      } finally {
-        this.generating = false
-      }
-    },
-    
-    addTag() {
-      this.reviewData.genjin_tags.push({
-        level1: '',
-        level2: '',
-        level3: ''
-      })
-    },
-    
-    removeTag(index) {
-      this.reviewData.genjin_tags.splice(index, 1)
-    },
-    
-    updateTagLevel2(index) {
-      // 当一级标签变化时，将二级标签清空
-      this.reviewData.genjin_tags[index].level2 = ''
-      this.reviewData.genjin_tags[index].level3 = ''
-    },
-    
-    updateTagLevel3(index) {
-      // 当二级标签变化时，保持三级标签清空
-      this.reviewData.genjin_tags[index].level3 = ''
-    },
-    
     getLevel2Options(level1) {
-      if (!level1) return []
       const level1Item = this.tagTree.find(item => item.level1 === level1)
       return level1Item ? level1Item.children : []
     },
-    
+
     getLevel3Options(level1, level2) {
-      if (!level1 || !level2) return []
       const level1Item = this.tagTree.find(item => item.level1 === level1)
       if (!level1Item) return []
       const level2Item = level1Item.children.find(item => item.label === level2)
       return level2Item ? level2Item.children : []
     },
-    
+
+    updateTagLevel2(index) {
+      this.reviewData.genjin_tags[index].level2 = &#39;&#39;
+      this.reviewData.genjin_tags[index].level3 = &#39;&#39;
+    },
+
+    updateTagLevel3(index) {
+      this.reviewData.genjin_tags[index].level3 = &#39;&#39;
+    },
+
+    addTag() {
+      if (!this.reviewData) return
+      if (!this.reviewData.genjin_tags) {
+        this.reviewData.genjin_tags = []
+      }
+      this.reviewData.genjin_tags.push({ level1: &#39;&#39;, level2: &#39;&#39;, level3: &#39;&#39; })
+    },
+
+    removeTag(index) {
+      this.reviewData.genjin_tags.splice(index, 1)
+    },
+
+    // --- 配置方法 ---
+    async loadConfig() {
+      try {
+        const response = await api.get(&#39;/api/v1/admin/config&#39;)
+        if (response.data.field_mappings) {
+          this.config = {
+            ...this.config,
+            ...response.data.field_mappings
+          }
+        }
+      } catch (error) {
+        console.error(&#39;自定义配置失败&#39;, error)
+      }
+    },
+
+    // --- 生成跟进记录 ---
+    async generateReview() {
+      if (!this.canGenerate) return
+
+      this.generating = true
+      this.message = &#39;&#39;
+      this.currentStep = 2
+
+      try {
+        const response = await api.post(&#39;/api/v1/followup/generate&#39;, {
+          input_type: this.uploadedFile && this.isImageFile ? &#39;screenshot&#39; : &#39;text&#39;,
+          content: this.transcriptText,
+          company_id: this.companyId,
+          company_name: this.companyName
+        })
+
+        this.reviewData = response.data
+        this.currentStep = 3
+        this.showMessage(&#39;跟进记录生成成功，请审核后提交&#39;, &#39;success&#39;)
+      } catch (error) {
+        console.error(&#39;生成失败&#39;, error)
+        this.showMessage(&#39;生成失败：&#39; + (error.response?.data?.detail || error.message), &#39;error&#39;)
+        this.currentStep = 1
+      } finally {
+        this.generating = false
+      }
+    },
+
+    // --- 提交到简道云 ---
     async submitReview() {
       if (!this.canSubmit) return
-      if (this.submitting) return
 
       this.submitting = true
+      this.message = &#39;&#39;
       this.currentStep = 4
 
       try {
         const payload = {
-          ...this.reviewData,
-          com_name: this.companyName,
-          comid: this.companyId
+          company_id: this.companyId,
+          follower: this.reviewData.follower || &#39;&#39;,
+          follow_type: this.reviewData.follow_type,
+          review_date: this.reviewData.review_date,
+          review_record: this.reviewData.review_record,
+          genjin_tags: this.reviewData.genjin_tags || [],
+          if_tuisong: this.reviewData.if_tuisong || &#39;否&#39;,
+          contname: this.reviewData.contact_names || &#39;&#39;,
+          contid: &#39;&#39;,
+          yuqi_id: &#39;&#39;
         }
 
-        const response = await api.post('/api/v1/review/submit', payload)
-        this.showMessage('跟进记录已成功提交到简道云', 'success')
+        await api.post(&#39;/api/v1/followup/submit&#39;, payload)
+        this.showMessage(&#39;成功提交到简道云&#39;, &#39;success&#39;)
       } catch (error) {
-        this.showMessage('提交到简道云失败', 'error')
+        console.error(&#39;提交失败&#39;, error)
+        this.showMessage(&#39;提交失败：&#39; + (error.response?.data?.detail || error.message), &#39;error&#39;)
         this.currentStep = 3
       } finally {
         this.submitting = false
       }
     },
-    
-    toggleAdvancedSettings() {
-      this.showAdvanced = !this.showAdvanced
-    },
-    
-    async saveConfig() {
-      try {
-        await api.put('/api/v1/admin/config', {
-          jiandaoyun: {
-            review_entry_id: this.config.review_entry_id
-          },
-          review_system_prompt: this.config.review_system_prompt
-        })
-        this.showMessage('配置保存成功', 'success')
-      } catch (error) {
-        this.showMessage('保存配置失败', 'error')
-      }
-    },
-    
-    showMessage(msg, type) {
-      this.message = msg
+
+    // --- 关闭方法 ---
+    showMessage(text, type = &#39;info&#39;) {
+      this.message = text
       this.messageType = type
       setTimeout(() => {
-        this.message = ''
+        this.message = &#39;&#39;
       }, 3000)
     }
   }
@@ -483,363 +480,313 @@ export default {
 
 <style scoped>
 .review-page {
-  padding: 20px;
   max-width: 1200px;
   margin: 0 auto;
+  padding: 20px;
 }
 
 .review-header {
-  margin-bottom: 30px;
-  text-align: center;
+  margin-bottom: 20px;
 }
 
-.review-input-section {
-  margin-bottom: 30px;
-  padding: 20px;
-  border: 1px solid #eee;
-  border-radius: 5px;
+.review-header h1 {
+  font-size: 24px;
+  color: #333;
 }
 
-/* 步骤进度指示器 */
+/* -- 步骤进度指示器 -- */
 .step-indicator {
   display: flex;
   align-items: center;
   justify-content: center;
   margin-bottom: 30px;
-  padding: 0 20px;
+  padding: 20px 0;
+  background: #f8f9fa;
+  border-radius: 8px;
 }
 
 .step {
   display: flex;
   flex-direction: column;
   align-items: center;
-  color: #999;
-}
-
-.step.active {
-  color: #007bff;
-}
-
-.step.current .step-number {
-  background-color: #007bff;
-  color: white;
-  border-color: #007bff;
+  gap: 8px;
 }
 
 .step-number {
-  width: 32px;
-  height: 32px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
-  border: 2px solid #ccc;
   display: flex;
   align-items: center;
   justify-content: center;
   font-weight: bold;
-  margin-bottom: 5px;
-  background-color: white;
+  font-size: 18px;
+  background: #ddd;
+  color: #999;
 }
 
 .step.active .step-number {
-  border-color: #007bff;
-  color: #007bff;
+  background: #4285f4;
+  color: white;
 }
 
 .step.current .step-number {
+  background: #1a73e8;
   color: white;
 }
 
 .step-label {
-  font-size: 12px;
+  font-size: 14px;
+  color: #999;
+}
+
+.step.active .step-label {
+  color: #333;
+}
+
+.step.current .step-label {
+  color: #1a73e8;
+  font-weight: bold;
 }
 
 .step-line {
-  flex: 1;
+  width: 80px;
   height: 2px;
-  background-color: #ccc;
+  background: #ddd;
   margin: 0 10px;
-  margin-bottom: 20px;
-  max-width: 80px;
 }
 
 .step-line.active {
-  background-color: #007bff;
+  background: #4285f4;
 }
 
-/* 文件上传区域 */
+/* -- 输入区 -- */
+.review-input-section {
+  background: white;
+  padding: 24px;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  margin-bottom: 24px;
+}
+
+.form-row {
+  margin-bottom: 16px;
+}
+
+.form-row label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #555;
+}
+
+.form-row input[type="text"],
+.form-row input[type="date"],
+.form-row textarea,
+.form-row select {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.form-row textarea {
+  resize: vertical;
+  min-height: 120px;
+}
+
+/* -- 上传区域 -- */
 .upload-area-wrapper {
-  flex: 1;
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
 }
 
 .upload-area {
+  flex: 1;
   border: 2px dashed #ccc;
   border-radius: 8px;
   padding: 30px;
   text-align: center;
   cursor: pointer;
-  transition: all 0.3s ease;
-  background-color: #fafafa;
+  transition: border-color 0.3s;
 }
 
 .upload-area:hover {
-  border-color: #007bff;
-  background-color: #f0f8ff;
+  border-color: #1a73e8;
 }
 
 .upload-area.drag-over {
-  border-color: #007bff;
-  background-color: #e6f2ff;
-}
-
-.upload-area.has-file {
-  border-style: solid;
-  border-color: #28a745;
-  background-color: #f0fff4;
-  padding: 15px 30px;
+  border-color: #1a73e8;
+  background: #e8f0fe;
 }
 
 .upload-placeholder {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
+  color: #999;
 }
 
 .upload-icon {
-  font-size: 36px;
-  color: #999;
-  line-height: 1;
+  font-size: 32px;
+  margin-bottom: 10px;
 }
 
 .upload-text {
-  font-size: 14px;
-  color: #666;
+  font-size: 16px;
+  margin-bottom: 8px;
 }
 
 .upload-hint {
   font-size: 12px;
-  color: #999;
+  color: #bbb;
 }
 
 .file-info {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 15px;
+  justify-content: space-between;
 }
 
 .file-name {
   font-size: 14px;
   color: #333;
-  font-weight: 500;
 }
 
 .remove-file-btn {
   padding: 4px 12px;
-  font-size: 12px;
-  background-color: #dc3545;
+  background: #e74c3c;
   color: white;
   border: none;
   border-radius: 4px;
   cursor: pointer;
 }
 
-.remove-file-btn:hover {
-  background-color: #c82333;
-}
-
-/* 图片预览 */
 .image-preview {
-  margin-top: 15px;
-  border: 1px solid #eee;
-  border-radius: 8px;
-  padding: 10px;
-  background-color: #fafafa;
-  text-align: center;
+  width: 200px;
 }
 
 .image-preview img {
-  max-width: 100%;
-  max-height: 300px;
-  border-radius: 4px;
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #ddd;
 }
 
+/* -- 预览编辑区 -- */
 .review-preview-section {
-  margin-bottom: 30px;
-  padding: 20px;
-  border: 1px solid #eee;
-  border-radius: 5px;
+  background: white;
+  padding: 24px;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
 }
 
-.advanced-settings {
-  margin-bottom: 30px;
-  padding: 20px;
-  border: 1px solid #eee;
-  border-radius: 5px;
+.review-preview-section h2 {
+  margin-bottom: 20px;
+  color: #333;
 }
 
-.toggle-btn {
-  padding: 8px 15px;
-  background-color: #f8f9fa;
-  border: 1px solid #dee2e6;
-  border-radius: 4px;
-  cursor: pointer;
-  margin-bottom: 15px;
-}
-
-.settings-content h3 {
-  margin-top: 0;
-}
-
-.form-row {
-  margin-bottom: 15px;
-  display: flex;
-  align-items: flex-start;
-}
-
-.form-row label {
-  width: 150px;
-  margin-right: 15px;
-  font-weight: bold;
-  margin-top: 5px;
-  flex-shrink: 0;
-}
-
-.form-row input,
-.form-row select,
-.form-row textarea {
-  flex: 1;
-  padding: 8px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  box-sizing: border-box;
-}
-
-.form-row input[type="radio"] {
-  width: auto;
-  margin-right: 10px;
-}
-
-.radio-group {
-  display: flex;
-  align-items: center;
-}
-
-.radio-group label {
-  margin-right: 20px;
-  display: flex;
-  align-items: center;
-  cursor: pointer;
-}
-
-.radio-group input[type="radio"] {
-  margin-right: 5px;
+/* -- 标签表格 -- */
+.tag-table {
+  margin-top: 10px;
 }
 
 .tag-table table {
   width: 100%;
   border-collapse: collapse;
-  margin-bottom: 10px;
 }
 
 .tag-table th,
 .tag-table td {
+  padding: 8px 12px;
   border: 1px solid #ddd;
-  padding: 8px;
   text-align: left;
 }
 
 .tag-table th {
-  background-color: #f2f2f2;
+  background: #f5f5f5;
+  font-weight: 600;
 }
 
 .tag-table select {
   width: 100%;
-}
-
-.tag-table button {
-  padding: 4px 8px;
-  font-size: 12px;
-}
-
-.tag-table button {
-  background-color: #dc3545;
-  color: white;
-  border: none;
-  border-radius: 3px;
-  cursor: pointer;
-}
-
-.tag-table button:hover {
-  background-color: #c82333;
-}
-
-button {
-  padding: 10px 20px;
-  background-color: #007bff;
-  color: white;
-  border: none;
+  padding: 6px;
+  border: 1px solid #ddd;
   border-radius: 4px;
-  cursor: pointer;
 }
 
-button:disabled {
-  background-color: #ccc;
+/* -- 提交按钮 -- */
+.subit-btn {
+  width: 100%;
+  padding: 12px;
+  background: #27ae60;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.submit-btn:hover:not(:disabled) {
+  background: #219a52;
+}
+
+.submit-btn:disabled {
+  opacity: 0.6;
   cursor: not-allowed;
 }
 
-button.loading {
-  opacity: 0.7;
-}
-
-button.submit-btn {
-  background-color: #28a745;
-}
-
-button.submit-btn:hover {
-  background-color: #218838;
-}
-
-button.save-config-btn {
-  background-color: #6c757d;
-}
-
-button.save-config-btn:hover {
-  background-color: #5a6268;
-}
-
+/* -- 提示信息 -- */
 .message {
-  padding: 10px;
-  margin-top: 20px;
-  border-radius: 4px;
-  text-align: center;
-}
-
-.message.success {
-  background-color: #d4edda;
-  color: #155724;
-  border: 1px solid #c3e6cb;
-}
-
-.message.error {
-  background-color: #f8d7da;
-  color: #721c24;
-  border: 1px solid #f5c6cb;
+  padding: 12px;
+  border-radius: 6px;
+  margin-top: 16px;
+  font-size: 14px;
 }
 
 .message.info {
-  background-color: #d1ecf1;
-  color: #0c5460;
-  border: 1px solid #bee5eb;
+  background: #e3f2fd;
+  color: #1565c0;
 }
 
-@media (max-width: 768px) {
-  .form-row {
-    flex-direction: column;
-  }
-  
-  .form-row label {
-    width: 100%;
-    margin-bottom: 5px;
-  }
+.message.success {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.message.error {
+  background: #fdecea;
+  color: #c62828;
+}
+
+/* -- 攻用按钮 -- */
+button {
+  padding: 8px 20px;
+  background: #1a73e8;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+button:hover:not(:disabled) {
+  background: #1557b0;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.radio-group {
+  display: flex;
+  gap: 20px;
+}
+
+.radio-group label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
 }
 </style>
