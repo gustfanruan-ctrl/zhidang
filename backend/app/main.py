@@ -342,6 +342,19 @@ def get_jiandaoyun_runtime_config(cfg: SystemConfig) -> dict[str, Any]:
 
 _REFRESH_LOCK = asyncio.Lock()
 
+
+def _extract_csm_name(success_val: Any) -> str:
+    """从简道云成员(user)字段中提取显示名称用于CSM匹配。
+
+    success 字段在简道云 API 返回中是 user 类型的对象：
+        {"name": "Gust-张小洋", "username": "Gust.Zhang", ...}
+    也可能为 None 或空。
+    """
+    if isinstance(success_val, dict):
+        return success_val.get("name", success_val.get("username", "")) or ""
+    return str(success_val or "")
+
+
 async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str, Any]:
     mapping = runtime_cfg.get("mapping", {})
     main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
@@ -437,7 +450,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
             "revenue_level": row.get("revenue_level"),
             "if_access": row.get("if_access"),
             "follow_form": row.get("follow_form"),
-            "csm": row.get("success", ""),
+            "csm": _extract_csm_name(row.get("success")),
             "raw": row,
         }
         for row in all_rows
@@ -1066,7 +1079,7 @@ async def customers_list(
                     "company_name": row.get("comname_01") or row.get("com_name") or row.get("企业名称") or row.get("客户名称") or row.get("公司名称") or "未知公司",
                     "comname_01": row.get("comname_01"),
                     "com_name": row.get("com_name"),
-                    "csm": row.get("success", ""),
+                    "csm": _extract_csm_name(row.get("success")),
                     "raw": row,
                 }
                 for row in (one_page.get("data", []) or [])
