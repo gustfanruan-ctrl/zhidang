@@ -9,7 +9,8 @@ from . import BaseAPIModel, ImageInputItem
 
 # ── 常量：商务行为枚举 ─────────────────────────────────────
 BUSINESS_ACTIONS = [
-    "线上跟进", "线下跟进", "内部沟通",
+    "线上沟通", "电话沟通", "邮件跟进", "现场拜访",
+    "问题处理", "需求跟进", "资料发送", "其他",
 ]
 
 # ── 常量：行为目的枚举 ─────────────────────────────────────
@@ -88,10 +89,12 @@ class FollowupRecord(BaseAPIModel):
 
 class FollowupSubmitRequest(BaseAPIModel):
     """提交跟进记录到简道云"""
-    # lookup 关联公司 → _widget_1744600409845
-    company_id: str
-    # 公司名称 → com_name (combo)
-    company_name: str = ""
+    # 客户名称 → com_name (combo)  — 与 comid 配对，直接写入即选中
+    com_name: str = ""
+    # 客户ID → comid (text)       — 与 com_name 配对
+    comid: str = ""
+    # lookup 关联公司 → _widget_1744600409845（可选，用于关联客户主表）
+    company_id: str = ""
     # 跟进人 → follower (user)
     follower: str = ""
     # 跟进类型 → follow_type (combo)
@@ -108,5 +111,5 @@ class FollowupSubmitRequest(BaseAPIModel):
     contid: str = ""
     # 联系人姓名 → contname
     contname: str = ""
-    # 关联预期 → _widget_1757576851901 (lookup, 可选)
+    # 关联预期 → review_yuqi_id (text, 可选)
     yuqi_id: str = ""

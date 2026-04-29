@@ -34,20 +34,12 @@ from .services.jiandaoyun_client import JiandaoyunClient, JiandaoyunClientError
 from .services.jiandaoyun_writer import JiandaoyunWriter
 from .services.openai_compatible_agent_client import OpenAICompatibleAgentClient
 from .services.operation_executor import execute_cards
-from .services.prompts import CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT, EXTRACTION_SCAN_PROMPT, EXTRACTION_EXPAND_EXPECTATION_PROMPT, EXTRACTION_EXPAND_SCENARIO_PROMPT
+from .services.prompts import CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
 from .services.chat_executor import OP_LABELS, build_jiandaoyun_payload, build_preview_text, get_entry_id, log_operation
 from .services.tool_registry import build_chat_executors, get_chat_tools, get_executors, get_tools
 from .sso import build_sso_token, verify_sso_token
 from .validators import validate_operations
 from .writeflow import merge_and_write
-from .services.followup_service import FollowupService
-from .schemas.followup import (
-    ACTION_PURPOSES as FOLLOWUP_ACTION_PURPOSES,
-    BUSINESS_ACTIONS as FOLLOWUP_BUSINESS_ACTIONS,
-    GENJIN_TAGS as FOLLOWUP_GENJIN_TAGS,
-    FollowupGenerateRequest,
-    FollowupSubmitRequest,
-)
 
 try:
     from anthropic import AsyncAnthropic
@@ -204,40 +196,7 @@ TASK_PROGRESS: dict[str, dict[str, Any]] = {}
 JIANYDAOYUN_MAPPING_PATH = Path(__file__).resolve().parent / "config" / "jiandaoyun_field_mapping.json"
 CUSTOMER_INDEX_CACHE_TTL_SECONDS = 300
 CUSTOMER_INDEX_CACHE: dict[str, Any] = {"at": None, "items": [], "source": "empty"}
-CUSTOMER_INDEX_CACHE_FILE = Path(__file__).resolve().parent / "output" / "customer_index_cache.json"
 OPERATION_CARD_STORE: dict[str, list[dict[str, Any]]] = {}
-
-
-def _save_customer_index_cache() -> None:
-    try:
-        CUSTOMER_INDEX_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "at": CUSTOMER_INDEX_CACHE["at"].isoformat() if isinstance(CUSTOMER_INDEX_CACHE.get("at"), datetime) else None,
-            "items": CUSTOMER_INDEX_CACHE.get("items", []),
-            "source": CUSTOMER_INDEX_CACHE.get("source", "empty"),
-        }
-        CUSTOMER_INDEX_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
-        logger.info("客户索引已保存到本地缓存: %d 条", len(payload["items"]))
-    except Exception:
-        logger.warning("保存客户索引本地缓存失败", exc_info=True)
-
-
-def _load_customer_index_cache() -> bool:
-    try:
-        if not CUSTOMER_INDEX_CACHE_FILE.exists():
-            return False
-        data = json.loads(CUSTOMER_INDEX_CACHE_FILE.read_text(encoding="utf-8"))
-        items = data.get("items", [])
-        if not items:
-            return False
-        CUSTOMER_INDEX_CACHE["items"] = items
-        CUSTOMER_INDEX_CACHE["at"] = data.get("at")
-        CUSTOMER_INDEX_CACHE["source"] = data.get("source", "local_cache")
-        logger.info("从本地缓存加载客户索引: %d 条", len(items))
-        return True
-    except Exception:
-        logger.warning("加载客户索引本地缓存失败", exc_info=True)
-        return False
 
 
 def _append_llm_line(transcript_id: str, line: str) -> None:
@@ -490,7 +449,6 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
         CUSTOMER_INDEX_CACHE["items"] = list(uniq.values())
         CUSTOMER_INDEX_CACHE["at"] = now_utc()
         CUSTOMER_INDEX_CACHE["source"] = "jiandaoyun"
-        _save_customer_index_cache()
     return CUSTOMER_INDEX_CACHE
 
 
@@ -549,52 +507,12 @@ def require_auth(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, 
     return user
 
 
-def patch_field_mapping_allowed_values(cfg: SystemConfig, db: Session) -> None:
-    """修复数据库中已存在的 field_mappings，将 TODO: 待补全 替换为正确枚举值。"""
-    changed = False
-    mappings = dict(cfg.field_mappings or {})
-    jdy = dict(mappings.get("jiandaoyun", {}) or {})
-    forms = dict(jdy.get("forms", {}) or {})
-
-    patches = {
-        "预期表": {
-            "预期状态": ["未启动", "进行中", "已达成", "已作废"],
-        },
-        "客户主表": {
-            "跟进形式": ["月度回访", "季度回访", "按需跟进", "无需跟进"],
-            "客户合作级别": ["战略合作", "深度合作", "普通合作", "初步接触"],
-        },
-    }
-    for form_name, field_patches in patches.items():
-        form = dict(forms.get(form_name, {}) or {})
-        fm = dict(form.get("field_mapping", {}) or {})
-        for field_name, new_values in field_patches.items():
-            rule = dict(fm.get(field_name, {}) or {})
-            old_vals = rule.get("allowed_values", [])
-            if old_vals and any("TODO" in str(v) for v in old_vals):
-                rule["allowed_values"] = new_values
-                fm[field_name] = rule
-                changed = True
-                logger.info("已修复 %s.%s allowed_values: %s → %s", form_name, field_name, old_vals, new_values)
-        if changed:
-            form["field_mapping"] = fm
-            forms[form_name] = form
-
-    if changed:
-        jdy["forms"] = forms
-        mappings["jiandaoyun"] = jdy
-        cfg.field_mappings = mappings
-        db.commit()
-        db.refresh(cfg)
-
-
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
     with Session(engine) as db:
         cfg = ensure_system_config(db)
         seed_jiandaoyun_mapping_if_missing(cfg, db)
-        patch_field_mapping_allowed_values(cfg, db)
         sync_prompt_defaults(cfg, db)
     logger.info("startup complete")
 
@@ -1387,21 +1305,12 @@ def _build_agent_llm_client(llm_cfg: dict[str, str]) -> Any:
 
 def _fallback_extraction(transcript_id: str, transcript: dict[str, Any], reason: str) -> dict[str, Any]:
     mock_data = agent_a_mock(transcript)
-    # 转为标准 facts 格式，与 LLM 提取结果一致
-    facts: list[dict[str, Any]] = []
-    for exp in mock_data.get("expectations", []):
-        facts.append({"field_name": "detail_brief", "value": exp.get("summary", ""), "confidence": 0.7, "source_quote": exp.get("source_quote", ""), "source_type": "text", "category": "requirements", "target_form": "预期表"})
-        facts.append({"field_name": "detail", "value": exp.get("description", ""), "confidence": 0.7, "source_quote": exp.get("source_quote", ""), "source_type": "text", "category": "requirements", "target_form": "预期表"})
-    for sce in mock_data.get("scenarios", []):
-        facts.append({"field_name": "title", "value": sce.get("title", ""), "confidence": 0.7, "source_quote": sce.get("source_quote", ""), "source_type": "text", "category": "requirements", "target_form": "场景表"})
-        facts.append({"field_name": "solve_what_ques", "value": sce.get("pain_point", ""), "confidence": 0.7, "source_quote": sce.get("source_quote", ""), "source_type": "text", "category": "requirements", "target_form": "场景表"})
-        facts.append({"field_name": "solve_what_ans", "value": sce.get("core_metric_solution", ""), "confidence": 0.7, "source_quote": sce.get("source_quote", ""), "source_type": "text", "category": "requirements", "target_form": "场景表"})
     return {
         "task_id": f"ext-{transcript_id}",
         "status": "completed",
         "mode": "fallback",
         "fallback_reason": reason,
-        "result": {"facts": facts, "total_extracted": len(facts)},
+        "result": mock_data,
     }
 
 
@@ -1436,64 +1345,6 @@ def _to_openai_messages(system_prompt: str, user_blocks: list[dict[str, Any]]) -
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": content_blocks if content_blocks else [{"type": "text", "text": "请提取客户事实"}]},
     ]
-
-
-async def _call_llm_json(
-    *,
-    transcript_id: str,
-    llm_config: dict[str, str],
-    system_prompt: str,
-    user_message: str | list[dict[str, Any]],
-    request_timeout_seconds: int,
-    connect_timeout_seconds: int,
-    label: str = "",
-) -> dict[str, Any]:
-    """通用 LLM 调用 → JSON 解析，含自动剥 markdown/box tag。"""
-    base_url = llm_config.get("base_url", "").rstrip("/")
-    api_key = llm_config.get("api_key", "")
-    model_name = llm_config.get("model_name", "")
-    if not base_url:
-        raise ValueError("LLM base_url 未配置")
-    url = f"{base_url}/chat/completions"
-    if isinstance(user_message, str):
-        msgs = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ]
-    else:
-        msgs = _to_openai_messages(system_prompt, user_message)
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": model_name, "messages": msgs, "temperature": 0.1, "max_tokens": 4096}
-
-    tag = f" [{label}]" if label else ""
-    _append_llm_line(transcript_id, f"调用 LLM{tag}")
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(float(request_timeout_seconds), connect=float(connect_timeout_seconds))) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-    except httpx.TimeoutException as exc:
-        raise RuntimeError(f"LLM 调用超时（{request_timeout_seconds}s）") from exc
-    if resp.status_code >= 400:
-        raise RuntimeError(f"LLM 调用失败: HTTP {resp.status_code} {resp.text[:200]}")
-    data = resp.json()
-    text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
-    if not text:
-        raise RuntimeError("LLM 返回空内容")
-    if isinstance(text, list):
-        text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
-    raw = text.strip()
-    raw = raw.removeprefix("<|begin_of_box|>").removeprefix("<|box_start|>").removesuffix("<|end_of_box|>").removesuffix("<|box_end|>").strip()
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        snippet = raw[:240].replace("\n", " ")
-        raise RuntimeError(f"LLM 返回非 JSON，片段: {snippet}") from exc
 
 
 async def _run_extraction_openai_compatible(
@@ -1592,84 +1443,25 @@ async def run_extraction_task(payload: AgentExtractionPayload, cfg: SystemConfig
         processed_images = validate_and_preprocess(images) if images else []
         user_message = build_user_message(input_type, content, processed_images)
         if provider in {"dashscope", "openai_compatible"}:
-            # ── 多 Phase 提取 ──
-            transcript_text = content if isinstance(content, str) else str(content or "")
-
-            # Phase 1: 快速扫描
-            _append_llm_line(transcript_id, "Phase 1: 快速扫描预期与场景")
-            TASK_PROGRESS[transcript_id].update({"extraction_status": "scanning"})
-            scan_result = await _call_llm_json(
+            validated = await _run_extraction_openai_compatible(
                 transcript_id=transcript_id,
                 llm_config=llm_config,
-                system_prompt=EXTRACTION_SCAN_PROMPT,
-                user_message=transcript_text,
-                request_timeout_seconds=max(llm_request_timeout, 120),
+                system_prompt=EXTRACTION_SYSTEM_PROMPT,
+                user_message=user_message,
+                request_timeout_seconds=llm_request_timeout,
                 connect_timeout_seconds=llm_connect_timeout,
-                label="Phase1-扫描",
             )
-            items = scan_result.get("items", [])
-            _append_llm_line(transcript_id, f"Phase 1 完成: 识别到 {len(items)} 个条目")
-
-            # Phase 2: 并行展开
-            _append_llm_line(transcript_id, f"Phase 2: 并行展开 {len(items)} 个条目")
-            TASK_PROGRESS[transcript_id].update({"extraction_status": "expanding"})
-
-            async def expand_one(item: dict) -> list[dict]:
-                typ = item.get("type", "scenario")
-                title = item.get("title", "")
-                brief = item.get("brief", "")
-                quote = item.get("source_quote", "")
-                if typ == "expectation":
-                    tmpl = EXTRACTION_EXPAND_EXPECTATION_PROMPT
-                else:
-                    tmpl = EXTRACTION_EXPAND_SCENARIO_PROMPT
-                # 用 replace 代替 format，避免值中的花括号干扰
-                prompt = tmpl.replace("{title}", title).replace("{brief}", brief).replace("{source_quote}", quote).replace("{transcript}", transcript_text[:6000])
-                try:
-                    r = await _call_llm_json(
-                        transcript_id=transcript_id,
-                        llm_config=llm_config,
-                        system_prompt=prompt,
-                        user_message="请展开",
-                        request_timeout_seconds=min(llm_request_timeout, 90),
-                        connect_timeout_seconds=llm_connect_timeout,
-                        label=f"Phase2-{title[:20]}",
-                    )
-                    facts = r.get("facts")
-                    if isinstance(facts, list):
-                        return facts
-                    # LLM 可能直接返回 fact 对象而非 {"facts":[...]}
-                    if isinstance(r, dict) and "field_name" in r:
-                        return [r]
-                    # LLM 可能返回了其他结构，尝试提取
-                    _append_llm_line(transcript_id, f"Phase2 返回异常结构 [{title[:20]}]: {str(r)[:100]}")
-                    return []
-                except Exception as e:
-                    _append_llm_line(transcript_id, f"展开失败 [{title[:30]}]: {e}")
-                    return []
-
-            expand_tasks = [expand_one(item) for item in items]
-            all_fact_lists = await asyncio.gather(*expand_tasks)
-            all_facts = [f for flist in all_fact_lists for f in flist]
-
-            # Phase 3: 聚合 + target_form 兜底
-            from .services.target_form_fallback import patch_target_form
-            all_facts = patch_target_form(all_facts)
-            result_data = {"facts": all_facts, "total_extracted": len(all_facts)}
-            validated = validate_extraction_output(result_data)
-            _append_llm_line(transcript_id, f"Phase 3 完成: 共 {len(all_facts)} 条事实")
-
             TASK_PROGRESS[transcript_id].update(
                 {
                     "mode": "llm",
                     "input_type": input_type,
-                    "current_turn": 2,
-                    "max_turns": 2,
+                    "current_turn": 1,
+                    "max_turns": 1,
                     "extraction_status": "completed",
                     "comparison_status": "pending",
                 }
             )
-            _append_llm_line(transcript_id, "识别完成：多 Phase 路径")
+            _append_llm_line(transcript_id, "识别完成：OpenAI-compatible 路径")
             return {
                 "task_id": payload_data.get("task_id", f"ext-{transcript_id}"),
                 "status": "completed",
@@ -2285,6 +2077,10 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     company_id = data.get("company_id")
     if company_id:
         jiandaoyun_data["_widget_1744600409845"] = {"value": company_id}
+    if data.get("follower"):
+        jiandaoyun_data["follower"] = {"value": data["follower"]}
+    if data.get("contid"):
+        jiandaoyun_data["contid"] = {"value": data["contid"]}
     if data.get("contact_names"):
         jiandaoyun_data["contname"] = {"value": data["contact_names"]}
 
@@ -2308,17 +2104,11 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
 
 @app.on_event("startup")
 async def startup_refresh_customer_index():
-    """应用启动时加载客户索引（优先本地缓存，避免每次重启全量拉取）"""
+    """应用启动时自动全量刷新一次客户索引（仅在配置完整时）"""
     from sqlalchemy.orm import sessionmaker
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     db = SessionLocal()
     try:
-        # 1) 先尝试本地缓存
-        if _load_customer_index_cache():
-            db.close()
-            return
-
-        # 2) 本地缓存不可用，从简道云拉取
         cfg = db.query(SystemConfig).first()
         if cfg:
             runtime_cfg = get_jiandaoyun_runtime_config(cfg)
@@ -2328,12 +2118,11 @@ async def startup_refresh_customer_index():
             main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
             entry_id = str(main_form.get("entry_id", "")).strip()
             if api_key and app_id and entry_id:
-                logger.info("本地缓存不可用，从简道云拉取客户索引...")
+                logger.info("启动时自动刷新客户索引...")
                 await refresh_customer_index_cache(runtime_cfg)
-                _save_customer_index_cache()
                 logger.info(f"启动刷新完成，共缓存 {len(CUSTOMER_INDEX_CACHE.get('items', []))} 条客户")
     except Exception as exc:
-        logger.warning(f"启动时加载客户索引失败: {exc}")
+        logger.warning(f"启动时自动刷新客户索引失败: {exc}")
     finally:
         db.close()
 
@@ -2351,49 +2140,6 @@ async def request_logger(request: Request, call_next):
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("unhandled error on %s", request.url.path)
     return JSONResponse(status_code=500, content={"detail": "系统异常"})
-
-
-# ── US-2 跟进记录生成路由 ──────────────────────────────────
-
-@app.get("/api/v1/followup/tags")
-def followup_tags(user: dict[str, Any] = Depends(require_auth)):
-    return {"tags": FOLLOWUP_GENJIN_TAGS}
-
-
-@app.get("/api/v1/followup/enums")
-def followup_enums(user: dict[str, Any] = Depends(require_auth)):
-    return {
-        "business_actions": FOLLOWUP_BUSINESS_ACTIONS,
-        "action_purposes": FOLLOWUP_ACTION_PURPOSES,
-    }
-
-
-@app.post("/api/v1/followup/generate")
-async def followup_generate(payload: FollowupGenerateRequest, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
-    cfg = ensure_system_config(db)
-    runtime_cfg = get_jiandaoyun_runtime_config(cfg)
-    api_key = runtime_cfg.get("api_key", "")
-    app_id = runtime_cfg.get("app_id", "")
-    llm_key = decrypt_secret(cfg.llm_api_key_encrypted) or ""
-    llm_base = cfg.llm_base_url or ""
-    llm_model = cfg.nl_chat_model or cfg.agent_a_model or "qwen-plus"
-    svc = FollowupService(api_key=api_key, app_id=app_id, llm_api_key=llm_key, llm_base_url=llm_base, llm_model=llm_model)
-    record = await svc.generate(payload)
-    return record.model_dump()
-
-
-@app.post("/api/v1/followup/submit")
-async def followup_submit(payload: FollowupSubmitRequest, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
-    cfg = ensure_system_config(db)
-    runtime_cfg = get_jiandaoyun_runtime_config(cfg)
-    api_key = runtime_cfg.get("api_key", "")
-    app_id = runtime_cfg.get("app_id", "")
-    llm_key = decrypt_secret(cfg.llm_api_key_encrypted) or ""
-    llm_base = cfg.llm_base_url or ""
-    llm_model = cfg.nl_chat_model or cfg.agent_a_model or "qwen-plus"
-    svc = FollowupService(api_key=api_key, app_id=app_id, llm_api_key=llm_key, llm_base_url=llm_base, llm_model=llm_model)
-    result = await svc.submit(payload, db)
-    return result
 
 
 @app.get("/{full_path:path}")
