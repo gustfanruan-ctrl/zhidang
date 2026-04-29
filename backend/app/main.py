@@ -356,7 +356,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
         return CUSTOMER_INDEX_CACHE
 
     display_fields = list(main_form.get("display_fields", []) or [])
-    for required_field in ["comname_01", "com_name", "com_type", "revenue_level", "if_access", "follow_form"]:
+    for required_field in ["comname_01", "com_name", "com_type", "revenue_level", "if_access", "follow_form", "success"]:
         if required_field not in display_fields:
             display_fields.append(required_field)
     
@@ -437,6 +437,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
             "revenue_level": row.get("revenue_level"),
             "if_access": row.get("if_access"),
             "follow_form": row.get("follow_form"),
+            "csm": row.get("success", ""),
             "raw": row,
         }
         for row in all_rows
@@ -564,7 +565,10 @@ def sso_generate(payload: SsoGeneratePayload, db: Session = Depends(get_db), use
 def sso_entry(query: SsoEntryQuery = Depends(), db: Session = Depends(get_db)):
     cfg = ensure_system_config(db)
     user = verify_sso_token(query.token, query.company_id, cfg.sso_shared_secret or "demo-secret", cfg.sso_token_ttl_minutes, db)
-    jwt_token = create_jwt({"user_name": user["user_name"], "user_id": user["user_id"], "source": "sso"})
+    # 优先使用 JDY 超链接动态传入的当前用户名
+    effective_user_name = query.jdy_username or user["user_name"]
+    effective_user_id = query.jdy_username or user["user_id"]
+    jwt_token = create_jwt({"user_name": effective_user_name, "user_id": effective_user_id, "source": "sso"})
     return RedirectResponse(url=f"/transcripts?token={jwt_token}&company_id={query.company_id}")
 
 
@@ -1050,6 +1054,7 @@ async def customers_list(
                     "company_name": row.get("comname_01") or row.get("com_name") or row.get("企业名称") or row.get("客户名称") or row.get("公司名称") or "未知公司",
                     "comname_01": row.get("comname_01"),
                     "com_name": row.get("com_name"),
+                    "csm": row.get("success", ""),
                     "raw": row,
                 }
                 for row in (one_page.get("data", []) or [])
@@ -1070,6 +1075,7 @@ async def customers_list(
                     "company_name": item.get("company_name"),
                     "comname_01": item.get("company_name"),
                     "com_name": item.get("company_name"),
+                    "csm": "",
                     "raw": item,
                 }
                 for item in local_customers
@@ -1077,6 +1083,12 @@ async def customers_list(
             ]
             if warning is None:
                 warning = "简道云客户索引拉取失败，已回退本地转写客户列表"
+
+    # 多租户：SSO 用户只显示自己负责的客户
+    if user.get("source") == "sso":
+        user_name = user.get("user_name", "")
+        if user_name:
+            cached_items = [c for c in cached_items if c.get("csm") == user_name]
 
     keyword_norm = keyword.strip().lower()
     if keyword_norm:
@@ -1133,6 +1145,11 @@ async def customers_list(
 async def company_search(query: CompanySearchQuery = Depends(), db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     keyword = query.q.strip().lower()
     customers = CUSTOMER_INDEX_CACHE.get("items", []) or fetch_customers_for_user(db, user)
+    # 多租户过滤
+    if user.get("source") == "sso":
+        user_name = user.get("user_name", "")
+        if user_name:
+            customers = [c for c in customers if c.get("csm") == user_name]
     if keyword:
         customers = [item for item in customers if keyword in item["company_name"].lower()]
     return {"items": customers[:50], "status": "cache" if CUSTOMER_INDEX_CACHE.get("items") else "mock"}
@@ -1149,6 +1166,12 @@ async def search_customers(
     limit = max(1, min(limit, 200))
     keyword_norm = keyword.strip().lower()
     cached_items = CUSTOMER_INDEX_CACHE.get("items", []) or []
+
+    # 多租户过滤
+    if user.get("source") == "sso":
+        user_name = user.get("user_name", "")
+        if user_name:
+            cached_items = [c for c in cached_items if c.get("csm") == user_name]
 
     if not cached_items:
         # 缓存为空时回退到 customers_list 的逻辑刷新一次

@@ -121,6 +121,7 @@ class SsoGeneratePayload(BaseAPIModel):
 class SsoEntryQuery(BaseAPIModel):
     token: str = Field(min_length=1)
     company_id: str = Field(min_length=1, max_length=255)
+    jdy_username: str = ""  # JDY 超链接 {username} 动态传入的当前用户
 
 class OperationItem(BaseAPIModel):
     op_id: str | None = None
