@@ -119,9 +119,10 @@ class SsoGeneratePayload(BaseAPIModel):
     company_id: str = Field(min_length=1, max_length=255)
 
 class SsoEntryQuery(BaseAPIModel):
-    token: str = Field(min_length=1)
-    company_id: str = Field(min_length=1, max_length=255)
-    jdy_username: str = ""  # JDY 超链接 {username} 动态传入的当前用户
+    token: str = ""                                         # HMAC token（完整 SSO 模式，兼容旧版）
+    company_id: str = ""                                    # 公司 ID（完整 SSO 模式）
+    portal_key: str = ""                                    # 简化模式：固定入口密钥（配置中的 sso_shared_secret）
+    jdy_username: str = ""                                  # JDY 超链接 {username} 动态传入的当前用户
 
 class OperationItem(BaseAPIModel):
     op_id: str | None = None

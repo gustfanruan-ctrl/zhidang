@@ -564,12 +564,24 @@ def sso_generate(payload: SsoGeneratePayload, db: Session = Depends(get_db), use
 @app.get("/api/v1/sso/entry")
 def sso_entry(query: SsoEntryQuery = Depends(), db: Session = Depends(get_db)):
     cfg = ensure_system_config(db)
-    user = verify_sso_token(query.token, query.company_id, cfg.sso_shared_secret or "demo-secret", cfg.sso_token_ttl_minutes, db)
-    # 优先使用 JDY 超链接动态传入的当前用户名
-    effective_user_name = query.jdy_username or user["user_name"]
-    effective_user_id = query.jdy_username or user["user_id"]
-    jwt_token = create_jwt({"user_name": effective_user_name, "user_id": effective_user_id, "source": "sso"})
-    return RedirectResponse(url=f"/transcripts?token={jwt_token}&company_id={query.company_id}")
+    secret = cfg.sso_shared_secret or "demo-secret"
+
+    # 模式1: 简化入口（portal_key + jdy_username）
+    if query.portal_key and query.jdy_username:
+        if query.portal_key != secret:
+            raise HTTPException(status_code=403, detail="入口密钥无效")
+        jwt_token = create_jwt({"user_name": query.jdy_username, "user_id": query.jdy_username, "source": "sso"})
+        return RedirectResponse(url=f"/transcripts?token={jwt_token}")
+
+    # 模式2: 完整 SSO（兼容旧版 token 模式）
+    if query.token and query.company_id:
+        user = verify_sso_token(query.token, query.company_id, secret, cfg.sso_token_ttl_minutes, db)
+        effective_user_name = query.jdy_username or user["user_name"]
+        effective_user_id = query.jdy_username or user["user_id"]
+        jwt_token = create_jwt({"user_name": effective_user_name, "user_id": effective_user_id, "source": "sso"})
+        return RedirectResponse(url=f"/transcripts?token={jwt_token}&company_id={query.company_id}")
+
+    raise HTTPException(status_code=400, detail="缺少 portal_key+jdy_username 或 token+company_id")
 
 
 @app.get("/api/v1/me")
