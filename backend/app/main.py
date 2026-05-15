@@ -24,7 +24,7 @@ from .crypto_utils import decrypt_secret, encrypt_secret
 from .database import Base, engine, get_db
 from .models import AnalyticsEvent, ConfigChangeLog, OperationLog, Superadmin, SystemConfig, Transcript
 from .progress import build_progress
-from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptUploadResponse
+from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, PowerMapChatPayload, PowerMapConfirmPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptAnalyzeResponse, TranscriptUploadResponse
 from .schemas.operation import OperationExecuteRequest, ReviewAction
 from .schemas.agent_output import validate_comparison_output, validate_extraction_output
 from .services.agent_runner import AgentPhase, AgentRunner
@@ -34,6 +34,8 @@ from .services.jiandaoyun_client import JiandaoyunClient, JiandaoyunClientError
 from .services.jiandaoyun_writer import JiandaoyunWriter
 from .services.openai_compatible_agent_client import OpenAICompatibleAgentClient
 from .services.operation_executor import execute_cards
+from .services.cas_auth import CasAuthError, cas_auth_service
+from .services.power_map_service import chat_power_map, confirm_power_map, get_power_map
 from .services.prompts import CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
 from .services.chat_executor import OP_LABELS, build_jiandaoyun_payload, build_preview_text, get_entry_id, log_operation
 from .services.tool_registry import build_chat_executors, get_chat_tools, get_executors, get_tools
@@ -196,6 +198,48 @@ TASK_PROGRESS: dict[str, dict[str, Any]] = {}
 JIANYDAOYUN_MAPPING_PATH = Path(__file__).resolve().parent / "config" / "jiandaoyun_field_mapping.json"
 CUSTOMER_INDEX_CACHE_TTL_SECONDS = 300
 CUSTOMER_INDEX_CACHE: dict[str, Any] = {"at": None, "items": [], "source": "empty"}
+SHARED_CACHE_DIR = Path(__file__).resolve().parent / "output"
+SHARED_CACHE_FILE = SHARED_CACHE_DIR / "customer_index_cache.json"
+_refresh_lock: asyncio.Lock | None = None
+
+def _get_refresh_lock() -> asyncio.Lock:
+    global _refresh_lock
+    if _refresh_lock is None:
+        _refresh_lock = asyncio.Lock()
+    return _refresh_lock
+
+def _load_shared_cache() -> dict[str, Any] | None:
+    """从共享文件加载缓存，所有 worker 进程共享"""
+    try:
+        if SHARED_CACHE_FILE.exists():
+            raw = SHARED_CACHE_FILE.read_text("utf-8")
+            data = json.loads(raw)
+            if data and data.get("items"):
+                at_str = data.get("at")
+                if at_str:
+                    try:
+                        data["at"] = datetime.fromisoformat(at_str)
+                    except Exception:
+                        data["at"] = None
+                return data
+    except Exception:
+        pass
+    return None
+
+def _save_shared_cache(data: dict[str, Any]) -> None:
+    """将缓存写入共享文件"""
+    try:
+        SHARED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        at_val = data.get("at")
+        serializable = {
+            "items": data.get("items", []),
+            "at": at_val.isoformat() if isinstance(at_val, datetime) else at_val,
+            "source": data.get("source", "memory"),
+        }
+        SHARED_CACHE_FILE.write_text(json.dumps(serializable, ensure_ascii=False, default=str), "utf-8")
+    except Exception as exc:
+        logger.warning(f"写入共享缓存文件失败: {exc}")
+
 OPERATION_CARD_STORE: dict[str, list[dict[str, Any]]] = {}
 
 
@@ -396,6 +440,10 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
         except JiandaoyunClientError as exc:
             error_count += 1
             logger.error(f"获取客户数据失败（尝试 {error_count}/{max_errors}）: {str(exc)}")
+            if "频率" in str(exc) or "限流" in str(exc):
+                wait = min(error_count * 3, 15)
+                logger.info(f"触发频率限制，等待 {wait}s 后重试...")
+                await asyncio.sleep(wait)
             if error_count >= max_errors:
                 logger.error(f"已达到最大错误次数 {max_errors}，停止获取客户数据")
                 break
@@ -429,7 +477,10 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
             
         logger.info(f"获取到第 {page_num} 页数据，共 {len(batch)} 条，累计 {len(all_rows) + len(batch)} 条")
         all_rows.extend(batch)
-        
+
+        # 每页之间间隔 500ms，避免触发简道云 API 频率限制
+        await asyncio.sleep(0.5)
+
         next_cursor = batch[-1].get("_id")
         if not next_cursor or next_cursor in seen_cursors:
             logger.info("已到达最后一页或检测到重复的游标")
@@ -463,6 +514,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
         CUSTOMER_INDEX_CACHE["items"] = list(uniq.values())
         CUSTOMER_INDEX_CACHE["at"] = now_utc()
         CUSTOMER_INDEX_CACHE["source"] = "jiandaoyun"
+        _save_shared_cache(CUSTOMER_INDEX_CACHE)
     return CUSTOMER_INDEX_CACHE
 
 
@@ -528,7 +580,60 @@ def on_startup() -> None:
         cfg = ensure_system_config(db)
         seed_jiandaoyun_mapping_if_missing(cfg, db)
         sync_prompt_defaults(cfg, db)
+    # 从 DB 恢复操作卡片到内存（服务重启后审核/执行仍可用）
+    _reload_cards_on_startup()
+    # 清理卡在 in-progress 状态超过 1 小时的转写
+    _reset_stale_transcripts()
     logger.info("startup complete")
+
+
+def _reload_cards_on_startup() -> None:
+    """从 DB 加载最近完成的转写卡片到 OPERATION_CARD_STORE。"""
+    from .database import SessionLocal as _SL
+    db = _SL()
+    try:
+        recent = db.scalars(
+            select(Transcript)
+            .where(Transcript.agent_b_result.isnot(None))
+            .where(Transcript.status.in_(["comparison_done", "reviewed"]))
+            .order_by(Transcript.created_at.desc())
+            .limit(50)
+        ).all()
+        count = 0
+        for t in recent:
+            cards = (t.agent_b_result or {}).get("result", {}).get("operation_cards", [])
+            if cards and t.id not in OPERATION_CARD_STORE:
+                OPERATION_CARD_STORE[t.id] = [dict(c) for c in cards]
+                count += 1
+        if count:
+            logger.info("startup: 从 DB 恢复了 %d 条转写的操作卡片", count)
+    except Exception:
+        logger.exception("startup: 恢复操作卡片失败")
+    finally:
+        db.close()
+
+
+def _reset_stale_transcripts() -> None:
+    """将卡在 extracting/comparing 超过 1 小时的转写标记为 error。"""
+    from .database import SessionLocal as _SL
+    db = _SL()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        stale = db.scalars(
+            select(Transcript)
+            .where(Transcript.status.in_(["extracting", "comparing"]))
+            .where(Transcript.updated_at < cutoff)
+        ).all()
+        for t in stale:
+            t.status = "error"
+            logger.info("startup: 将超时转写 %s 标记为 error", t.id)
+        if stale:
+            db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("startup: 重置超时转写失败")
+    finally:
+        db.close()
 
 
 @app.get("/health")
@@ -585,6 +690,8 @@ def sso_entry(query: SsoEntryQuery = Depends(), db: Session = Depends(get_db)):
             raise HTTPException(status_code=403, detail="入口密钥无效")
         jwt_token = create_jwt({"user_name": query.jdy_username, "user_id": query.jdy_username, "source": "sso"})
         return RedirectResponse(url=f"/transcripts?token={jwt_token}")
+        jwt_token = create_jwt({"user_name": jdy_username, "user_id": jdy_username, "source": "sso"})
+        return RedirectResponse(url=f"/transcripts?token={jwt_token}")
 
     # 模式2: 完整 SSO（兼容旧版 token 模式）
     if query.token and query.company_id:
@@ -595,6 +702,61 @@ def sso_entry(query: SsoEntryQuery = Depends(), db: Session = Depends(get_db)):
         return RedirectResponse(url=f"/transcripts?token={jwt_token}&company_id={query.company_id}")
 
     raise HTTPException(status_code=400, detail="缺少 portal_key+jdy_username 或 token+company_id")
+
+
+@app.get("/api/v1/sso/cas-callback")
+async def sso_cas_callback(st: str = "", sid: str = "", service: str = "", request: Request = None, db: Session = Depends(get_db)):
+    """CAS SSO 回调 —— 验证 ST 并返回 JWT"""
+    if not st:
+        raise HTTPException(status_code=400, detail="缺少 CAS service ticket (st)")
+
+    effective_service = service or CAS_REFERRER_URL
+    # PGT 回调暂不启用（CAS 测试环境对 http URL 验证不通过，
+    # 后续需要 HTTPS 代理回调时再修复）
+    # pgt_url = str(request.url_for("sso_cas_pgt_callback")) if request else ""
+    pgt_url = ""
+
+    try:
+        cas_user = await cas_auth_service.validate_st(st, effective_service, pgt_url=pgt_url)
+    except CasAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.exception("CAS validate_st failed")
+        raise HTTPException(status_code=500, detail=f"CAS 验证异常: {exc}")
+
+    attrs = cas_user.get("attributes", {}) or {}
+    if isinstance(attrs, dict):
+        username_list = attrs.get("username", [])
+        effective_username = str(username_list[0]) if username_list else str(cas_user.get("username", ""))
+    else:
+        effective_username = str(cas_user.get("username", ""))
+
+    jwt_token = create_jwt({"user_name": effective_username, "user_id": effective_username, "source": "sso"})
+    return RedirectResponse(url=f"/transcripts?token={jwt_token}")
+
+
+@app.get("/api/v1/sso/cas-pgt-callback")
+async def sso_cas_pgt_callback(pgtId: str = "", pgtIou: str = ""):
+    """CAS PGT 回调 —— CAS 服务器向此端点推送 PGT"""
+    if pgtId and pgtIou:
+        cas_auth_service.handle_pgt_callback(pgtId, pgtIou)
+        return {"ok": True}
+    raise HTTPException(status_code=400, detail="缺少 pgtId 或 pgtIou")
+
+
+CAS_REFERRER_URL = "https://47-98-102-197.sslip.io/"
+
+
+@app.get("/api/v1/sso/cas-login")
+async def sso_cas_login():
+    """CAS SSO 入口 —— 重定向到帆软通行证登录页"""
+    cas_login_url = (
+        "https://passport.fanruan.com/login/signin"
+        "?app=zhidang"
+        "&protocol=cas"
+        f"&referrer={CAS_REFERRER_URL}"
+    )
+    return RedirectResponse(url=cas_login_url)
 
 
 @app.get("/api/v1/me")
@@ -621,18 +783,24 @@ def get_admin_config(user: dict[str, Any] = Depends(require_superadmin), db: Ses
         "agent_a_max_rounds": cfg.agent_a_max_rounds,
         "agent_b_max_rounds": cfg.agent_b_max_rounds,
         "data_retention_days": cfg.data_retention_days,
+        "power_map_base_url": cfg.power_map_base_url or "",
+        "power_map_get_path": cfg.power_map_get_path or "",
+        "power_map_update_path": cfg.power_map_update_path or "",
+        "power_map_auth_token_configured": bool(cfg.power_map_auth_token_encrypted),
     }
 
 
 @app.put("/api/v1/admin/config")
 def save_admin_config(payload: ConfigPayload, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
     cfg = ensure_system_config(db)
-    before = {k: getattr(cfg, k) for k in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days"]}
+    before = {k: getattr(cfg, k) for k in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days", "power_map_base_url", "power_map_get_path", "power_map_update_path"]}
     if payload.jiandaoyun_api_key:
         cfg.jiandaoyun_api_key_encrypted = encrypt_secret(payload.jiandaoyun_api_key)
     if payload.dingtalk_app_secret:
         cfg.dingtalk_app_secret_encrypted = encrypt_secret(payload.dingtalk_app_secret)
-    for key in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days"]:
+    if payload.power_map_auth_token:
+        cfg.power_map_auth_token_encrypted = encrypt_secret(payload.power_map_auth_token)
+    for key in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days", "power_map_base_url", "power_map_get_path", "power_map_update_path"]:
         value = getattr(payload, key)
         if value is not None:
             setattr(cfg, key, value)
@@ -764,7 +932,7 @@ async def test_llm_config(payload: LlmTestPayload, user: dict[str, Any] = Depend
             base_url = (cfg.llm_base_url or "").rstrip("/")
             if not base_url:
                 raise RuntimeError("未配置 LLM Base URL")
-            async with httpx.AsyncClient(timeout=20) as client:
+            async with httpx.AsyncClient(timeout=3600) as client:
                 resp = await client.post(
                     f"{base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -852,6 +1020,24 @@ def admin_maintenance_health(user: dict[str, Any] = Depends(require_superadmin),
     return {"ok": overall_ok, "checks": checks, "timestamp": now_utc().isoformat()}
 
 
+@app.post("/api/v1/admin/refresh-cache")
+async def admin_refresh_cache(
+    user: dict[str, Any] = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+):
+    cfg = ensure_system_config(db)
+    runtime_cfg = get_jiandaoyun_runtime_config(cfg)
+    # 强制清空缓存（包括内存和共享文件），触发重新拉取
+    CUSTOMER_INDEX_CACHE["items"] = []
+    CUSTOMER_INDEX_CACHE["at"] = None
+    if SHARED_CACHE_FILE.exists():
+        SHARED_CACHE_FILE.unlink()
+    async with _get_refresh_lock():
+        await refresh_customer_index_cache(runtime_cfg)
+    count = len(CUSTOMER_INDEX_CACHE.get("items", []))
+    return {"success": True, "message": f"客户索引已刷新，共 {count} 条", "total": count}
+
+
 @app.post("/api/v1/admin/jiandaoyun/fetch-widgets")
 async def admin_fetch_jiandaoyun_widgets(
     payload: AdminFetchWidgetsPayload,
@@ -917,7 +1103,7 @@ def spa_fallback_preview(full_path: str):
 
 
 @app.post("/api/v1/transcript/upload")
-async def transcript_upload(file: UploadFile = File(...), company_name_hint: str = Form(default=""), db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+async def transcript_upload(files: list[UploadFile] = File(...), company_name_hint: str = Form(default=""), db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     allowed_types = {
         ".txt": "text",
         ".srt": "text",
@@ -931,29 +1117,56 @@ async def transcript_upload(file: UploadFile = File(...), company_name_hint: str
         ".png": "image",
         ".webp": "image",
     }
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in allowed_types:
-        raise HTTPException(status_code=400, detail="不支持的文件类型，支持文本文件与 JPEG/PNG/WebP 图片。")
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="单次最多上传10个文件。")
 
-    raw_bytes = await file.read()
-    if len(raw_bytes) > 8 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="文件超过 8MB 限制。")
+    merged_text_parts: list[str] = []
+    merged_title = None
+    total_size = 0
+    input_type: str = "text"
+    has_image = False
+    file_names: list[str] = []
+    total_char_count = 0
 
-    input_type = allowed_types[suffix]
-    if input_type == "text":
-        content = raw_bytes.decode("utf-8", errors="ignore")
-        parsed = build_raw_transcript_payload(content)
-    else:
-        content = ""
-        parsed = build_raw_transcript_payload(
-            f"已上传图片文件：{file.filename}",
-            fallback_title=file.filename or "图片转写",
-        )
+    for f in files:
+        suffix = Path(f.filename or "").suffix.lower()
+        if suffix not in allowed_types:
+            raise HTTPException(status_code=400, detail=f"不支持的文件类型: {f.filename}，支持文本文件与 JPEG/PNG/WebP 图片。")
+
+        raw_bytes = await f.read()
+        total_size += len(raw_bytes)
+        if total_size > 16 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="文件总大小超过 16MB 限制。")
+
+        file_type = allowed_types[suffix]
+        file_names.append(f.filename or "未知文件")
+
+        if file_type == "text":
+            content = raw_bytes.decode("utf-8", errors="ignore")
+            merged_text_parts.append(f"--- 文件: {f.filename} ---\n{content}")
+            total_char_count += len(content)
+            if not merged_title:
+                merged_title = f.filename
+        else:
+            has_image = True
+            merged_text_parts.append(f"--- 文件: {f.filename} (图片) ---")
+
+    if has_image and merged_text_parts and any("(图片)" not in p for p in merged_text_parts):
+        input_type = "mixed"
+    elif has_image:
+        input_type = "image"
+
+    merged_raw = "\n\n".join(merged_text_parts)
+    parsed = build_raw_transcript_payload(merged_raw, fallback_title=merged_title or "多文件转写")
+    # 多文件时标题用第一个文件名（去掉扩展名），避免出现 "--- 文件: xxx ---" 这种分隔符标题
+    if merged_title and parsed["title"].startswith("--- 文件:"):
+        from pathlib import Path as _Path
+        parsed["title"] = _Path(merged_title).stem or merged_title
 
     normalized_company = company_name_hint.strip() if company_name_hint else ""
     transcript = Transcript(
         source="upload",
-        source_id=file.filename,
+        source_id=", ".join(file_names),
         title=parsed["title"],
         raw_text=parsed["raw_text"],
         segments=parsed["segments"],
@@ -967,8 +1180,8 @@ async def transcript_upload(file: UploadFile = File(...), company_name_hint: str
     db.add(transcript)
     db.commit()
     db.refresh(transcript)
-    emit_event(db, "transcript.uploaded", {"user_name": user.get("username", "demo"), "user_id": user.get("username", "demo"), "source": user.get("source", "superadmin")}, {"transcript_id": transcript.id, "company_id_hash": hash_company_id(company_name_hint or transcript.id), "session_id": str(uuid4())}, {"source": "upload", "file_name": file.filename, "file_size_bytes": len(raw_bytes), "segment_count": len(parsed["segments"]), "char_count": len(content), "input_type": input_type})
-    return TranscriptUploadResponse(transcript_id=transcript.id, title=parsed["title"], segment_count=len(parsed["segments"]), status="parsed", preview=parsed["raw_text"][:500])
+    emit_event(db, "transcript.uploaded", {"user_name": user.get("username", "demo"), "user_id": user.get("username", "demo"), "source": user.get("source", "superadmin")}, {"transcript_id": transcript.id, "company_id_hash": hash_company_id(company_name_hint or transcript.id), "session_id": str(uuid4())}, {"source": "upload", "file_count": len(files), "file_names": file_names, "total_size_bytes": total_size, "segment_count": len(parsed["segments"]), "char_count": total_char_count, "input_type": input_type})
+    return TranscriptUploadResponse(transcript_id=transcript.id, title=parsed["title"], segment_count=len(parsed["segments"]), status="parsed", preview=parsed["raw_text"][:500], file_count=len(files))
 
 
 @app.post("/api/v1/transcript/dingtalk-fetch")
@@ -1005,16 +1218,78 @@ def transcript_dingtalk_fetch(payload: DingtalkFetchPayload, db: Session = Depen
 
 @app.get("/api/v1/transcripts")
 def list_transcripts(db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
-    items = db.scalars(select(Transcript).order_by(Transcript.created_at.desc())).all()
-    return {"items": [{"id": t.id, "source": t.source, "source_id": t.source_id, "title": t.title, "status": t.status, "company_name": t.company_name, "company_name_hint": t.company_name, "raw_text": t.raw_text, "segments": t.segments, "input_type": t.input_type} for t in items]}
+    stmt = _allowed_transcript_stmt(user).order_by(Transcript.created_at.desc())
+    items = db.scalars(stmt).all()
+    return {
+        "items": [
+            {
+                "id": t.id,
+                "source": t.source,
+                "source_id": t.source_id,
+                "title": t.title,
+                "status": t.status,
+                "company_name": t.company_name,
+                "company_name_hint": t.company_name,
+                "raw_text": t.raw_text,
+                "segments": t.segments,
+                "input_type": t.input_type,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+                "extraction_summary": _extraction_summary(t.agent_a_result),
+                "card_count": len((t.agent_b_result or {}).get("result", {}).get("operation_cards", [])) if t.agent_b_result else 0,
+                "sso_user_name": t.sso_user_name,
+            }
+            for t in items
+        ]
+    }
+
+
+def _extraction_summary(agent_a_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """从 agent_a_result 提取摘要（预期数/场景数）用于列表展示。"""
+    if not agent_a_result or agent_a_result.get("error"):
+        return None
+    result = agent_a_result.get("result", {})
+    facts = result.get("facts", [])
+    if not facts:
+        return None
+    expectations = sum(1 for f in facts if f.get("category") == "expectation" or f.get("type") == "expectation" or "预期" in str(f.get("field_name", "")))
+    scenarios = sum(1 for f in facts if f.get("category") == "scenario" or f.get("type") == "scenario" or "场景" in str(f.get("field_name", "")))
+    return {"expectations": expectations, "scenarios": scenarios, "total": len(facts)}
 
 
 @app.get("/api/v1/transcripts/{transcript_id}")
 def get_transcript(transcript_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
-    t = db.get(Transcript, transcript_id)
+    stmt = _allowed_transcript_stmt(user).where(Transcript.id == transcript_id)
+    t = db.scalar(stmt)
     if not t:
         raise HTTPException(status_code=404, detail="转写不存在")
-    return {"id": t.id, "source": t.source, "source_id": t.source_id, "title": t.title, "status": t.status, "company_name": t.company_name, "company_name_hint": t.company_name, "raw_text": t.raw_text, "segments": t.segments, "company_id": t.company_id, "input_type": t.input_type}
+    return {
+        "id": t.id, "source": t.source, "source_id": t.source_id,
+        "title": t.title, "status": t.status, "company_name": t.company_name,
+        "company_name_hint": t.company_name, "raw_text": t.raw_text,
+        "segments": t.segments, "company_id": t.company_id, "input_type": t.input_type,
+        "agent_a_result": t.agent_a_result,
+        "agent_b_result": t.agent_b_result,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+        "sso_user_name": t.sso_user_name,
+    }
+
+
+@app.post("/api/v1/transcripts/{transcript_id}/analyze")
+async def start_transcript_analysis(transcript_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    stmt = _allowed_transcript_stmt(user).where(Transcript.id == transcript_id)
+    transcript = db.scalar(stmt)
+    if not transcript:
+        raise HTTPException(status_code=404, detail="转写不存在")
+    if transcript.status not in ("parsed", "error"):
+        raise HTTPException(status_code=409, detail=f"转写状态为 {transcript.status}，无法启动分析")
+    if not transcript.raw_text:
+        raise HTTPException(status_code=400, detail="转写内容为空")
+
+    from .services.analysis_pipeline import run_analysis_pipeline
+    asyncio.create_task(run_analysis_pipeline(transcript_id))
+
+    emit_event(db, "analysis.started", {"user_name": user.get("username", "demo"), "user_id": user.get("username", "demo"), "source": user.get("source", "superadmin")}, {"transcript_id": transcript_id, "company_id_hash": transcript.company_id or "demo", "session_id": str(uuid4())}, {"status": "analyzing"})
+    return TranscriptAnalyzeResponse(transcript_id=transcript_id, status="analyzing", message="分析已启动，可关闭页面稍后查看")
 
 
 @app.get("/api/v1/customers/list")
@@ -1048,12 +1323,30 @@ async def customers_list(
         return {"mode": "mock", "customers": customers, "cached_at": (CUSTOMERS_CACHE.get("at") or now).isoformat()}
     now = now_utc()
     warning: str | None = None
-    # 只在显式刷新或缓存为空时触发全量查询；缓存过期不自动刷，避免重复查询
+
+    # 先尝试从共享文件加载缓存（进程间共享）
+    if not CUSTOMER_INDEX_CACHE.get("items"):
+        shared = _load_shared_cache()
+        if shared and shared.get("items"):
+            CUSTOMER_INDEX_CACHE["items"] = shared["items"]
+            CUSTOMER_INDEX_CACHE["at"] = shared.get("at")
+            CUSTOMER_INDEX_CACHE["source"] = shared.get("source", "file")
+
+    # 只在显式刷新或缓存为空时触发全量查询；使用 asyncio.Lock 确保只有一个协程执行刷新
     if refresh or not CUSTOMER_INDEX_CACHE.get("items"):
-        try:
-            await refresh_customer_index_cache(runtime_cfg)
-        except JiandaoyunClientError as exc:
-            warning = str(exc)
+        async with _get_refresh_lock():
+            # 获取到锁后再次检查，避免重复刷新
+            if refresh or not CUSTOMER_INDEX_CACHE.get("items"):
+                try:
+                    shared = _load_shared_cache()
+                    if not refresh and shared and shared.get("items"):
+                        CUSTOMER_INDEX_CACHE["items"] = shared["items"]
+                        CUSTOMER_INDEX_CACHE["at"] = shared.get("at")
+                        CUSTOMER_INDEX_CACHE["source"] = shared.get("source", "file")
+                    else:
+                        await refresh_customer_index_cache(runtime_cfg)
+                except JiandaoyunClientError as exc:
+                    warning = str(exc)
 
     cached_items = CUSTOMER_INDEX_CACHE.get("items", []) or []
     if not cached_items:
@@ -1459,8 +1752,8 @@ async def run_extraction_task(payload: AgentExtractionPayload, cfg: SystemConfig
     input_type = payload_data.get("input_type", "text")
     content = payload_data.get("content") or transcript_obj.get("raw_text")
     images = payload_data.get("images") or []
-    llm_request_timeout = int(payload_data.get("llm_request_timeout_seconds") or 300)
-    llm_connect_timeout = int(payload_data.get("llm_connect_timeout_seconds") or 30)
+    llm_request_timeout = int(payload_data.get("llm_request_timeout_seconds") or 3600)
+    llm_connect_timeout = int(payload_data.get("llm_connect_timeout_seconds") or 3600)
     agent_total_timeout = int(payload_data.get("agent_total_timeout_seconds") or AgentRunner.TOTAL_TIMEOUT_SECONDS)
     agent_tool_timeout = int(payload_data.get("agent_tool_timeout_seconds") or AgentRunner.TOOL_TIMEOUT_SECONDS)
     agent_max_iterations = int(payload_data.get("agent_max_iterations") or AgentRunner.MAX_ITERATIONS)
@@ -1608,6 +1901,7 @@ async def comparison_task(payload: AgentComparisonPayload, db: Session = Depends
         TASK_PROGRESS.setdefault(transcript_id, {}).update({"comparison_status": "processing"})
         _append_llm_line(transcript_id, "进入比对阶段：生成操作卡片")
     runtime_cfg = get_jiandaoyun_runtime_config(cfg)
+    llm_cfg = _get_llm_runtime_config(cfg)
     profile = await get_executors("comparison")["fetch_customer_profile"](
         {
             "company_id": payload_data.get("company_id") or "demo",
@@ -1620,6 +1914,8 @@ async def comparison_task(payload: AgentComparisonPayload, db: Session = Depends
             "extracted_facts": payload_data.get("extraction_result", {}).get("facts", []),
             "existing_profile": profile,
             "runtime_cfg": runtime_cfg,
+            "llm_cfg": llm_cfg,
+            "agent_b_prompt": cfg.agent_b_prompt,
         }
     )
     cfg_mapping = (ensure_system_config(db).field_mappings or {}).get("jiandaoyun", {})
@@ -1665,6 +1961,21 @@ def review_session(payload: ReviewSessionPayload, db: Session = Depends(get_db),
     return {"success": True}
 
 
+@app.post("/api/v1/operations/add")
+def operations_add(payload: dict[str, Any], db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    """手动新增操作卡片到审核队列。"""
+    transcript_id = payload.get("transcript_id")
+    card = dict(payload.get("card") or {})
+    if not transcript_id or not card:
+        raise HTTPException(status_code=400, detail="transcript_id 和 card 为必填")
+    card["card_id"] = card.get("card_id") or str(uuid4())
+    card["review_status"] = "approved"
+    card["_manual"] = True
+    OPERATION_CARD_STORE.setdefault(transcript_id, []).append(card)
+    emit_event(db, "card.manual_add", {"user_name": user.get("username", "demo"), "user_id": user.get("username", "demo"), "source": user.get("source", "superadmin")}, {"transcript_id": transcript_id, "company_id_hash": hash_company_id(transcript_id), "session_id": str(uuid4())}, {"card_id": card["card_id"], "target_form": card.get("target_form", "")})
+    return {"success": True, "card_id": card["card_id"]}
+
+
 @app.post("/api/v1/operations/review")
 def operations_review(payload: ReviewAction, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     cards = OPERATION_CARD_STORE.get(payload.transcript_id, [])
@@ -1699,6 +2010,35 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         forms_cfg = (((runtime_cfg.get("mapping") or {}).get("forms")) or {})
         api_key = runtime_cfg.get("api_key") or ""
         app_id = runtime_cfg.get("app_id") or ""
+
+        # 合并前端传回的字段更新（如 status、is_first_value 等用户修改项）
+        if req.field_updates:
+            for card in approved:
+                cid = card.get("card_id")
+                updates = req.field_updates.get(cid, {})
+                if not updates:
+                    continue
+                change_items = card.get("change_items")
+                if change_items:
+                    for item in change_items:
+                        fn = item.get("field_name")
+                        if fn in updates:
+                            item["new_value"] = updates[fn]
+                    # 如果 field_updates 中有字段在 change_items 中不存在，追加新的 change item
+                    form_cfg = forms_cfg.get(card.get("target_form", ""), {})
+                    field_mapping = form_cfg.get("field_mapping") or {}
+                    existing_fields = {it.get("field_name") for it in change_items}
+                    for field_name, new_val in updates.items():
+                        if field_name in existing_fields:
+                            continue
+                        mapped = field_mapping.get(field_name)
+                        if mapped and isinstance(mapped, dict):
+                            change_items.append({
+                                "field_name": field_name,
+                                "widget_name": str(mapped.get("widget", "")),
+                                "old_value": None,
+                                "new_value": new_val,
+                            })
         if not api_key or not app_id:
             results = [{"card_id": c.get("card_id"), "execute_status": "skipped", "error": "jiandaoyun_api_key_not_configured"} for c in approved]
             return {"success": True, "results": results}
@@ -1846,8 +2186,8 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         tool_executors=build_chat_executors(runtime_cfg),
         model_name=cfg.nl_chat_model or llm_cfg.get("model_name") or ("auto" if provider in {"dashscope", "openai_compatible"} else "claude-sonnet-4-5-20250929"),
         max_iterations=8,
-        tool_timeout_seconds=30,
-        total_timeout_seconds=300,
+        tool_timeout_seconds=3600,
+        total_timeout_seconds=3600,
         write_tools={"create_customer_record", "update_customer_record", "delete_customer_record"},
         write_form_configs=forms_cfg,
         write_preview_builder=build_preview_text,
@@ -1914,6 +2254,41 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
     }
 
 
+# ── 权利地图 API ──────────────────────────────────────
+
+@app.get("/api/v1/power-map/{company_id}")
+async def power_map_get(company_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    try:
+        map_data = await get_power_map(db, company_id, current_user=user)
+        return {"company_id": company_id, "map_data": map_data}
+    except Exception as exc:
+        logger.exception("power map get failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/v1/power-map/{company_id}/chat")
+async def power_map_chat(company_id: str, payload: PowerMapChatPayload, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    msg = payload.message
+    session_id = payload.session_id or str(uuid4())
+
+    if payload.confirm:
+        return {"reply": "请使用 /confirm 端点确认执行修改。", "session_id": session_id, "needs_confirmation": False}
+
+    result = await chat_power_map(db, company_id, msg, current_user=user)
+    result["session_id"] = session_id
+    return result
+
+
+@app.post("/api/v1/power-map/{company_id}/confirm")
+async def power_map_confirm(company_id: str, payload: PowerMapConfirmPayload, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    try:
+        result = await confirm_power_map(db, company_id, payload.proposed_changes, current_user=user)
+        return result
+    except Exception as exc:
+        logger.exception("power map confirm failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/v1/analytics/business/overview")
 def analytics_business_overview(period: str = "7d", db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_superadmin)):
     visits = db.scalar(select(func.count()).select_from(AnalyticsEvent).where(AnalyticsEvent.event_type == "transcript.uploaded")) or 0
@@ -1933,7 +2308,48 @@ def analytics_prompt_compare(agent: str = "agent_a", period: str = "30d", user: 
 
 @app.get("/api/v1/transcripts/{transcript_id}/progress")
 def transcript_progress(transcript_id: str, user: dict[str, Any] = Depends(require_auth)):
+    # 校验转写属于当前用户
+    from .database import SessionLocal as _SL3
+    _db3 = _SL3()
+    try:
+        stmt = _allowed_transcript_stmt(user).where(Transcript.id == transcript_id)
+        if not _db3.scalar(stmt):
+            raise HTTPException(status_code=404, detail="转写不存在")
+    finally:
+        _db3.close()
+
     p = TASK_PROGRESS.get(transcript_id, {})
+
+    # 内存无进度数据时从 DB 重建
+    if not p:
+        from .database import SessionLocal as _SessionLocal
+        _db = _SessionLocal()
+        try:
+            t = _db.get(Transcript, transcript_id)
+            if t:
+                ext_status = "completed" if t.agent_a_result else "pending"
+                cmp_status = "completed" if t.agent_b_result else "pending"
+                if t.status == "error":
+                    ext_status = "error"
+                    cmp_status = "error"
+                elif t.status == "extracting":
+                    ext_status = "processing"
+                elif t.status == "comparing":
+                    ext_status = "completed"
+                    cmp_status = "processing"
+                p = {
+                    "mode": "llm",
+                    "input_type": t.input_type or "text",
+                    "current_turn": 0,
+                    "max_turns": 8,
+                    "extraction_status": ext_status,
+                    "comparison_status": cmp_status,
+                    "llm_lines": [],
+                }
+                TASK_PROGRESS[transcript_id] = p
+        finally:
+            _db.close()
+
     base = build_progress(
         transcript_id,
         mode=p.get("mode", "fallback"),
@@ -1945,6 +2361,20 @@ def transcript_progress(transcript_id: str, user: dict[str, Any] = Depends(requi
         llm_lines=p.get("llm_lines", []),
     )
     cards = OPERATION_CARD_STORE.get(transcript_id, [])
+
+    # 内存无卡片时从 DB agent_b_result 重新加载
+    if not cards:
+        from .database import SessionLocal as _SessionLocal2
+        _db2 = _SessionLocal2()
+        try:
+            t2 = _db2.get(Transcript, transcript_id)
+            if t2 and t2.agent_b_result:
+                cards = (t2.agent_b_result.get("result") or {}).get("operation_cards", [])
+                if cards:
+                    OPERATION_CARD_STORE[transcript_id] = [dict(c) for c in cards]
+        finally:
+            _db2.close()
+
     cards_total = len(cards)
     cards_approved = sum(1 for c in cards if c.get("review_status") == "approved")
     cards_executed = sum(1 for c in cards if c.get("execute_status") == "success")
@@ -2001,8 +2431,8 @@ async def debug_customers(db: Session = Depends(get_db), user: dict[str, Any] = 
         "app_id": runtime_cfg.get("app_id"),
         "main_entry_id": str(main_form.get("entry_id", "")).strip(),
         "cache_status": {
-            "customers_cache_at": CUSTOMERS_CACHE.get("at"),
-            "customer_index_cache_at": CUSTOMER_INDEX_CACHE.get("at"),
+            "customers_cache_at": CUSTOMERS_CACHE.get("at").isoformat() if isinstance(CUSTOMERS_CACHE.get("at"), datetime) else None,
+            "customer_index_cache_at": CUSTOMER_INDEX_CACHE.get("at").isoformat() if isinstance(CUSTOMER_INDEX_CACHE.get("at"), datetime) else None,
             "customer_index_items_count": len(CUSTOMER_INDEX_CACHE.get("items", [])),
         },
         "local_transcripts_customers": len(fetch_customers_for_user(db, user)),
@@ -2025,9 +2455,8 @@ async def get_review_tags():
 async def generate_review(data: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
     """调用 LLM 生成跟进记录"""
     from .models import SystemConfig
-    from .progress import now_utc
     
-    transcript_text = (data.get("transcript_text") or "").strip()
+    transcript_text = (data.get("transcript_text") or data.get("content") or "").strip()
     company_name = (data.get("company_name") or "").strip()
     if not transcript_text or not company_name:
         raise HTTPException(status_code=400, detail="缺少 transcript_text 或 company_name")
@@ -2050,16 +2479,17 @@ async def generate_review(data: dict[str, Any], user: dict[str, Any] = Depends(r
     except Exception:
         tag_tree_data = []
 
+    reviewer_name = _user_name(user)
     system_prompt = f"""你是帆软内部的客户成功记录员。
 从会议转写中提取结构化跟进记录。
 输出纯 JSON，包含以下字段：
-follow_type：从"线上跟进/线下跟进/内部沟通"选一个
-review_date：YYYY-MM-DD，识别不到用今天日期
+        follow_type：从"线上跟进/线下跟进/内部沟通"选一个
+review_date：YYYY-MM-DD
 review_record：严格按以下格式输出：
 【跟进目的】一句话概括，10字以内
 【沟通详情】客观详细记录沟通内容，保留所有数字、版本号、规模等具体信息
 【附件/kms链接】暂无
-【参与人】我方：xxx  客户方：xxx（职位/部门）
+【参与人】我方：{reviewer_name}  客户方：xxx（职位/部门）
 genjin_tags：数组，每项 {{level1, level2, level3}}，从以下选项中选择，level3 可为空字符串：
 {json.dumps(tag_tree_data, ensure_ascii=False, indent=2)}
 contact_names：字符串，客户侧参与人
@@ -2069,7 +2499,7 @@ if_tuisong：默认"否"
     user_prompt = f"会议转写内容：\n{transcript_text}\n\n客户名称：\n{company_name}\n\n请生成结构化的跟进记录。"
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=3600) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -2113,24 +2543,68 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
         .get("entry_id", "670a28334883adafb152a869")
     )
 
+    # 客户名称：优先用 com_name，其次 company_name
+    jiandaoyun_com_name = data.get("com_name") or data.get("company_name") or ""
+    # 跟进人：命名规则为"英文名-中文名"，取"-"前的英文名作为简道云 username
+    from datetime import date
+    review_date = data.get("review_date", "") or date.today().isoformat()
+
+    jiandaoyun_follower = None
+    candidate_name = data.get("follower") or _user_name(user)
+    if user.get("source") == "superadmin":
+        pass  # 超管不在简道云人员字段中
+    elif candidate_name and candidate_name != "unknown":
+        # 按"英文名-中文名"规则提取 username，再查完整用户对象
+        jdy_username = candidate_name.split("-", 1)[0].strip()
+        try:
+            import httpx
+            headers = {"Authorization": f"Bearer {jiandaoyun_api_key}", "Content-Type": "application/json"}
+            async with httpx.AsyncClient(timeout=3600.0) as hc:
+                resp = await hc.post(
+                    "https://api.jiandaoyun.com/api/v5/corp/user/get",
+                    headers=headers, json={"username": jdy_username}
+                )
+                if resp.status_code == 200:
+                    body = resp.json()
+                    print("[DEBUG] corp/user/get response: %s" % json.dumps(body, ensure_ascii=False)[:300])
+                    jdy_user = body.get("user")
+                    if jdy_user:
+                        # 简道云成员单选字段只需传 username 字符串
+                        jiandaoyun_follower = jdy_user["username"]
+        except Exception:
+            pass
+
     jiandaoyun_data = {
-        "com_name": {"value": data.get("com_name", "")},
+        "com_name": {"value": jiandaoyun_com_name},
         "follow_type": {"value": data.get("follow_type", "")},
-        "review_date": {"value": data.get("review_date", "")},
+        "review_date": {"value": review_date},
         "review_record": {"value": data.get("review_record", "")},
         "if_tuisong": {"value": data.get("if_tuisong", "否")},
     }
+    if jiandaoyun_follower:
+        jiandaoyun_data["follower"] = {"value": jiandaoyun_follower}
+    company_id = data.get("company_id")
     if data.get("comid"):
         jiandaoyun_data["comid"] = {"value": data["comid"]}
-    company_id = data.get("company_id")
+    elif company_id:
+        jiandaoyun_data["comid"] = {"value": company_id}
     if company_id:
         jiandaoyun_data["_widget_1744600409845"] = {"value": company_id}
-    if data.get("follower"):
-        jiandaoyun_data["follower"] = {"value": data["follower"]}
     if data.get("contid"):
         jiandaoyun_data["contid"] = {"value": data["contid"]}
     if data.get("contact_names"):
         jiandaoyun_data["contname"] = {"value": data["contact_names"]}
+    # 预期状态：写入是否第一价值实现预期 和 关联预期
+    yuqi_first_value = data.get("yuqi_first_value", "")
+    if yuqi_first_value:
+        jiandaoyun_data["_widget_1757578251950"] = {"value": yuqi_first_value}
+    yuqi_id = data.get("yuqi_id", "")
+    if yuqi_id:
+        jiandaoyun_data["review_yuqi_id"] = {"value": yuqi_id}
+    # 跟进标签（关联触发式标签）
+    relevent_tags = data.get("relevent_tag", [])
+    if relevent_tags:
+        jiandaoyun_data["relevent_tag"] = {"value": relevent_tags}
 
     genjin_tags = data.get("genjin_tags", [])
     if genjin_tags:
@@ -2166,9 +2640,21 @@ async def startup_refresh_customer_index():
             main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
             entry_id = str(main_form.get("entry_id", "")).strip()
             if api_key and app_id and entry_id:
-                logger.info("启动时自动刷新客户索引...")
-                await refresh_customer_index_cache(runtime_cfg)
-                logger.info(f"启动刷新完成，共缓存 {len(CUSTOMER_INDEX_CACHE.get('items', []))} 条客户")
+                # 启动时先尝试加载共享缓存，避免所有 worker 同时请求简道云 API
+                shared = _load_shared_cache()
+                if shared and shared.get("items"):
+                    CUSTOMER_INDEX_CACHE["items"] = shared["items"]
+                    CUSTOMER_INDEX_CACHE["at"] = shared.get("at")
+                    CUSTOMER_INDEX_CACHE["source"] = shared.get("source", "file")
+                    logger.info(f"启动时从共享缓存加载 {len(CUSTOMER_INDEX_CACHE.get('items', []))} 条客户")
+                else:
+                    # 没有共享缓存时，随机延迟 0~15 秒，错开 8 个 worker 的请求
+                    import random
+                    delay = random.uniform(0, 15)
+                    logger.info(f"共享缓存为空，{delay:.1f}s 后刷新客户索引...")
+                    await asyncio.sleep(delay)
+                    await refresh_customer_index_cache(runtime_cfg)
+                    logger.info(f"启动刷新完成，共缓存 {len(CUSTOMER_INDEX_CACHE.get('items', []))} 条客户")
     except Exception as exc:
         logger.warning(f"启动时自动刷新客户索引失败: {exc}")
     finally:
@@ -2188,6 +2674,32 @@ async def request_logger(request: Request, call_next):
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("unhandled error on %s", request.url.path)
     return JSONResponse(status_code=500, content={"detail": "系统异常"})
+
+
+# ── review/followup 别名路由 ──────────────────────
+# 前端 ReviewPage.vue 调用 /api/v1/followup/* 路径，这里注册别名
+
+@app.get("/api/v1/followup/tags")
+async def followup_get_tags():
+    return await get_review_tags()
+
+@app.post("/api/v1/followup/generate")
+async def followup_generate(data: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    return await generate_review(data, user, db)
+
+@app.post("/api/v1/followup/submit")
+async def followup_submit(data: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    return await submit_review(data, user, db)
+
+@app.get("/api/v1/followup/enums")
+async def followup_get_enums():
+    """获取商务行为和行为目的枚举值"""
+    import json as _json
+    enums_path = Path(__file__).resolve().parent / "config" / "followup_enums.json"
+    try:
+        return _json.loads(enums_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"behaviors": [], "purposes": []}
 
 
 @app.get("/{full_path:path}")
