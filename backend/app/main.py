@@ -1396,20 +1396,38 @@ async def fetch_followup_records(
 
 
 @app.post("/api/v1/transcripts/{transcript_id}/analyze")
-async def start_transcript_analysis(transcript_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
-    stmt = _allowed_transcript_stmt(user).where(Transcript.id == transcript_id)
-    transcript = db.scalar(stmt)
-    if not transcript:
-        raise HTTPException(status_code=404, detail="转写不存在")
-    if transcript.status not in ("parsed", "error"):
-        raise HTTPException(status_code=409, detail=f"转写状态为 {transcript.status}，无法启动分析")
-    if not transcript.raw_text:
-        raise HTTPException(status_code=400, detail="转写内容为空")
+async def start_transcript_analysis(
+    transcript_id: str,
+    source_type: str = "transcript",
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    if source_type == "followup":
+        stmt = _allowed_followup_stmt(user).where(FollowupRecord.id == transcript_id)
+        record = db.scalar(stmt)
+        if not record:
+            raise HTTPException(status_code=404, detail="跟进记录不存在")
+    else:
+        stmt = _allowed_transcript_stmt(user).where(Transcript.id == transcript_id)
+        record = db.scalar(stmt)
+        if not record:
+            raise HTTPException(status_code=404, detail="转写不存在")
+
+    if record.status not in ("parsed", "error"):
+        raise HTTPException(status_code=409, detail=f"状态为 {record.status}，无法启动分析")
+    if not record.raw_text:
+        raise HTTPException(status_code=400, detail="内容为空")
 
     from .services.analysis_pipeline import run_analysis_pipeline
-    asyncio.create_task(run_analysis_pipeline(transcript_id))
+    asyncio.create_task(run_analysis_pipeline(transcript_id, source_type=source_type))
 
-    emit_event(db, "analysis.started", {"user_name": user.get("username", "demo"), "user_id": user.get("username", "demo"), "source": user.get("source", "superadmin")}, {"transcript_id": transcript_id, "company_id_hash": transcript.company_id or "demo", "session_id": str(uuid4())}, {"status": "analyzing"})
+    emit_event(
+        db,
+        "analysis.started",
+        {"user_name": user.get("username", "demo"), "user_id": user.get("username", "demo"), "source": user.get("source", "superadmin")},
+        {"transcript_id": transcript_id, "company_id_hash": record.company_id or "demo", "session_id": str(uuid4())},
+        {"status": "analyzing", "source_type": source_type},
+    )
     return TranscriptAnalyzeResponse(transcript_id=transcript_id, status="analyzing", message="分析已启动，可关闭页面稍后查看")
 
 
