@@ -22,9 +22,9 @@ from .auth import create_jwt, get_current_user, require_superadmin
 from .config import settings
 from .crypto_utils import decrypt_secret, encrypt_secret
 from .database import Base, engine, get_db
-from .models import AnalyticsEvent, ConfigChangeLog, OperationLog, Superadmin, SystemConfig, Transcript
+from .models import AnalyticsEvent, ConfigChangeLog, FollowupRecord, OperationLog, Superadmin, SystemConfig, Transcript
 from .progress import build_progress
-from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, PowerMapChatPayload, PowerMapConfirmPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptAnalyzeResponse, TranscriptUploadResponse
+from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, PowerMapChatPayload, PowerMapConfirmPayload, PowerMapRelayoutPayload, PowerMapPreviewPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptAnalyzeResponse, TranscriptUploadResponse
 from .schemas.operation import OperationExecuteRequest, ReviewAction
 from .schemas.agent_output import validate_comparison_output, validate_extraction_output
 from .services.agent_runner import AgentPhase, AgentRunner
@@ -35,7 +35,7 @@ from .services.jiandaoyun_writer import JiandaoyunWriter
 from .services.openai_compatible_agent_client import OpenAICompatibleAgentClient
 from .services.operation_executor import execute_cards
 from .services.cas_auth import CasAuthError, cas_auth_service
-from .services.power_map_service import chat_power_map, confirm_power_map, get_power_map
+from .services.power_map_service import _get_power_map_config, chat_power_map, confirm_power_map, get_power_map, preview_power_map, relayout_power_map
 from .services.prompts import CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
 from .services.chat_executor import OP_LABELS, build_jiandaoyun_payload, build_preview_text, get_entry_id, log_operation
 from .services.tool_registry import build_chat_executors, get_chat_tools, get_executors, get_tools
@@ -280,6 +280,15 @@ def _allowed_transcript_stmt(user: dict[str, Any]):
     stmt = select(Transcript)
     if user.get("source") == "sso":
         stmt = stmt.where(Transcript.sso_user_id == user.get("user_id"))
+    return stmt
+
+
+def _allowed_followup_stmt(user: dict[str, Any]):
+    stmt = select(FollowupRecord)
+    if user.get("source") == "sso":
+        user_name = user.get("user_name") or user.get("username")
+        if user_name:
+            stmt = stmt.where(FollowupRecord.sso_user_name == user_name)
     return stmt
 
 
@@ -751,12 +760,42 @@ CAS_REFERRER_URL = "https://47-98-102-197.sslip.io/"
 async def sso_cas_login():
     """CAS SSO 入口 —— 重定向到帆软通行证登录页"""
     cas_login_url = (
-        "https://passport.fanruan.com/login/signin"
+        "https://fanruanclub.com/login/signin"
         "?app=zhidang"
         "&protocol=cas"
         f"&referrer={CAS_REFERRER_URL}"
     )
     return RedirectResponse(url=cas_login_url)
+
+
+@app.get("/api/v1/sso/bi-callback")
+async def sso_bi_callback(ticket: str = "", service: str = ""):
+    """BI 登录链路回调：CAS验证 → 创建JWT → 经BI设cookie → 回到智档"""
+    if not ticket:
+        raise HTTPException(status_code=400, detail="缺少 CAS ticket")
+
+    effective_service = service or f"{CAS_REFERRER_URL}api/v1/sso/bi-callback"
+
+    try:
+        cas_user = await cas_auth_service.validate_st(ticket, effective_service, pgt_url="")
+    except CasAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.exception("CAS validate_st failed in bi-callback")
+        raise HTTPException(status_code=500, detail=f"CAS 验证异常: {exc}")
+
+    attrs = cas_user.get("attributes", {}) or {}
+    if isinstance(attrs, dict):
+        username_list = attrs.get("username", [])
+        effective_username = str(username_list[0]) if username_list else str(cas_user.get("username", ""))
+    else:
+        effective_username = str(cas_user.get("username", ""))
+
+    jwt_token = create_jwt({"user_name": effective_username, "user_id": effective_username, "source": "sso"})
+
+    # 通过 BI 的 CAS 登录链路，让浏览器获得 fine_auth_token cookie
+    bi_login_url = f"https://crm.finereporthelp.com/WebReport/decision/cas/login?service={CAS_REFERRER_URL}login?token={jwt_token}"
+    return RedirectResponse(url=bi_login_url)
 
 
 @app.get("/api/v1/me")
@@ -1272,6 +1311,88 @@ def get_transcript(transcript_id: str, db: Session = Depends(get_db), user: dict
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "sso_user_name": t.sso_user_name,
     }
+
+
+@app.get("/api/v1/followup-records")
+def list_followup_records(
+    company_id: str | None = None,
+    limit: int = 500,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    stmt = _allowed_followup_stmt(user).order_by(FollowupRecord.created_at.desc())
+    if company_id:
+        stmt = stmt.where(FollowupRecord.company_id == company_id)
+    stmt = stmt.limit(max(1, min(limit, 1000)))
+    items = db.scalars(stmt).all()
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "source": r.source,
+                "source_id": r.source_id,
+                "title": r.title,
+                "status": r.status,
+                "company_id": r.company_id,
+                "company_name": r.company_name,
+                "company_name_hint": r.company_name,
+                "raw_text": r.raw_text,
+                "input_type": r.input_type,
+                "review_date": r.review_date,
+                "follow_type": r.follow_type,
+                "sso_user_name": r.sso_user_name,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "extraction_summary": _extraction_summary(r.agent_a_result),
+                "card_count": len((r.agent_b_result or {}).get("result", {}).get("operation_cards", [])) if r.agent_b_result else 0,
+            }
+            for r in items
+        ]
+    }
+
+
+@app.get("/api/v1/followup-records/{record_id}")
+def get_followup_record(record_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    stmt = _allowed_followup_stmt(user).where(FollowupRecord.id == record_id)
+    r = db.scalar(stmt)
+    if not r:
+        raise HTTPException(status_code=404, detail="跟进记录不存在")
+    return {
+        "id": r.id,
+        "source": r.source,
+        "source_id": r.source_id,
+        "title": r.title,
+        "status": r.status,
+        "company_id": r.company_id,
+        "company_name": r.company_name,
+        "company_name_hint": r.company_name,
+        "raw_text": r.raw_text,
+        "input_type": r.input_type,
+        "review_date": r.review_date,
+        "follow_type": r.follow_type,
+        "sso_user_name": r.sso_user_name,
+        "agent_a_result": r.agent_a_result,
+        "agent_b_result": r.agent_b_result,
+        "raw_record": r.raw_record,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    }
+
+
+@app.post("/api/v1/followup-records/fetch")
+async def fetch_followup_records(
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_superadmin),
+):
+    from .services.followup_scraper import fetch_and_store
+
+    cfg = ensure_system_config(db)
+    api_key = decrypt_secret(cfg.jiandaoyun_api_key_encrypted) if cfg.jiandaoyun_api_key_encrypted else ""
+    if not api_key:
+        raise HTTPException(status_code=400, detail="简道云 API Key 未配置")
+    try:
+        result = await fetch_and_store(db, api_key=api_key)
+    except JiandaoyunClientError as exc:
+        raise HTTPException(status_code=502, detail=f"简道云接口失败: {exc}")
+    return result
 
 
 @app.post("/api/v1/transcripts/{transcript_id}/analyze")
@@ -2257,13 +2378,52 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
 # ── 权利地图 API ──────────────────────────────────────
 
 @app.get("/api/v1/power-map/{company_id}")
-async def power_map_get(company_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+async def power_map_get(company_id: str, version: str | None = None, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     try:
-        map_data = await get_power_map(db, company_id, current_user=user)
+        map_data = await get_power_map(db, company_id, current_user=user, version=version)
         return {"company_id": company_id, "map_data": map_data}
     except Exception as exc:
         logger.exception("power map get failed")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/power-map/{company_id}/bi-com-id")
+async def power_map_bi_com_id(company_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    """返回 BI 系统的 com_id，前端用于构造 iframe URL"""
+    cfg = db.get(SystemConfig, 1)
+    if not cfg:
+        raise HTTPException(status_code=500, detail="系统未初始化")
+
+    prj_id = company_id
+    try:
+        api_key = decrypt_secret(cfg.jiandaoyun_api_key_encrypted) if cfg.jiandaoyun_api_key_encrypted else ""
+        app_id = (cfg.jiandaoyun_app_id or "").strip()
+        field_mappings = dict((cfg.field_mappings or {}).get("jiandaoyun", {}) or {})
+        forms = dict(field_mappings.get("forms") or {})
+        main_form = dict(forms.get("客户主表") or {})
+        main_entry_id = (cfg.main_entry_id or str(main_form.get("entry_id", ""))).strip()
+        if api_key and app_id and main_entry_id:
+            client = JiandaoyunClient(api_key=api_key)
+            profile_data = await client.query_single_data(app_id=app_id, entry_id=main_entry_id, data_id=company_id)
+            profile = profile_data.get("data") if isinstance(profile_data, dict) else profile_data
+            if isinstance(profile, dict):
+                com_id = profile.get("com_id") or ""
+                if com_id:
+                    prj_id = com_id
+    except Exception:
+        pass
+
+    api_cfg = _get_power_map_config(cfg)
+    # powerMap_v3.13.html is served from /WebReport/power_map/, not /WebReport/decision/
+    # Extract origin from base_url to construct the correct path
+    from urllib.parse import urlparse
+    origin = f"{urlparse(api_cfg['base_url']).scheme}://{urlparse(api_cfg['base_url']).netloc}"
+    return {
+        "company_id": company_id,
+        "bi_com_id": prj_id,
+        "bi_base_url": api_cfg["base_url"],
+        "bi_iframe_url": f"{origin}/WebReport/power_map/powerMap_v3.13.html?com_id={prj_id}",
+    }
 
 
 @app.post("/api/v1/power-map/{company_id}/chat")
@@ -2274,7 +2434,7 @@ async def power_map_chat(company_id: str, payload: PowerMapChatPayload, db: Sess
     if payload.confirm:
         return {"reply": "请使用 /confirm 端点确认执行修改。", "session_id": session_id, "needs_confirmation": False}
 
-    result = await chat_power_map(db, company_id, msg, current_user=user)
+    result = await chat_power_map(db, company_id, msg, current_user=user, version=payload.version)
     result["session_id"] = session_id
     return result
 
@@ -2282,10 +2442,30 @@ async def power_map_chat(company_id: str, payload: PowerMapChatPayload, db: Sess
 @app.post("/api/v1/power-map/{company_id}/confirm")
 async def power_map_confirm(company_id: str, payload: PowerMapConfirmPayload, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     try:
-        result = await confirm_power_map(db, company_id, payload.proposed_changes, current_user=user)
+        result = await confirm_power_map(db, company_id, payload.proposed_changes, current_user=user, version=payload.version)
         return result
     except Exception as exc:
         logger.exception("power map confirm failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/v1/power-map/{company_id}/relayout")
+async def power_map_relayout(company_id: str, payload: PowerMapRelayoutPayload, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    try:
+        result = await relayout_power_map(db, company_id, mode=payload.mode, dept_id=payload.dept_id, current_user=user, version=payload.version)
+        return result
+    except Exception as exc:
+        logger.exception("power map relayout failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/v1/power-map/{company_id}/preview")
+async def power_map_preview(company_id: str, payload: PowerMapPreviewPayload, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    try:
+        result = await preview_power_map(db, company_id, payload.proposed_changes, current_user=user, version=payload.version)
+        return result
+    except Exception as exc:
+        logger.exception("power map preview failed")
         raise HTTPException(status_code=500, detail=str(exc))
 
 
