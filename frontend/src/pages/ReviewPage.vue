@@ -5,7 +5,6 @@
       <h1 class="text-xl font-bold">跟进记录生成</h1>
       <p class="text-sm text-muted-foreground mt-1">上传会议内容，自动生成结构化跟进记录，审核后提交到简道云</p>
     </div>
-
     <!-- Step indicator -->
     <div class="flex items-center justify-center gap-0 py-4">
       <template v-for="(step, idx) in steps" :key="step.num">
@@ -33,7 +32,6 @@
         />
       </template>
     </div>
-
     <!-- Step 0: Pick from existing records (optional shortcut) -->
     <Card v-if="currentStep <= 2 || !reviewData">
       <CardHeader class="pb-3">
@@ -121,7 +119,6 @@
         </div>
       </CardContent>
     </Card>
-
     <!-- Step 1: Input section -->
     <Card v-if="currentStep <= 2 || !reviewData">
       <CardHeader>
@@ -133,7 +130,6 @@
           <Label>当前客户</Label>
           <Input :value="companyName" readonly class="bg-muted/50" />
         </div>
-
         <div class="space-y-1.5">
           <Label>上传文件</Label>
           <div class="flex gap-5 items-start">
@@ -147,33 +143,35 @@
                 @click="triggerFileInput"
               >
                 <input ref="fileInput" type="file" accept=".txt,.jpg,.jpeg,.png,.webp" class="hidden" @change="onFileSelect" />
-                <div v-if="!uploadedFile" class="space-y-2">
+                <div v-if="!uploadedFiles.length" class="space-y-2">
                   <Upload class="h-8 w-8 mx-auto text-muted-foreground/40" />
-                  <p class="text-sm text-muted-foreground">点击或拖拽上传文件</p>
+                  <p class="text-sm text-muted-foreground">点击或拖拽上传文件（支持多选）</p>
                   <p class="text-xs text-muted-foreground/60">支持 .txt, .jpg, .jpeg, .png, .webp</p>
                 </div>
-                <div v-else class="flex items-center justify-between bg-muted/50 rounded-lg px-4 py-3">
-                  <div class="flex items-center gap-3">
-                    <FileText class="h-5 w-5 text-muted-foreground" />
-                    <span class="text-sm font-medium">{{ uploadedFile.name }}</span>
+                <div v-else class="space-y-2">
+                  <div v-for="(f, idx) in uploadedFiles" :key="idx" class="flex items-center justify-between bg-muted/50 rounded-lg px-4 py-3">
+                    <div class="flex items-center gap-3">
+                      <Image v-if="f.type === 'image'" class="h-5 w-5 text-muted-foreground" />
+                      <FileText v-else class="h-5 w-5 text-muted-foreground" />
+                      <span class="text-sm font-medium truncate max-w-[200px]">{{ f.name }}</span>
+                      <span class="text-xs text-muted-foreground/60">{{ f.type === 'image' ? '图片' : '文本' }}</span>
+                    </div>
+                    <Button variant="ghost" size="sm" class="text-destructive hover:text-destructive" @click.stop="removeFile(idx)">
+                      <X class="h-4 w-4 mr-1" />移除
+                    </Button>
                   </div>
-                  <Button variant="ghost" size="sm" class="text-destructive hover:text-destructive" @click.stop="removeFile">
-                    <X class="h-4 w-4 mr-1" />移除
-                  </Button>
                 </div>
               </div>
             </div>
-            <div v-if="filePreview && isImageFile" class="w-[200px] shrink-0">
-              <img :src="filePreview" alt="预览" class="w-full rounded-xl border border-border" />
+            <div v-if="uploadedFiles.filter(f => f.type === 'image').length" class="flex gap-2 flex-wrap">
+              <img v-for="(f, idx) in uploadedFiles.filter(f => f.type === 'image')" :key="idx" :src="f.dataUrl" alt="预览" class="w-[120px] h-[80px] object-cover rounded-lg border border-border" />
             </div>
           </div>
         </div>
-
         <div class="space-y-1.5">
           <Label>转写内容</Label>
           <Textarea v-model="transcriptText" placeholder="粘贴会议转写内容，或上传 txt 文件自动填充..." rows="10" />
         </div>
-
         <Button @click="generateReview" :disabled="!canGenerate || generating" size="lg">
           <Loader2 v-if="generating" class="h-4 w-4 mr-2 animate-spin" />
           <Sparkles v-else class="h-4 w-4 mr-2" />
@@ -181,7 +179,6 @@
         </Button>
       </CardContent>
     </Card>
-
     <!-- Step 2-3: Preview / Edit -->
     <Card v-if="reviewData">
       <CardHeader>
@@ -203,17 +200,14 @@
             <Input v-model="reviewData.review_date" type="date" />
           </div>
         </div>
-
         <div class="space-y-1.5">
           <Label>跟进记录</Label>
           <Textarea v-model="reviewData.review_record" rows="12" />
         </div>
-
         <div class="space-y-1.5">
           <Label>客户方参与人</Label>
           <Input v-model="reviewData.contact_names" placeholder="如：张经理（采购部）" />
         </div>
-
         <div class="space-y-1.5">
           <Label>推送前方</Label>
           <div class="flex gap-6">
@@ -225,7 +219,6 @@
             </label>
           </div>
         </div>
-
         <div class="space-y-2">
           <Label>跟进标签</Label>
           <div class="overflow-x-auto rounded-lg border border-border">
@@ -271,7 +264,6 @@
             <Plus class="h-3.5 w-3.5 mr-1" />新增标签
           </Button>
         </div>
-
         <Button class="w-full bg-emerald-600 hover:bg-emerald-700 text-white" size="lg" :disabled="!canSubmit || submitting" @click="submitReview">
           <Send v-if="!submitting" class="h-4 w-4 mr-2" />
           <Loader2 v-else class="h-4 w-4 mr-2 animate-spin" />
@@ -279,7 +271,6 @@
         </Button>
       </CardContent>
     </Card>
-
     <!-- Message toast -->
     <div v-if="message" class="fixed bottom-6 left-1/2 -translate-x-1/2 px-5 py-2.5 rounded-xl z-50 text-sm shadow-lg max-w-[90vw] break-words transition-all" :class="{
       'bg-primary text-primary-foreground': messageType === 'info',
@@ -288,10 +279,9 @@
     }">{{ message }}</div>
   </div>
 </template>
-
 <script setup>
 import { computed, onMounted, ref, reactive, watch } from 'vue'
-import { Upload, FileText, X, Check, Plus, Send, Sparkles, Trash2, Loader2, ChevronDown } from '@lucide/vue'
+import { Upload, FileText, Image, X, Check, Plus, Send, Sparkles, Trash2, Loader2, ChevronDown } from '@lucide/vue'
 import { api } from '../api'
 import { useCustomerStore } from '../stores/customer'
 import { fetchTranscripts as fetchAllTranscripts } from '../api/operation'
@@ -307,16 +297,13 @@ import Textarea from '../components/ui/Textarea.vue'
 import Label from '../components/ui/Label.vue'
 import SelectNative from '../components/ui/SelectNative.vue'
 import Badge from '../components/ui/Badge.vue'
-
 const steps = [
   { num: 1, label: '上传文件' },
   { num: 2, label: 'AI 生成' },
   { num: 3, label: '审核编辑' },
   { num: 4, label: '提交' },
 ]
-
 const today = new Date().toISOString().split('T')[0]
-
 const transcriptText = ref('')
 const reviewData = ref(null)
 const tagTree = ref([])
@@ -329,22 +316,18 @@ const submitting = ref(false)
 const showAdvanced = ref(false)
 const message = ref('')
 const messageType = ref('info')
-const uploadedFile = ref(null)
-const filePreview = ref(null)
+const uploadedFiles = ref([])  // [{ name, dataUrl, type }]
 const isDragOver = ref(false)
 const currentStep = ref(1)
 const todayDate = ref(today)
 const fileInput = ref(null)
-
 const customerStore = useCustomerStore()
-
 const sourceType = ref('transcript') // 'transcript' | 'followup'
 const sourceList = ref([])
 const selectedSourceIds = ref(new Set())
 const loadingSource = ref(false)
 const sourcePanelOpen = ref(false)
 const appliedSources = ref([])
-
 async function loadSourceList() {
   loadingSource.value = true
   try {
@@ -363,18 +346,15 @@ async function loadSourceList() {
     loadingSource.value = false
   }
 }
-
 function toggleSourceSelected(id) {
   const next = new Set(selectedSourceIds.value)
   if (next.has(id)) next.delete(id); else next.add(id)
   selectedSourceIds.value = next
 }
-
 function clearSourceSelection() {
   selectedSourceIds.value = new Set()
   appliedSources.value = []
 }
-
 function applySelectedSources() {
   if (selectedSourceIds.value.size === 0) return
   const chosen = sourceList.value.filter(s => selectedSourceIds.value.has(s.id))
@@ -386,7 +366,6 @@ function applySelectedSources() {
   currentStep.value = 1
   showMessage(`已拼接 ${chosen.length} 条来源到下方内容`, 'success')
 }
-
 function switchSourceType(t) {
   if (sourceType.value === t) return
   sourceType.value = t
@@ -394,68 +373,73 @@ function switchSourceType(t) {
   appliedSources.value = []
   loadSourceList()
 }
-
 function formatSourceDate(d) {
   if (!d) return '-'
   try {
     return new Date(d).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   } catch { return '-' }
 }
-
 const companyId = computed(() => customerStore.currentCustomer?.company_id || '')
 const companyName = computed(() => customerStore.currentCustomer?.company_name || '')
 const canGenerate = computed(() => transcriptText.value.trim() && companyName.value)
-const isImageFile = computed(() => {
-  if (!uploadedFile.value) return false
-  const ext = uploadedFile.value.name.split('.').pop().toLowerCase()
-  return ['jpg', 'jpeg', 'png', 'webp'].includes(ext)
-})
+const hasImages = computed(() => uploadedFiles.value.some(f => f.type === 'image'))
 const canSubmit = computed(() => reviewData.value && reviewData.value.follow_type && reviewData.value.review_date && reviewData.value.review_record)
-
 // File methods
 function triggerFileInput() { fileInput.value?.click() }
 function onDragOver() { isDragOver.value = true }
 function onDragLeave() { isDragOver.value = false }
 function onFileDrop(e) {
   isDragOver.value = false
-  const files = e.dataTransfer.files
+  for (const f of files) handleFile(f)
   if (files.length > 0) handleFile(files[0])
 }
 function onFileSelect(e) {
   const files = e.target.files
-  if (files.length > 0) handleFile(files[0])
+  for (const f of files) handleFile(f)
+  fileInput.value.value = ''
 }
 function validateFile(file) {
   const allowedTypes = ['.txt', '.jpg', '.jpeg', '.png', '.webp']
   const ext = '.' + file.name.split('.').pop().toLowerCase()
   return allowedTypes.includes(ext)
 }
+function getFileType(file) {
+  const ext = file.name.split('.').pop().toLowerCase()
+  return ['jpg', 'jpeg', 'png', 'webp'].includes(ext) ? 'image' : 'text'
+}
 function handleFile(file) {
   if (!validateFile(file)) {
     showMessage('不支持的文件类型，请上传 .txt, .jpg, .jpeg, .png, .webp 文件', 'error')
     return
   }
-  uploadedFile.value = file
-  filePreview.value = null
-  const ext = file.name.split('.').pop().toLowerCase()
-  if (ext === 'txt') {
+  const ftype = getFileType(file)
+  if (ftype === 'text') {
     const reader = new FileReader()
-    reader.onload = (e) => { transcriptText.value = e.target.result; showMessage('文本文件读取成功', 'success'); currentStep.value = 1 }
-    reader.onerror = () => { showMessage('读取文本文件失败', 'error') }
+    reader.onload = (e) => {
+      transcriptText.value = transcriptText.value ? transcriptText.value + '\n\n' + e.target.result : e.target.result
+      uploadedFiles.value.push({ name: file.name, dataUrl: null, type: 'text' })
+      showMessage('文本文件 "' + file.name + '" 读取成功', 'success')
+      currentStep.value = 1
+    }
+    reader.onerror = () => showMessage('读取文本文件失败', 'error')
     reader.readAsText(file)
   } else {
     const reader = new FileReader()
-    reader.onload = (e) => { filePreview.value = e.target.result; transcriptText.value = `[图片上传: ${file.name}]`; showMessage('图片上传成功，请确认后生成', 'success'); currentStep.value = 1 }
+    reader.onload = (e) => {
+      uploadedFiles.value.push({ name: file.name, dataUrl: e.target.result, type: 'image' })
+      showMessage('图片 "' + file.name + '" 上传成功', 'success')
+      currentStep.value = 1
+    }
     reader.readAsDataURL(file)
   }
 }
-function removeFile() {
-  uploadedFile.value = null
-  filePreview.value = null
-  transcriptText.value = ''
+function removeFile(idx) {
+  const removed = uploadedFiles.value.splice(idx, 1)[0]
+  if (removed && removed.type === 'text') {
+    transcriptText.value = ''
+  }
   currentStep.value = 1
 }
-
 // Tag methods
 async function loadTagTree() {
   try {
@@ -491,7 +475,6 @@ function addTag() {
 function removeTag(index) {
   reviewData.value.genjin_tags.splice(index, 1)
 }
-
 // Config
 async function loadConfig() {
   try {
@@ -503,7 +486,6 @@ async function loadConfig() {
     console.error('自定义配置失败', error)
   }
 }
-
 // Generate
 async function generateReview() {
   if (!canGenerate.value) return
@@ -512,7 +494,8 @@ async function generateReview() {
   currentStep.value = 2
   try {
     const response = await api.post('/api/v1/followup/generate', {
-      input_type: uploadedFile.value && isImageFile.value ? 'screenshot' : 'text',
+      input_type: hasImages.value ? 'screenshot' : 'text',
+      images: uploadedFiles.value.filter(f => f.type === 'image').map(f => f.dataUrl),
       content: transcriptText.value,
       company_id: companyId.value,
       company_name: companyName.value
@@ -537,7 +520,6 @@ async function generateReview() {
     generating.value = false
   }
 }
-
 // Submit
 async function submitReview() {
   if (!canSubmit.value) return
@@ -570,20 +552,17 @@ async function submitReview() {
     submitting.value = false
   }
 }
-
 function showMessage(text, type = 'info') {
   message.value = text
   messageType.value = type
   setTimeout(() => { message.value = '' }, 3000)
 }
-
 watch(() => customerStore.currentCustomer?.company_id, (id, prev) => {
   if (id === prev) return
   selectedSourceIds.value = new Set()
   appliedSources.value = []
   loadSourceList()
 })
-
 onMounted(async () => {
   await loadTagTree()
   await loadConfig()

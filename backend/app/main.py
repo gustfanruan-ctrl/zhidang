@@ -3206,14 +3206,25 @@ contact_names：字符串，客户侧参与人
 if_tuisong：默认"否"
 请只输出纯 JSON，不要用 markdown 代码块包裹，不要添加任何额外文字。"""
 
+    images = (data.get("images") or [])
     user_prompt = f"会议转写内容：\n{transcript_text}\n\n客户名称：\n{company_name}\n\n请生成结构化的跟进记录。"
+
+    # Build user message (multimodal if images provided)
+    if images and isinstance(images, list) and len(images) > 0:
+        user_content = [{"type": "text", "text": user_prompt}]
+        for img in images:
+            if isinstance(img, str) and img.startswith("data:image"):
+                user_content.append({"type": "image_url", "image_url": {"url": img}})
+        user_message = {"role": "user", "content": user_content}
+    else:
+        user_message = {"role": "user", "content": user_prompt}
 
     try:
         async with httpx.AsyncClient(timeout=3600) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], "stream": False},
+                json={"model": model, "messages": [{"role": "system", "content": system_prompt}, user_message], "stream": False},
             )
         if resp.status_code != 200:
             return {"error": f"LLM 返回 HTTP {resp.status_code}"}
