@@ -8,6 +8,7 @@ import ReviewPage from './pages/ReviewPage.vue'
 import ConfigPage from './pages/ConfigPage.vue'
 import LlmPage from './pages/LlmPage.vue'
 import MaintenancePage from './pages/MaintenancePage.vue'
+import UserManagePage from './pages/UserManagePage.vue'
 import PowerMapPage from './pages/PowerMapPage.vue'
 import PowerMapV2Page from './pages/PowerMapV2Page.vue'
 import ChatV2Panel from './pages/ChatV2Panel.vue'
@@ -31,6 +32,7 @@ const router = createRouter({
     { path: '/config', component: ConfigPage, meta: { superadminOnly: true } },
     { path: '/llm', component: LlmPage, meta: { superadminOnly: true } },
     { path: '/maintenance', component: MaintenancePage, meta: { superadminOnly: true } },
+    { path: '/admin/users', component: UserManagePage, meta: { superadminOnly: true } },
     { path: '/power-map', component: PowerMapV2Page },
     { path: '/power-map-chat', component: ChatV2Panel },
     { path: '/power-map-old', component: PowerMapPage },

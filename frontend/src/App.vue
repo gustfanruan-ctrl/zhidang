@@ -71,6 +71,10 @@
           <Wrench class="h-4 w-4 shrink-0" />
           <span class="truncate">维护</span>
         </RouterLink>
+        <RouterLink v-if="isSuperadmin" to="/admin/users" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+          <Users class="h-4 w-4 shrink-0" />
+          <span class="truncate">用户管理</span>
+        </RouterLink>
       </nav>
 
       <!-- Footer -->
@@ -148,7 +152,7 @@ import { useRouter } from 'vue-router'
 import { api } from './api'
 import { getCachedMe } from './main'
 import { useCustomerStore } from './stores/customer'
-import { Search, RefreshCw, Sun, Moon, LogOut, MessageSquare, FileText, Upload, Map as MapIcon, Settings, Brain, Wrench, User, BookOpen } from '@lucide/vue'
+import { Search, RefreshCw, Sun, Moon, LogOut, MessageSquare, FileText, Upload, Map as MapIcon, Settings, Brain, Wrench, User, Users, BookOpen } from '@lucide/vue'
 import Button from './components/ui/Button.vue'
 import Input from './components/ui/Input.vue'
 import SelectNative from './components/ui/SelectNative.vue'

@@ -36,6 +36,7 @@ class User(Base, TimestampMixin):
     departments: Mapped[list[int] | None] = mapped_column(JSON)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     onboarding_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    role: Mapped[str] = mapped_column(String(20), default="user", nullable=False)  # "superadmin" | "user"
 
 
 class SystemConfig(Base, TimestampMixin):

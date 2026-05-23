@@ -718,13 +718,14 @@ def login(payload: LoginPayload, db: Session = Depends(get_db)):
         except ValueError:
             ok = False
         if ok:
+            role = getattr(user_row, "role", "") or "user"
             token = create_jwt({
-                "source": "user",
+                "source": role,
                 "username": user_row.username,
                 "display_name": user_row.display_name,
                 "integrate_id": user_row.integrate_id,
             })
-            return {"token": token, "display_name": user_row.display_name, "source": "user"}
+            return {"token": token, "display_name": user_row.display_name, "source": role}
 
     admin = db.scalar(select(Superadmin).where(Superadmin.username == normalized_username))
     if admin and admin.password_hash == hashlib.sha256(payload.password.encode()).hexdigest():
@@ -891,6 +892,61 @@ def update_onboarding(payload: dict[str, Any], user: dict[str, Any] = Depends(re
         user_row.onboarding_enabled = bool(enabled)
         db.commit()
     return {"onboarding_enabled": bool(enabled)}
+
+
+@app.get("/api/v1/admin/users")
+def admin_users(q: str = "", page: int = 1, limit: int = 20, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
+    stmt = select(User)
+    if q:
+        stmt = stmt.where(User.username.ilike(f"%{q}%") | User.display_name.ilike(f"%{q}%"))
+    total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar()
+    rows = db.scalars(stmt.order_by(User.username).offset((page - 1) * limit).limit(limit)).all()
+    return {"users": [{"id": u.id, "username": u.username, "display_name": u.display_name, "integrate_id": u.integrate_id, "role": u.role, "is_active": u.is_active, "onboarding_enabled": u.onboarding_enabled, "created_at": u.created_at.isoformat() if u.created_at else None} for u in rows], "total": total}
+
+
+@app.post("/api/v1/admin/users")
+def admin_user_create(payload: dict[str, Any], user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
+    import bcrypt
+    username = (payload.get("username") or "").strip()
+    password = (payload.get("password") or "").strip()
+    if not username or not password: raise HTTPException(status_code=400, detail="用户名和密码必填")
+    if len(password) < 6: raise HTTPException(status_code=400, detail="密码至少6位")
+    if db.scalars(select(User).where(User.username == username)).first(): raise HTTPException(status_code=400, detail="用户名已存在")
+    u = User(id=str(uuid4()), username=username, password_hash=bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(), display_name=payload.get("display_name", "") or None, integrate_id=payload.get("integrate_id", "") or None, role=payload.get("role", "user") or "user")
+    db.add(u); db.commit(); db.refresh(u)
+    return {"id": u.id, "username": u.username, "display_name": u.display_name, "role": u.role}
+
+
+@app.put("/api/v1/admin/users/{user_id}")
+def admin_user_update(user_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
+    u = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+    if not u: raise HTTPException(status_code=404, detail="用户不存在")
+    if "display_name" in payload: u.display_name = payload["display_name"] or None
+    if "integrate_id" in payload: u.integrate_id = payload["integrate_id"] or None
+    if "role" in payload: u.role = payload["role"] or "user"
+    db.commit()
+    return {"success": True}
+
+
+@app.patch("/api/v1/admin/users/{user_id}")
+def admin_user_patch(user_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
+    u = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+    if not u: raise HTTPException(status_code=404, detail="用户不存在")
+    if "is_active" in payload: u.is_active = bool(payload["is_active"])
+    db.commit()
+    return {"success": True}
+
+
+@app.post("/api/v1/admin/users/{user_id}/reset-password")
+def admin_user_reset_pw(user_id: str, payload: dict[str, Any] | None = None, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
+    import bcrypt
+    u = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+    if not u: raise HTTPException(status_code=404, detail="用户不存在")
+    new_pw = (payload or {}).get("new_password", "").strip() if payload else ""
+    if not new_pw: new_pw = str(uuid4())[:8]
+    u.password_hash = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+    db.commit()
+    return {"success": True, "new_password": new_pw}
 
 
 @app.get("/api/v1/admin/config")
