@@ -852,7 +852,45 @@ async def sso_bi_callback(ticket: str = "", service: str = ""):
 
 @app.get("/api/v1/me")
 def me(user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
-    return user
+    username = user.get('username', '')
+    user_row = db.scalars(select(User).where(User.username == username))
+    onboarding = user_row.onboarding_enabled if user_row else True
+    return {**user, 'onboarding_enabled': onboarding}
+
+
+@app.post("/api/v1/auth/change-password")
+def change_password(payload: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    import bcrypt
+    old_pw = (payload.get("old_password") or "").strip()
+    new_pw = (payload.get("new_password") or "").strip()
+    if not old_pw or not new_pw:
+        raise HTTPException(status_code=400, detail="请输入旧密码和新密码")
+    if len(new_pw) < 6:
+        raise HTTPException(status_code=400, detail="新密码至少6位")
+    username = user.get("username", "")
+    user_row = db.scalars(select(User).where(User.username == username))
+    if not user_row:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    try:
+        ok = bcrypt.checkpw(old_pw.encode(), user_row.password_hash.encode())
+    except ValueError:
+        ok = False
+    if not ok:
+        raise HTTPException(status_code=403, detail="旧密码错误")
+    user_row.password_hash = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+    db.commit()
+    return {"success": True}
+
+
+@app.patch("/api/v1/me/onboarding")
+def update_onboarding(payload: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    enabled = payload.get("enabled", True)
+    username = user.get("username", "")
+    user_row = db.scalars(select(User).where(User.username == username))
+    if user_row:
+        user_row.onboarding_enabled = bool(enabled)
+        db.commit()
+    return {"onboarding_enabled": bool(enabled)}
 
 
 @app.get("/api/v1/admin/config")

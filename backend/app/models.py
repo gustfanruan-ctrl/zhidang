@@ -35,6 +35,7 @@ class User(Base, TimestampMixin):
     integrate_id: Mapped[str | None] = mapped_column(String(100))
     departments: Mapped[list[int] | None] = mapped_column(JSON)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    onboarding_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
 class SystemConfig(Base, TimestampMixin):

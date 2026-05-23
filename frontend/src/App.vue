@@ -74,7 +74,30 @@
       </nav>
 
       <!-- Footer -->
-      <div class="px-3 py-3 border-t border-border/50 space-y-2">
+      <div class="px-3 py-3 border-t border-border/50 space-y-1.5">
+        <!-- User info -->
+        <div class="flex items-center gap-2.5 px-2 py-1.5">
+          <div class="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+            <User class="h-3.5 w-3.5 text-primary" />
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="text-xs font-medium truncate">{{ userDisplayName || '访客' }}</div>
+            <div class="text-[10px] text-muted-foreground">{{ userRoleLabel }}</div>
+          </div>
+        </div>
+
+        <!-- Guide button -->
+        <Button v-if="onboardingEnabled" variant="ghost" size="sm" class="w-full justify-start text-muted-foreground" @click="showGuide = !showGuide">
+          <BookOpen class="h-4 w-4 mr-2" />
+          使用指南
+        </Button>
+
+        <!-- Settings -->
+        <Button variant="ghost" size="sm" class="w-full justify-start text-muted-foreground" @click="showSettings = true">
+          <Settings class="h-4 w-4 mr-2" />
+          设置
+        </Button>
+
         <Button variant="ghost" size="icon" class="h-8 w-8" @click="toggleTheme" :title="isDark ? '浅色模式' : '深色模式'">
           <Sun v-if="isDark" class="h-4 w-4" />
           <Moon v-else class="h-4 w-4" />
@@ -85,6 +108,8 @@
         </Button>
       </div>
     </aside>
+    <UserSettingsModal :open="showSettings" :onboarding="onboardingEnabled" @close="showSettings = false" @update:onboarding="v => onboardingEnabled = v" />
+    <OnboardingPanel :open="showGuide" @close="showGuide = false" />
 
     <!-- Main Content -->
     <main class="flex-1 min-w-0 flex flex-col" :class="{ 'max-w-6xl mx-auto w-full': !isAuthed }">
@@ -123,12 +148,14 @@ import { useRouter } from 'vue-router'
 import { api } from './api'
 import { getCachedMe } from './main'
 import { useCustomerStore } from './stores/customer'
-import { Search, RefreshCw, Sun, Moon, LogOut, MessageSquare, FileText, Upload, Map as MapIcon, Settings, Brain, Wrench, User } from '@lucide/vue'
+import { Search, RefreshCw, Sun, Moon, LogOut, MessageSquare, FileText, Upload, Map as MapIcon, Settings, Brain, Wrench, User, BookOpen } from '@lucide/vue'
 import Button from './components/ui/Button.vue'
 import Input from './components/ui/Input.vue'
 import SelectNative from './components/ui/SelectNative.vue'
 import Separator from './components/ui/Separator.vue'
 import ToastProvider from './components/ToastProvider.vue'
+import UserSettingsModal from './components/UserSettingsModal.vue'
+import OnboardingPanel from './components/OnboardingPanel.vue'
 
 const router = useRouter()
 const isAuthed = ref(false)
@@ -142,6 +169,9 @@ const userDisplayName = ref('')
 const userRoleLabel = ref('')
 const customerLoading = ref(false)
 const customerWarning = ref('')
+const showSettings = ref(false)
+const showGuide = ref(false)
+const onboardingEnabled = ref(true)
 const customerStatusText = ref('未加载客户')
 
 async function refreshAuthState() {
@@ -156,6 +186,7 @@ async function refreshAuthState() {
   isSuperadmin.value = me?.source === 'superadmin'
   userDisplayName.value = me?.display_name || me?.username || me?.user_name || ''
   userRoleLabel.value = me?.source === 'superadmin' ? '超级管理员' : me?.source === 'cas' ? 'CAS 用户' : me?.source === 'sso' ? 'SSO 用户' : '用户'
+  onboardingEnabled.value = me?.onboarding_enabled !== false
   if (isAuthed.value) {
     customerLoading.value = true
     try {
