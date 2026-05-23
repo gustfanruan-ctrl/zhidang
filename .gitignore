@@ -60,7 +60,7 @@ backend/output/
 # Docs and temp dirs
 docs/
 project_scripts_docs/
-PROJECT_OVERVIEW.md
+/PROJECT_OVERVIEW.md
 backend/PHASE3_REPORT.md
 cas-auth-doc.txt
 opus-power-map-plan.md
