@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .auth import create_jwt, get_current_user, get_current_user_for_sse, require_superadmin
@@ -300,8 +300,9 @@ def _allowed_transcript_stmt(user: dict[str, Any]):
         stmt = stmt.where(Transcript.sso_user_id == user.get("user_id"))
     elif user.get("source") == "user":
         display_name = user.get("display_name")
-        if display_name:
-            stmt = stmt.where(Transcript.sso_user_name == display_name)
+        username = user.get("username")
+        if display_name and username:
+            stmt = stmt.where(or_(Transcript.sso_user_name == display_name, Transcript.sso_user_id == username))
     return stmt
 
 
