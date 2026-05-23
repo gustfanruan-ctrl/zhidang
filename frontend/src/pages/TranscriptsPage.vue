@@ -438,52 +438,6 @@
           </div>
         </div>
 
-        <!-- Tab: followup -->
-        <div v-if="activeTab === 'followup'">
-          <div class="max-w-xl">
-            <p class="text-sm text-muted-foreground mb-4">基于当前转写内容生成跟进记录</p>
-            <Button :disabled="followupGenerating" @click="generateFollowup" class="mb-6">
-              <Loader2 v-if="followupGenerating" class="h-4 w-4 mr-2 animate-spin" />
-              {{ followupGenerating ? '生成中...' : '生成跟进记录' }}
-            </Button>
-
-            <div v-if="followupData" class="space-y-4">
-              <div class="space-y-1.5">
-                <Label class="text-xs">跟进类型</Label>
-                <SelectNative v-model="followupData.follow_type" class="w-full">
-                  <option value="线上跟进">线上跟进</option>
-                  <option value="线下跟进">线下跟进</option>
-                  <option value="内部沟通">内部沟通</option>
-                </SelectNative>
-              </div>
-              <div class="space-y-1.5">
-                <Label class="text-xs">跟进日期</Label>
-                <Input v-model="followupData.review_date" type="date" />
-              </div>
-              <div class="space-y-1.5">
-                <Label class="text-xs">跟进记录</Label>
-                <Textarea v-model="followupData.review_record" rows="6" />
-              </div>
-              <div class="space-y-1.5">
-                <Label class="text-xs">客户方参与人</Label>
-                <Input v-model="followupData.contact_names" />
-              </div>
-              <div class="space-y-1.5">
-                <Label class="text-xs">推送前方</Label>
-                <SelectNative v-model="followupData.if_tuisong" class="w-full">
-                  <option value="是">是</option>
-                  <option value="否">否</option>
-                </SelectNative>
-              </div>
-              <Button :disabled="followupSubmitting" @click="submitFollowup">
-                <Send v-if="!followupSubmitting" class="h-4 w-4 mr-2" />
-                <Loader2 v-else class="h-4 w-4 mr-2 animate-spin" />
-                {{ followupSubmitting ? '提交中...' : '提交跟进记录' }}
-              </Button>
-            </div>
-          </div>
-        </div>
-
         <!-- Tab: raw -->
         <pre v-if="activeTab === 'raw'" class="bg-muted/50 rounded-xl p-5 text-sm leading-relaxed whitespace-pre-wrap break-words max-h-[500px] overflow-y-auto">{{ selectedTranscript.raw_text || '(无内容)' }}</pre>
       </CardContent>
@@ -771,7 +725,6 @@ function formatDate(d) {
 const activeTab = ref('cards')
 const tabs = [
   { key: 'cards', label: '场景和预期' },
-  { key: 'followup', label: '跟进记录' },
   { key: 'raw', label: '原始转写' },
 ]
 
