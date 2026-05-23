@@ -206,7 +206,10 @@
         </div>
         <div class="space-y-1.5">
           <Label>客户方参与人</Label>
-          <Input v-model="reviewData.contact_names" placeholder="如：张经理（采购部）" />
+          <SelectNative v-model="selectedContactId" class="w-full h-9 text-sm" @update:model-value="onContactChange">
+            <option value="">-- 请选择联系人 --</option>
+            <option v-for="c in contactList" :key="c.cont_id" :value="c.cont_id">{{ c.cont_name }}</option>
+          </SelectNative>
         </div>
         <div class="space-y-1.5">
           <Label>推送前方</Label>
@@ -306,6 +309,10 @@ const steps = [
 const today = new Date().toISOString().split('T')[0]
 const transcriptText = ref('')
 const reviewData = ref(null)
+const contactList = ref([])
+const taskList = ref([])
+const selectedContactId = ref("")
+const selectedTaskIds = ref([])
 const tagTree = ref([])
 const config = reactive({
   review_entry_id: '670a28334883adafb152a869',
@@ -372,6 +379,8 @@ function switchSourceType(t) {
   selectedSourceIds.value = new Set()
   appliedSources.value = []
   loadSourceList()
+  loadContacts()
+  loadTasks()
 }
 function formatSourceDate(d) {
   if (!d) return '-'
@@ -441,6 +450,22 @@ function removeFile(idx) {
   currentStep.value = 1
 }
 // Tag methods
+async function loadContacts() {
+  if (!companyId.value) { contactList.value = []; return }
+  try {
+    const { data } = await api.get(`/api/v1/customers/${companyId.value}/contacts`)
+    contactList.value = data.contacts || []
+  } catch { contactList.value = [] }
+}
+async function loadTasks() {
+  if (!companyId.value) { taskList.value = []; return }
+  try {
+    const { data } = await api.get(`/api/v1/customers/${companyId.value}/tasks?username=Gust`)
+    taskList.value = data.tasks || []
+  } catch { taskList.value = [] }
+}
+function onContactChange() { /* selectedContactId already updated by v-model */ }
+const selectedContact = computed(() => contactList.value.find(c => c.cont_id === selectedContactId.value) || null)
 async function loadTagTree() {
   try {
     const response = await api.get('/api/v1/followup/tags')
@@ -535,8 +560,10 @@ async function submitReview() {
       review_date: reviewData.value.review_date,
       review_record: reviewData.value.review_record,
       genjin_tags: reviewData.value.genjin_tags || [],
-      if_tuisong: reviewData.value.if_tuisong || '否',
-      contname: reviewData.value.contact_names || '',
+      contname: selectedContact.value?.cont_name || "",
+      contid: selectedContact.value?.cont_id || "",
+      selected_contact: selectedContact.value || null,
+      selected_tasks: taskList.value.filter(t => selectedTaskIds.value.includes(t.task_id)),
       contid: '',
       yuqi_id: reviewData.value.yuqi_id || '',
       yuqi_first_value: reviewData.value.yuqi_first_value || '',
@@ -564,6 +591,8 @@ watch(() => customerStore.currentCustomer?.company_id, (id, prev) => {
   loadSourceList()
 })
 onMounted(async () => {
+  await loadContacts()
+  await loadTasks()
   await loadTagTree()
   await loadConfig()
   await loadSourceList()

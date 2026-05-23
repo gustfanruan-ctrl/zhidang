@@ -449,7 +449,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
         return CUSTOMER_INDEX_CACHE
 
     display_fields = list(main_form.get("display_fields", []) or [])
-    for required_field in ["comname_01", "com_name", "com_type", "revenue_level", "if_access", "follow_form", "success"]:
+    for required_field in ["comname_01", "com_name", "com_type", "revenue_level", "if_access", "follow_form", "success", "com_id"]:
         if required_field not in display_fields:
             display_fields.append(required_field)
     
@@ -538,6 +538,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
             "if_access": row.get("if_access"),
             "follow_form": row.get("follow_form"),
             "csm": _extract_csm_name(row.get("success")),
+            "com_id": row.get("com_id", ""),
             "raw": row,
         }
         for row in all_rows
@@ -1562,6 +1563,7 @@ async def customers_list(
                     "comname_01": row.get("comname_01"),
                     "com_name": row.get("com_name"),
                     "csm": _extract_csm_name(row.get("success")),
+                    "com_id": row.get("com_id", ""),
                     "raw": row,
                 }
                 for row in (one_page.get("data", []) or [])
@@ -1583,6 +1585,7 @@ async def customers_list(
                     "comname_01": item.get("company_name"),
                     "com_name": item.get("company_name"),
                     "csm": "",
+                    "com_id": "",
                     "raw": item,
                 }
                 for item in local_customers
@@ -1800,6 +1803,43 @@ async def customer_changjing(company_id: str, limit: int = 100, db: Session = De
     except JiandaoyunClientError as exc:
         return {"mode": "fallback", "items": [], "warning": str(exc)}
     return {"mode": "jiandaoyun", "items": data.get("data", [])}
+
+
+@app.get("/api/v1/customers/{company_id}/contacts")
+async def customer_contacts(company_id: str, user: dict[str, Any] = Depends(require_auth)):
+    """Proxy CRM contact list for the customer's com_id."""
+    items = CUSTOMER_INDEX_CACHE.get("items", []) or []
+    cust = next((c for c in items if c.get("company_id") == company_id), None)
+    com_id = cust.get("com_id", "") if cust else ""
+    if not com_id:
+        return {"contacts": [], "warning": "com_id not found in cache"}
+    url = f"https://crm.finereporthelp.com/WebReport/decision/url/pub/crm/data?id=18b1e023fb1b46008b7c16357f0e5c41&secret=123456&contname=&comid={com_id}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url)
+    try:
+        data = resp.json()
+        return {"contacts": data.get("data", [])}
+    except Exception:
+        return {"contacts": [], "error": "CRM contact API failed"}
+
+
+@app.get("/api/v1/customers/{company_id}/tasks")
+async def customer_tasks(company_id: str, username: str = "", user: dict[str, Any] = Depends(require_auth)):
+    """Proxy CRM task list for the customer's com_id."""
+    items = CUSTOMER_INDEX_CACHE.get("items", []) or []
+    cust = next((c for c in items if c.get("company_id") == company_id), None)
+    com_id = cust.get("com_id", "") if cust else ""
+    if not com_id:
+        return {"tasks": [], "warning": "com_id not found in cache"}
+    effective_username = username or user.get("integrate_id") or user.get("username", "")
+    url = f"https://crm.finereporthelp.com/WebReport/decision/url/pub/crm/data?id=0aefe1a17d854ca18c2430c39fa0e3b2&secret=123456&com_id={com_id}&username={effective_username}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url)
+    try:
+        data = resp.json()
+        return {"tasks": data.get("data", [])}
+    except Exception:
+        return {"tasks": [], "error": "CRM task API failed"}
 
 
 @app.post("/api/v1/customers/switch")
@@ -3337,6 +3377,38 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
                 "genjin_level3": {"value": tag.get("level3", "")},
             })
         jiandaoyun_data["genjin"] = {"value": subform_rows}
+
+    # 联系人子表单
+    selected_contact = data.get("selected_contact") or {}
+    if selected_contact.get("cont_id"):
+        jiandaoyun_data["contid"] = {"value": selected_contact["cont_id"]}
+        jiandaoyun_data["contname"] = {"value": selected_contact.get("cont_name", "")}
+        jiandaoyun_data["contact"] = {"value": [{
+            "son_contact_choose": {"value": "是"},
+            "son_contact_name": {"value": selected_contact.get("cont_name", "")},
+            "son_contact_id": {"value": selected_contact["cont_id"]},
+            "son_contact_choose_name": {"value": selected_contact["cont_id"]},
+            "son_contact_choose_id": {"value": selected_contact.get("cont_name", "")},
+        }]}
+
+    # 出差子表单
+    selected_tasks = data.get("selected_tasks") or []
+    if selected_tasks:
+        task_rows = []
+        task_ids = []
+        for t in selected_tasks:
+            tid = t.get("task_id", "")
+            task_ids.append(tid)
+            task_rows.append({
+                "son_task_choose": {"value": "是"},
+                "son_task_id": {"value": tid},
+                "son_task_date": {"value": t.get("task_predate", "")},
+                "son_task_action": {"value": t.get("task_action", "")},
+                "son_task_remarks": {"value": t.get("task_remarks", "")},
+                "son_task_choose_id": {"value": tid},
+            })
+        jiandaoyun_data["task"] = {"value": task_rows}
+        jiandaoyun_data["task_id"] = {"value": ",".join(task_ids)}
 
     data_creator = user.get("integrate_id") or user.get("username", "")
     writer = JiandaoyunWriter(api_key=jiandaoyun_api_key, app_id=jiandaoyun_app_id, data_creator=data_creator)
