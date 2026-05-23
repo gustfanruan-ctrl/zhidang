@@ -853,7 +853,7 @@ async def sso_bi_callback(ticket: str = "", service: str = ""):
 @app.get("/api/v1/me")
 def me(user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
     username = user.get('username', '')
-    user_row = db.scalars(select(User).where(User.username == username))
+    user_row = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
     onboarding = user_row.onboarding_enabled if user_row else True
     return {**user, 'onboarding_enabled': onboarding}
 
@@ -868,7 +868,7 @@ def change_password(payload: dict[str, Any], user: dict[str, Any] = Depends(requ
     if len(new_pw) < 6:
         raise HTTPException(status_code=400, detail="新密码至少6位")
     username = user.get("username", "")
-    user_row = db.scalars(select(User).where(User.username == username))
+    user_row = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
     if not user_row:
         raise HTTPException(status_code=404, detail="用户不存在")
     try:
@@ -886,7 +886,7 @@ def change_password(payload: dict[str, Any], user: dict[str, Any] = Depends(requ
 def update_onboarding(payload: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
     enabled = payload.get("enabled", True)
     username = user.get("username", "")
-    user_row = db.scalars(select(User).where(User.username == username))
+    user_row = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
     if user_row:
         user_row.onboarding_enabled = bool(enabled)
         db.commit()
