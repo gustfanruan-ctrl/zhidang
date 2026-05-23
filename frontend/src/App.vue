@@ -23,7 +23,7 @@
             <Search class="h-3.5 w-3.5" />
           </Button>
         </div>
-        <SelectNative v-model="selectedCustomerId" class="h-8 text-xs" @update:model-value="(v) => onCustomerChange({ target: { value: v } })">
+        <SelectNative v-model="selectedCustomerId" class="h-9 text-xs" @update:model-value="(v) => onCustomerChange({ target: { value: v } })">
           <option value="">请选择客户</option>
           <option v-for="c in filteredCustomers" :key="c.company_id" :value="c.company_id">{{ c.company_name }}</option>
         </SelectNative>
@@ -121,6 +121,7 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from './api'
+import { getCachedMe } from './main'
 import { useCustomerStore } from './stores/customer'
 import { Search, RefreshCw, Sun, Moon, LogOut, MessageSquare, FileText, Upload, Map as MapIcon, Settings, Brain, Wrench, User } from '@lucide/vue'
 import Button from './components/ui/Button.vue'
@@ -150,7 +151,7 @@ async function refreshAuthState() {
     isSuperadmin.value = false
     return
   }
-  const me = await api.get('/api/v1/me').then((r) => r.data).catch(() => null)
+  const me = getCachedMe() || await api.get('/api/v1/me').then((r) => r.data).catch(() => null)
   isAuthed.value = !!me
   isSuperadmin.value = me?.source === 'superadmin'
   userDisplayName.value = me?.display_name || me?.username || me?.user_name || ''
@@ -158,7 +159,7 @@ async function refreshAuthState() {
   if (isAuthed.value) {
     customerLoading.value = true
     try {
-      const data = await customerStore.fetchCustomers(true)
+      const data = await customerStore.fetchCustomers(false)
       customerWarning.value = data?.warning || ''
       customerStatusText.value = `已加载 ${customerStore.customers.length} 条客户` + (customerStore.cacheTotal ? `（索引总数 ${customerStore.cacheTotal}）` : '')
     } catch (error) {

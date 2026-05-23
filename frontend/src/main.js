@@ -37,6 +37,11 @@ const router = createRouter({
   ],
 })
 
+let cachedMe = null
+let systemInitialized = null
+
+export function getCachedMe() { return cachedMe }
+
 router.beforeEach(async (to) => {
   const tokenFromUrl = new URLSearchParams(window.location.search).get('token')
   if (tokenFromUrl) {
@@ -50,16 +55,20 @@ router.beforeEach(async (to) => {
     localStorage.setItem('zhidang_company_id', companyIdFromUrl)
   }
 
-  const status = await api.get('/api/v1/system/status').then((r) => r.data).catch(() => ({ initialized: true }))
-  if (!status.initialized && to.path !== '/init') return '/init'
-  if (status.initialized && to.path === '/init') return '/login'
+  if (systemInitialized === null) {
+    const status = await api.get('/api/v1/system/status').then((r) => r.data).catch(() => ({ initialized: true }))
+    systemInitialized = status.initialized
+  }
+  if (!systemInitialized && to.path !== '/init') return '/init'
+  if (systemInitialized && to.path === '/init') return '/login'
 
   const token = localStorage.getItem('zhidang_token')
   if (!token) return to.meta.public ? true : '/login'
   if (to.path === '/login') return '/chat'
 
   const me = await api.get('/api/v1/me').then((r) => r.data).catch(() => null)
-  if (!me) return '/login'
+  if (!me) { cachedMe = null; return '/login' }
+  cachedMe = me
   if (to.meta.superadminOnly && me.source !== 'superadmin') return '/chat'
   return true
 })

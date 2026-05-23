@@ -1,5 +1,5 @@
 <template>
-  <div class="flex flex-col gap-4 min-h-[calc(100vh-190px)] relative">
+  <div class="flex flex-col gap-4 min-h-[calc(100vh-170px)] relative">
     <!-- Top toolbar -->
     <div class="flex items-center justify-between gap-3 bg-card border border-border/60 rounded-xl px-4 py-2.5">
       <div class="flex items-center gap-3">
@@ -29,7 +29,7 @@
         <SelectNative
           v-if="versions.length > 1"
           :model-value="currentVer"
-          class="h-8 w-auto text-xs"
+          class="h-9 w-auto text-xs"
           @update:model-value="switchVersion($event)"
         >
           <option v-for="v in versions" :key="v.value" :value="v.value">{{ v.ver_name }}</option>
@@ -217,10 +217,16 @@ async function loadMap() {
     const vi = mapData.value.version_info || []
     if (vi.length) {
       versions.value = vi
-      if (!currentVer.value) currentVer.value = vi[0].value || ''
+      if (!currentVer.value) {
+        const csVer = vi.find(v => (v.ver_name || '').includes('客户成功'))
+        const coVer = vi.find(v => (v.ver_name || '').includes('公司'))
+        currentVer.value = (csVer || coVer || vi[0]).value || ''
+      }
     }
     if (versions.value.length && !versions.value.find((v) => v.value === currentVer.value)) {
-      currentVer.value = versions.value[0].value || ''
+      const csVer = versions.value.find(v => (v.ver_name || '').includes('客户成功'))
+      const coVer = versions.value.find(v => (v.ver_name || '').includes('公司'))
+      currentVer.value = (csVer || coVer || versions.value[0]).value || ''
     }
     await loadBiUrl()
   } catch (e) {
