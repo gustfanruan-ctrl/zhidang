@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
@@ -23,6 +23,18 @@ class Superadmin(Base, TimestampMixin):
     username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(100))
+
+
+class User(Base, TimestampMixin):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(150))
+    integrate_id: Mapped[str | None] = mapped_column(String(100))
+    departments: Mapped[list[int] | None] = mapped_column(JSON)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
 class SystemConfig(Base, TimestampMixin):
@@ -58,6 +70,8 @@ class SystemConfig(Base, TimestampMixin):
     power_map_get_path: Mapped[str | None] = mapped_column(String(200), default="/url/power_map/getInfo")
     power_map_update_path: Mapped[str | None] = mapped_column(String(200), default="/url/power_map/upInfo")
     power_map_auth_token_encrypted: Mapped[str | None] = mapped_column(Text, default="")
+
+
 
 
 class Transcript(Base, TimestampMixin):

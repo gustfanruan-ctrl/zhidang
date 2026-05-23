@@ -1,55 +1,119 @@
 <template>
-  <div class="shell">
-    <aside v-if="isAuthed" class="sidebar">
-      <div class="brand-wrap">
-        <div class="brand">智档</div>
-        <div class="sub">客户成功自动化</div>
+  <div class="flex min-h-screen bg-muted/30">
+    <!-- Sidebar -->
+    <aside v-if="isAuthed" class="w-64 flex-shrink-0 min-h-screen border-r border-border bg-card flex flex-col">
+      <!-- Logo -->
+      <div class="px-5 py-5 border-b border-border/50">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
+            <span class="text-primary-foreground font-bold text-sm">智</span>
+          </div>
+          <div>
+            <div class="text-base font-bold tracking-tight leading-tight">智档</div>
+            <div class="text-[11px] text-muted-foreground leading-tight">客户成功自动化</div>
+          </div>
+        </div>
       </div>
 
-      <div class="customer-picker">
-        <div class="picker-search-row">
-          <input v-model="customerKeyword" class="picker-input" placeholder="搜索客户" @keyup.enter="searchCustomers" />
-          <button class="picker-search-btn" :disabled="customerLoading" @click="searchCustomers">{{ customerLoading ? '搜索中...' : '搜索' }}</button>
+      <!-- Customer Section -->
+      <div class="px-3 py-3 border-b border-border/50 space-y-2.5">
+        <div class="flex gap-2">
+          <Input v-model="customerKeyword" class="flex-1 h-8 text-xs" placeholder="搜索客户" @keyup.enter="searchCustomers" />
+          <Button variant="secondary" size="sm" class="h-8 text-xs shrink-0" :disabled="customerLoading" @click="searchCustomers">
+            <Search class="h-3.5 w-3.5" />
+          </Button>
         </div>
-        <select class="picker-select" :value="selectedCustomerId" @change="onCustomerChange">
+        <SelectNative v-model="selectedCustomerId" class="h-8 text-xs" @update:model-value="(v) => onCustomerChange({ target: { value: v } })">
           <option value="">请选择客户</option>
           <option v-for="c in filteredCustomers" :key="c.company_id" :value="c.company_id">{{ c.company_name }}</option>
-        </select>
-        <button class="picker-refresh" :disabled="customerLoading" @click="refreshCustomers">{{ customerLoading ? '刷新中...' : '刷新客户' }}</button>
-        <div class="picker-status" :class="{ error: !!customerWarning }">
-          <span>{{ customerStatusText }}</span>
+        </SelectNative>
+        <div class="flex gap-2">
+          <Button variant="ghost" size="sm" class="flex-1 h-7 text-xs" :disabled="customerLoading" @click="refreshCustomers">
+            <RefreshCw :class="['h-3 w-3 mr-1', customerLoading && 'animate-spin']" />
+            {{ customerLoading ? '刷新中...' : '刷新客户' }}
+          </Button>
+        </div>
+        <div class="text-[11px] text-muted-foreground border border-dashed border-border rounded-lg px-2.5 py-1.5 bg-muted/50" :class="{ 'text-destructive border-destructive/30 bg-destructive/5': !!customerWarning }">
+          {{ customerStatusText }}
         </div>
       </div>
 
-      <nav class="nav side-nav">
-        <RouterLink v-if="isAuthed" to="/chat">💬 对话</RouterLink>
-        <RouterLink v-if="isAuthed" to="/review">📋 跟进记录</RouterLink>
-        <RouterLink v-if="isAuthed" to="/transcripts">📄 上传</RouterLink>
-        <RouterLink v-if="isSuperadmin" to="/config">🧩 简道云配置</RouterLink>
-        <RouterLink v-if="isSuperadmin" to="/llm">🧠 LLM 配置</RouterLink>
-        <RouterLink v-if="isSuperadmin" to="/maintenance">🛠️ 维护</RouterLink>
+      <!-- Navigation -->
+      <nav class="flex-1 px-3 py-3 space-y-1 overflow-y-auto">
+        <RouterLink to="/chat" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+          <MessageSquare class="h-4 w-4 shrink-0" />
+          <span class="truncate">对话</span>
+        </RouterLink>
+        <RouterLink to="/review" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+          <FileText class="h-4 w-4 shrink-0" />
+          <span class="truncate">跟进记录</span>
+        </RouterLink>
+        <RouterLink to="/transcripts" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+          <Upload class="h-4 w-4 shrink-0" />
+          <span class="truncate">上传</span>
+        </RouterLink>
+        <RouterLink to="/power-map" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+          <MapIcon class="h-4 w-4 shrink-0" />
+          <span class="truncate">权利地图</span>
+        </RouterLink>
+
+        <Separator v-if="isSuperadmin" class="!my-2" />
+
+        <RouterLink v-if="isSuperadmin" to="/config" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+          <Settings class="h-4 w-4 shrink-0" />
+          <span class="truncate">简道云配置</span>
+        </RouterLink>
+        <RouterLink v-if="isSuperadmin" to="/llm" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+          <Brain class="h-4 w-4 shrink-0" />
+          <span class="truncate">LLM 配置</span>
+        </RouterLink>
+        <RouterLink v-if="isSuperadmin" to="/maintenance" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+          <Wrench class="h-4 w-4 shrink-0" />
+          <span class="truncate">维护</span>
+        </RouterLink>
       </nav>
 
-      <div class="side-actions">
-        <button class="theme-btn" @click="toggleTheme">{{ isDark ? '浅色' : '深色' }}</button>
-        <button class="logout" @click="logout">退出登录</button>
+      <!-- Footer -->
+      <div class="px-3 py-3 border-t border-border/50 space-y-2">
+        <Button variant="ghost" size="icon" class="h-8 w-8" @click="toggleTheme" :title="isDark ? '浅色模式' : '深色模式'">
+          <Sun v-if="isDark" class="h-4 w-4" />
+          <Moon v-else class="h-4 w-4" />
+        </Button>
+        <Button variant="ghost" size="sm" class="w-full justify-start text-muted-foreground hover:text-destructive" @click="logout">
+          <LogOut class="h-4 w-4 mr-2" />
+          退出登录
+        </Button>
       </div>
     </aside>
 
-    <main class="main-panel" :class="{ full: !isAuthed }">
-      <header class="topbar">
-        <div>
-          <div class="title">工作台</div>
-        </div>
-        <div class="user-chip">
-          <strong>{{ userDisplayName || '访客' }}</strong>
-          <span>{{ userRoleLabel }}</span>
+    <!-- Main Content -->
+    <main class="flex-1 min-w-0 flex flex-col" :class="{ 'max-w-6xl mx-auto w-full': !isAuthed }">
+      <!-- Header -->
+      <header v-if="isAuthed" class="sticky top-0 z-10 bg-card/80 backdrop-blur-sm border-b border-border">
+        <div class="flex items-center justify-between h-14 px-6">
+          <div class="flex items-center gap-3">
+            <h1 class="text-sm font-semibold text-foreground">工作台</h1>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-muted/50 border border-border/50">
+              <div class="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center">
+                <User class="h-3.5 w-3.5 text-primary" />
+              </div>
+              <div class="text-right leading-tight">
+                <div class="text-xs font-medium">{{ userDisplayName || '访客' }}</div>
+                <div class="text-[10px] text-muted-foreground">{{ userRoleLabel }}</div>
+              </div>
+            </div>
+          </div>
         </div>
       </header>
-      <section class="content">
+
+      <!-- Page Content -->
+      <div class="flex-1 p-6">
         <RouterView />
-      </section>
+      </div>
     </main>
+    <ToastProvider />
   </div>
 </template>
 
@@ -58,6 +122,12 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from './api'
 import { useCustomerStore } from './stores/customer'
+import { Search, RefreshCw, Sun, Moon, LogOut, MessageSquare, FileText, Upload, Map as MapIcon, Settings, Brain, Wrench, User } from '@lucide/vue'
+import Button from './components/ui/Button.vue'
+import Input from './components/ui/Input.vue'
+import SelectNative from './components/ui/SelectNative.vue'
+import Separator from './components/ui/Separator.vue'
+import ToastProvider from './components/ToastProvider.vue'
 
 const router = useRouter()
 const isAuthed = ref(false)
@@ -84,7 +154,7 @@ async function refreshAuthState() {
   isAuthed.value = !!me
   isSuperadmin.value = me?.source === 'superadmin'
   userDisplayName.value = me?.display_name || me?.username || me?.user_name || ''
-  userRoleLabel.value = me?.source === 'superadmin' ? '超级管理员' : me?.source === 'sso' ? 'SSO 用户' : '用户'
+  userRoleLabel.value = me?.source === 'superadmin' ? '超级管理员' : me?.source === 'cas' ? 'CAS 用户' : me?.source === 'sso' ? 'SSO 用户' : '用户'
   if (isAuthed.value) {
     customerLoading.value = true
     try {
@@ -134,7 +204,6 @@ async function searchCustomers() {
     }
     return
   }
-  // 关键词搜索：直查简道云，不走本地缓存索引
   try {
     const data = await customerStore.searchCustomersRemote(keyword)
     filteredCustomers.value = data.customers || []
@@ -163,7 +232,6 @@ async function searchCustomers() {
  async function onCustomerChange(event) {
   const companyId = event.target.value
   selectedCustomerId.value = companyId
-  // 先在全量列表中查找，搜索模式下可能只在 filteredCustomers 中
   let selected = customerStore.customers.find((c) => c.company_id === companyId)
   if (!selected) {
     selected = filteredCustomers.value.find((c) => c.company_id === companyId)
@@ -184,8 +252,7 @@ async function refreshCustomers() {
     customerStatusText.value = `刷新完成，共 ${filteredCustomers.value.length} 条`
   } catch (error) {
     console.error('客户列表刷新错误:', error)
-    
-    // 尝试获取更详细的错误信息
+
     let errorMessage = '刷新失败'
     if (error?.response?.data?.detail) {
       errorMessage = error.response.data.detail
@@ -197,7 +264,7 @@ async function refreshCustomers() {
         errorMessage = '客户数据为空，请检查简道云表单是否有数据'
       }
     }
-    
+
     customerWarning.value = errorMessage
     customerStatusText.value = errorMessage
   } finally {
@@ -222,74 +289,3 @@ onMounted(async () => {
 })
 router.afterEach(refreshAuthState)
 </script>
-
-<style scoped>
-.shell{min-height:100vh;color:var(--text)}
-.shell{display:flex}
-.sidebar{
-  width:260px;flex-shrink:0;min-height:100vh;padding:16px 14px;
-  border-right:1px solid var(--line);background:var(--surface);
-  backdrop-filter: var(--blur);-webkit-backdrop-filter: var(--blur);
-  display:flex;flex-direction:column;gap:14px;
-}
-.brand-wrap{padding:6px 8px}
-.topbar{
-  position:sticky;top:0;z-index:10;
-  padding:8px 12px;
-  display:flex;align-items:center;justify-content:space-between;gap:16px;
-  backdrop-filter: var(--blur);
-  -webkit-backdrop-filter: var(--blur);
-  background: var(--surface);
-  border:1px solid var(--line);
-  border-radius:14px;
-}
-.brand{font-size:var(--fs-lg);font-weight:800;letter-spacing:.3px}
-.sub{color:var(--muted)}
-.title{font-size:var(--fs-md);font-weight:700}
-.customer-picker{display:flex;gap:8px;align-items:center;flex-direction:column}
-.picker-input,.picker-select{
-  width:100%;
-  padding:9px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface-soft);color:var(--text);
-}
-.picker-search-row{display:flex;gap:8px;width:100%}
-.picker-search-btn{
-  padding:9px 12px;border-radius:12px;border:1px solid var(--line);background:var(--surface-soft);cursor:pointer;color:var(--text);white-space:nowrap
-}
-.picker-refresh{
-  width:100%;
-  padding:9px 12px;border-radius:12px;border:1px solid var(--line);background:var(--surface-soft);cursor:pointer;color:var(--text);
-}
-.picker-status{
-  width:100%;
-  font-size:12px;
-  color:var(--muted);
-  border:1px dashed var(--line);
-  border-radius:10px;
-  padding:6px 8px;
-  background:var(--surface-soft);
-}
-.picker-status.error{color:#b91c1c;border-color:#fecaca;background:#fef2f2}
-.nav{display:flex;gap:10px;flex-wrap:wrap}
-.side-nav{flex-direction:column;gap:8px}
-.nav a{
-  color:var(--text);text-decoration:none;padding:8px 12px;border-radius:12px;background:var(--surface-soft);border:1px solid var(--line)
-}
-.nav a.router-link-active{background:var(--primary-weak);color:var(--primary);border-color:#bfdbfe}
-.logout,.theme-btn{
-  width:100%;
-  color:var(--text);padding:8px 12px;border-radius:12px;background:var(--surface-soft);border:1px solid var(--line);cursor:pointer
-}
-.side-actions{margin-top:auto;display:grid;gap:8px}
-.main-panel{flex:1;min-width:0;padding:14px;display:grid;gap:12px}
-.main-panel.full{max-width:980px;margin:0 auto;width:100%}
-.user-chip{
-  display:grid;justify-items:end;
-  padding:4px 8px;border:1px solid var(--line);border-radius:10px;background:var(--surface-soft);
-}
-.user-chip span{color:var(--muted)}
-.content{max-width:1480px;margin:0 auto;width:100%}
-@media (max-width: 980px){
-  .shell{display:block}
-  .sidebar{width:auto;min-height:auto;border-right:none;border-bottom:1px solid var(--line)}
-}
-</style>

@@ -1,0 +1,62 @@
+# Cursor Rules — 智档 (ZhiDang) 项目
+
+## 编码风格
+
+- **Python**：4 空格缩进，类型注解在公共函数上，docstring 用三引号
+- **Vue 3**：2 空格缩进，`<script setup lang="ts">`，Composition API
+- **变量命名**：snake_case（Python），camelCase（TS/Vue）
+- **函数命名**：私有函数 `_prefix`，工具函数 `_tool_` 前缀
+- **日志**：`logger.info(f"[DEBUG-J <tag>] ...")` 格式，tag 简短描述分类
+- **BI 字段读取**：**禁止用 `or` 链做 fallback**，必须用 `_safe_pos_float` 或显式 `if v is None or v == ""` 判断
+- **中文 prompt**：全角标点（，。！？），不要混用半角
+
+## 危险操作清单
+
+### 🔴 绝对禁止
+- 手动写 Python 代码：所有 Python 改动必须通过 `claude` CLI（CC）执行
+- 修改 `_fetch_from_external` 的 prj_type 逻辑
+- 修改 `_power_node_to_bi_info_dict` 的 writeback 字段
+- 修改 `_normalize_tool_call_ids` 的拆多 tool_call 逻辑
+- 修改防线 A（geometric_containment_mismatch）和防线 B（重复失败检测）
+- 用 `or` 链做 BI 字段 fallback（`d.get("x") or default`）
+- 把 `HARNESS_SYSTEM_PROMPT` 和 `POWER_MAP_SYSTEM_PROMPT` 互换使用
+
+### 🟡 需要额外谨慎
+- 修改 `power_map_service.py`（395KB）：必须加 `--disallowedTools Task` 防 zombie
+- 部署到生产：先 scp → docker cp → docker compose restart，顺序不能错
+- 修改 tool 返回值：先 grep 确认 `_TOOL_RESULT_COMPRESS_KEEP_FIELDS` 中的字段名匹配
+- 修改 `_build_graph_state_text`：它的输出 LLM 每轮都读，格式变化会影响 LLM 行为
+- 大任务（spec > 5KB）：拆成多个 CC 调用，每次跑完确认再发下一段
+
+### 🟢 安全操作（可手动）
+- 读日志、grep 代码、curl 验证接口
+- 修改 `.env`、`.cursor/rules`、docs
+- 单行常量修改（如调预算参数）
+- `py_compile` 验证语法
+
+## CC（Claude Code）调用规范
+
+```
+# 标准调用（power_map_service.py 的 395KB 文件专用）
+export PATH="/opt/data/home/.npm-global/bin:$PATH"
+cd /mnt/d/智档/backend
+claude -p "$(cat /tmp/task.txt)" --dangerously-skip-permissions \
+  --max-turns 60 --max-budget-usd 5.0 --output-format json \
+  --disallowedTools Task < /dev/null
+```
+
+- 预算按文件大小 + spec 复杂度评估，**宁可多设**
+- 每次 CC 调用前必加载 `route-to-claude-code` skill
+- task spec 首行必写 `DIRECTIVE: Do NOT spawn subagents. ...`
+- 完成后贴 `total_cost_usd` + 改动摘要
+
+## 部署 + 验证
+
+```bash
+scp ... root@47.98.102.197:/tmp/
+ssh root@47.98.102.197 "docker cp ... zhidang-backend-1:... && docker compose -f /opt/zhidang/docker-compose.yml restart backend"
+# 验证：ssh root@47.98.102.197 'docker exec -e PYTHONPATH=/app/backend zhidang-backend-1 python3 -c "..."'
+```
+
+- 回收宝测试种子：`prj_id=798b6f52-2d62-48cf-b40a-dac5d37cc767`
+- 部署前必跑 `python3 -m py_compile`

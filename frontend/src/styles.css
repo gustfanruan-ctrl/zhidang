@@ -1,41 +1,41 @@
 * { box-sizing: border-box; }
 
 :root {
-  --bg: #f4f7fb;
-  --surface: rgba(255, 255, 255, 0.86);
-  --surface-soft: rgba(248, 250, 252, 0.9);
-  --line: rgba(148, 163, 184, 0.28);
-  --text: #0f172a;
-  --muted: #64748b;
-  --primary: #1677ff;
-  --primary-weak: rgba(22, 119, 255, 0.14);
-  --danger: #ef4444;
-  --ok: #10b981;
-  --shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
-  --radius: 16px;
-  --blur: blur(12px);
+  --zhidang-bg: #f4f7fb;
+  --zhidang-surface: rgba(255, 255, 255, 0.86);
+  --zhidang-surface-soft: rgba(248, 250, 252, 0.9);
+  --zhidang-line: rgba(148, 163, 184, 0.28);
+  --zhidang-text: #0f172a;
+  --zhidang-muted: #64748b;
+  --zhidang-primary: #1677ff;
+  --zhidang-primary-weak: rgba(22, 119, 255, 0.14);
+  --zhidang-danger: #ef4444;
+  --zhidang-ok: #10b981;
+  --zhidang-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+  --zhidang-radius: 16px;
+  --zhidang-blur: blur(12px);
 
   /* Typography tiers: only a few levels */
-  --fs-xs: 12px;
-  --fs-sm: 14px;
-  --fs-md: 16px;
-  --fs-lg: 20px;
-  --lh-tight: 1.35;
-  --lh-base: 1.55;
+  --zhidang-fs-xs: 12px;
+  --zhidang-fs-sm: 14px;
+  --zhidang-fs-md: 16px;
+  --zhidang-fs-lg: 20px;
+  --zhidang-lh-tight: 1.35;
+  --zhidang-lh-base: 1.55;
 }
 
 [data-theme="dark"] {
-  --bg: #070b14;
-  --surface: rgba(15, 23, 42, 0.72);
-  --surface-soft: rgba(17, 28, 51, 0.78);
-  --line: rgba(71, 85, 105, 0.42);
-  --text: #e2e8f0;
-  --muted: #94a3b8;
-  --primary: #4f9dff;
-  --primary-weak: rgba(79, 157, 255, 0.2);
-  --danger: #f87171;
-  --ok: #34d399;
-  --shadow: 0 18px 42px rgba(2, 6, 23, 0.5);
+  --zhidang-bg: #070b14;
+  --zhidang-surface: rgba(15, 23, 42, 0.72);
+  --zhidang-surface-soft: rgba(17, 28, 51, 0.78);
+  --zhidang-line: rgba(71, 85, 105, 0.42);
+  --zhidang-text: #e2e8f0;
+  --zhidang-muted: #94a3b8;
+  --zhidang-primary: #4f9dff;
+  --zhidang-primary-weak: rgba(79, 157, 255, 0.2);
+  --zhidang-danger: #f87171;
+  --zhidang-ok: #34d399;
+  --zhidang-shadow: 0 18px 42px rgba(2, 6, 23, 0.5);
 }
 
 html, body, #app {
@@ -45,20 +45,20 @@ html, body, #app {
 body {
   margin: 0;
   font-family: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-size: var(--fs-sm);
-  line-height: var(--lh-base);
-  color: var(--text);
+  font-size: var(--zhidang-fs-sm);
+  line-height: var(--zhidang-lh-base);
+  color: var(--zhidang-text);
   background:
     radial-gradient(1200px 700px at 10% -20%, #dbeafe 0%, transparent 60%),
     radial-gradient(900px 500px at 100% 0%, #e0f2fe 0%, transparent 55%),
-    var(--bg);
+    var(--zhidang-bg);
 }
 
 [data-theme="dark"] body {
   background:
     radial-gradient(1200px 700px at 10% -20%, rgba(37, 99, 235, 0.4) 0%, transparent 60%),
     radial-gradient(900px 500px at 100% 0%, rgba(8, 145, 178, 0.25) 0%, transparent 55%),
-    var(--bg);
+    var(--zhidang-bg);
 }
 
 button, input, select {
@@ -67,17 +67,17 @@ button, input, select {
 
 h1, h2, h3 {
   margin: 0;
-  line-height: var(--lh-tight);
+  line-height: var(--zhidang-lh-tight);
   letter-spacing: 0.01em;
 }
 
-h1 { font-size: var(--fs-lg); font-weight: 700; }
-h2 { font-size: var(--fs-md); font-weight: 650; }
-h3 { font-size: var(--fs-sm); font-weight: 600; }
+h1 { font-size: var(--zhidang-fs-lg); font-weight: 700; }
+h2 { font-size: var(--zhidang-fs-md); font-weight: 650; }
+h3 { font-size: var(--zhidang-fs-sm); font-weight: 600; }
 p, span, label, li, input, textarea, select, button {
-  font-size: var(--fs-sm);
+  font-size: var(--zhidang-fs-sm);
 }
 small, .meta, .hint, .sub {
-  font-size: var(--fs-xs);
-  color: var(--muted);
+  font-size: var(--zhidang-fs-xs);
+  color: var(--zhidang-muted);
 }

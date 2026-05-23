@@ -19,7 +19,7 @@ EXTRACTION_SYSTEM_PROMPT = """\
 你必须调用 extract_customer_facts 工具提交结构化结果。
 参考字段（仅供识别，不做硬限制）：
 - 客户主表：comname_01（公司名）, com_type（公司类型）, revenue_level（客户营收分层）, if_access（是否完成接入）, follow_form（跟进频率）
-- 预期表：detail_brief（预期简述）, detail（预期描述）, yuqi_status（预期状态）, promote_idea（推进思路）, _widget_1773297739599（预期进度 subform）
+- 预期表：detail_brief（预期简述）, detail（预期描述）, yuqi_status（预期状态）, _widget_1770346583096（是否第一价值实现预期）, promote_idea（推进思路）, _widget_1773297739599（预期进度 subform）
 - 场景表：title（场景标题）, solve_what_ques（业务诉求/痛点分析）, solve_what_ans（核心指标&解决方案）
 ## 预期 vs 场景的区分规则（必须严格遵守）
 预期和场景是两张不同的表，有明确的从属关系：一个预期下面可以挂多个场景。

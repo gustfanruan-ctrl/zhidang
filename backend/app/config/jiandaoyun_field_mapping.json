@@ -100,6 +100,15 @@
         "已作废"
       ]
     },
+    "是否第一价值实现预期": {
+      "widget": "_widget_1770346583096",
+      "type": "radiogroup",
+      "safety": "writable",
+      "allowed_values": [
+        "是",
+        "否"
+      ]
+    },
         "推进想法": {
           "widget": "promote_idea",
           "type": "textarea",

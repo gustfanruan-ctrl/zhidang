@@ -1,0 +1,70 @@
+Task: P2 fallback cleanup — remove silent fallback in e2e_chat_v2_client.py
+
+DIRECTIVE: Do NOT use superpowers interactive planning. Read the existing code, then make the following changes directly. This is a small, targeted cleanup.
+
+## Changes
+
+### 1. Modify _run_geometry_check (lines ~408-421)
+
+Current code (silent fallback):
+```python
+    try:
+        dump_url = urljoin(server, f"/api/v1/power-map/debug/dump_ctx?session_id={sid}")
+        resp = requests.get(dump_url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        if resp.status_code == 200:
+            ctx_data = resp.json()
+            with open(ctx_path, "w") as f:
+                json.dump(ctx_data, f, ensure_ascii=False, indent=2)
+        else:
+            # Fallback: try to construct ctx from raw SSE events
+            _build_ctx_from_events(result, ctx_path)
+    except Exception:
+        _build_ctx_from_events(result, ctx_path)
+```
+
+Replace with:
+```python
+    try:
+        dump_url = urljoin(server, f"/api/v1/power-map/debug/dump_ctx?session_id={sid}")
+        resp = requests.get(dump_url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        if resp.status_code == 200:
+            ctx_data = resp.json()
+            with open(ctx_path, "w") as f:
+                json.dump(ctx_data, f, ensure_ascii=False, indent=2)
+        else:
+            # Debug endpoint failed — set UNKNOWN verdict, do NOT fall back to event reconstruction
+            error_detail = resp.text[:500] if resp.text else "(empty body)"
+            result.verdict = "UNKNOWN"
+            result.geometry_report = {
+                "error": f"dump_ctx returned {resp.status_code}: {error_detail}"
+            }
+            return  # skip check_geometry entirely
+    except Exception as exc:
+        result.verdict = "UNKNOWN"
+        result.geometry_report = {"error": f"dump_ctx failed: {type(exc).__name__}: {exc}"}
+        return  # skip check_geometry entirely
+```
+
+### 2. Delete _build_ctx_from_events function (lines ~489-532)
+
+Remove the entire function including its docstring — all ~43 lines.
+
+### 3. Global exit code for UNKNOWN verdict (lines ~636-652)
+
+In `main()`, after the verdict computation section, ensure that if ANY run has verdict "UNKNOWN", the script exits with code 1 (non-zero). This should be checked AFTER the aggregate summary is printed.
+
+Specifically, find the exit logic at the end of main() and modify:
+- Before `sys.exit(1)` (the "All runs failed" case at line ~640), also check: if any result has verdict == "UNKNOWN", print a warning and exit with code 1.
+- This should work even if some runs succeeded — UNKNOWN on ANY run → non-zero exit.
+
+### Constraints
+- Do NOT change any other code in the file
+- Do NOT change the _score_abcd function
+- Do NOT change the ABCD verdict override logic in main()
+- The unknown_results check should happen AFTER the aggregate summary is printed so the user sees both the summary AND the UNKNOWN warning
+
+### Verification
+After making the changes, verify:
+1. `_build_ctx_from_events` no longer exists in the file
+2. The modified `_run_geometry_check` properly returns early when dump fails
+3. The `main()` function checks for UNKNOWN verdict and exits non-zero

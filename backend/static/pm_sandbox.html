@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Power Map Sandbox</title>
+<style>
+  body { margin: 0; padding: 20px; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  svg { display: block; }
+</style>
+</head>
+<body>
+<div id="container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@dagrejs/graphlib@2/dist/graphlib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@dagrejs/dagre@1/dist/dagre.min.js"></script>
+
+<script>
+function getDeptColor(index) {
+  var colors = ['#FFE0E0', '#FFFFD0', '#E0FFE0', '#E0E0FF', '#FFE0FF', '#FFD0D0', '#D0FFD0', '#D0D0FF'];
+  return colors[index % colors.length];
+}
+
+function renderGraph() {
+  var data = window.__GRAPH_DATA__ || { nodes: [], edges: [] };
+  var nodes = data.nodes || [];
+  var edges = data.edges || [];
+
+  if (nodes.length === 0) {
+    document.getElementById('container').innerHTML = '<p>No nodes to render.</p>';
+    window.__LAYOUT_DONE__ = true;
+    return;
+  }
+
+  // Build dept order for color assignment
+  var deptOrder = [];
+  var deptColors = {};
+  for (var i = 0; i < nodes.length; i++) {
+    if (nodes[i].node_type === 'dept' && deptOrder.indexOf(nodes[i].id) === -1) {
+      deptOrder.push(nodes[i].id);
+      deptColors[nodes[i].id] = deptOrder.length - 1;
+    }
+  }
+
+  // Build dagre compound graph
+  var g = new dagre.graphlib.Graph({ compound: true });
+  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 80, marginx: 20, marginy: 20 });
+
+  // Set default edge label
+  g.setDefaultEdgeLabel(function() { return {}; });
+
+  // Add nodes
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    var w = n.width || (n.node_type === 'dept' ? 500 : 160);
+    var h = n.height || (n.node_type === 'dept' ? 200 : 60);
+    g.setNode(n.id, { width: w, height: h, nodeType: n.node_type });
+  }
+
+  // Set parent relationships (user nodes inside dept nodes)
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    if (n.node_type === 'user' && n.parent_dept_id) {
+      g.setParent(n.id, n.parent_dept_id);
+    }
+  }
+
+  // Add edges (reports_to only)
+  for (var i = 0; i < edges.length; i++) {
+    var e = edges[i];
+    if (e.type === 'reports_to') {
+      g.setEdge(e.source, e.target, {});
+    }
+  }
+
+  // Run layout
+  dagre.layout(g);
+
+  // Calculate SVG bounds
+  var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  var nodeInfo = {};
+
+  g.nodes().forEach(function(id) {
+    var node = g.node(id);
+    var x1 = node.x - node.width / 2;
+    var y1 = node.y - node.height / 2;
+    var x2 = node.x + node.width / 2;
+    var y2 = node.y + node.height / 2;
+    nodeInfo[id] = { x: x1, y: y1, w: node.width, h: node.height, cx: node.x, cy: node.y };
+    if (x1 < minX) minX = x1;
+    if (y1 < minY) minY = y1;
+    if (x2 > maxX) maxX = x2;
+    if (y2 > maxY) maxY = y2;
+  });
+
+  var margin = 40;
+  var svgW = maxX - minX + margin * 2;
+  var svgH = maxY - minY + margin * 2;
+
+  function sx(x) { return x - minX + margin; }
+  function sy(y) { return y - minY + margin; }
+
+  // Build SVG
+  var svgParts = [];
+  svgParts.push('<svg xmlns="http://www.w3.org/2000/svg" width="' + svgW + '" height="' + svgH + '">');
+  svgParts.push('<defs>');
+  svgParts.push('<marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">');
+  svgParts.push('<polygon points="0 0, 10 3.5, 0 7" fill="#999"/>');
+  svgParts.push('</marker>');
+  svgParts.push('</defs>');
+  svgParts.push('<rect width="' + svgW + '" height="' + svgH + '" fill="white"/>');
+
+  // Draw department containers
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    if (n.node_type !== 'dept') continue;
+    var info = nodeInfo[n.id];
+    if (!info) continue;
+    var colorIdx = deptColors[n.id] !== undefined ? deptColors[n.id] : 0;
+    var bgColor = getDeptColor(colorIdx);
+    var x = sx(info.x);
+    var y = sy(info.y);
+    var w = info.w;
+    var h = info.h;
+
+    svgParts.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="8" ry="8" fill="' + bgColor + '" stroke="rgba(0,0,0,0.15)" stroke-width="1"/>');
+
+    // Title bar
+    var titleH = 28;
+    svgParts.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + titleH + '" rx="8" ry="8" fill="rgba(0,0,0,0.06)"/>');
+    svgParts.push('<rect x="' + x + '" y="' + (y + titleH - 8) + '" width="' + w + '" height="8" fill="rgba(0,0,0,0.06)"/>');
+    svgParts.push('<text x="' + (x + 12) + '" y="' + (y + 19) + '" font-size="14" font-weight="bold" fill="#333">' + escapeXml(n.name) + '</text>');
+  }
+
+  // Draw edges
+  for (var i = 0; i < edges.length; i++) {
+    var e = edges[i];
+    if (e.type !== 'reports_to') continue;
+    // Skip edges where source is dept (parent-child rendered by nesting)
+    var srcNode = null, tgtNode = null;
+    for (var j = 0; j < nodes.length; j++) {
+      if (nodes[j].id === e.source) srcNode = nodes[j];
+      if (nodes[j].id === e.target) tgtNode = nodes[j];
+    }
+    if (srcNode && srcNode.node_type === 'dept') continue;
+    if (tgtNode && tgtNode.node_type === 'dept') continue;
+
+    var srcInfo = nodeInfo[e.source];
+    var tgtInfo = nodeInfo[e.target];
+    if (!srcInfo || !tgtInfo) continue;
+
+    var x1 = sx(srcInfo.cx);
+    var y1 = sy(srcInfo.y + srcInfo.h); // source bottom-center
+    var x2 = sx(tgtInfo.cx);
+    var y2 = sy(tgtInfo.y); // target top-center
+
+    // Adjust target for arrowhead
+    var arrowLen = 6;
+    var dy = y2 - y1;
+    var dx = x2 - x1;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 0) {
+      x2 = x2 - (dx / dist) * arrowLen;
+      y2 = y2 - (dy / dist) * arrowLen;
+    }
+
+    svgParts.push('<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" stroke="#999" stroke-width="1.5" marker-end="url(#arrowhead)"/>');
+  }
+
+  // Draw person cards
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    if (n.node_type !== 'user') continue;
+    var info = nodeInfo[n.id];
+    if (!info) continue;
+    var x = sx(info.x);
+    var y = sy(info.y);
+    var w = info.w;
+    var h = info.h;
+
+    var borderColor = '#ccc';
+    var borderWidth = 1;
+    if (n.node_manager === '1') {
+      borderColor = '#FFD700';
+      borderWidth = 2;
+    }
+
+    svgParts.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="4" ry="4" fill="white" stroke="' + borderColor + '" stroke-width="' + borderWidth + '"/>');
+
+    // Name
+    var nameText = n.name || '';
+    if (nameText.length > 6) nameText = nameText.substring(0, 6);
+    svgParts.push('<text x="' + (x + w / 2) + '" y="' + (y + 22) + '" font-size="14" font-weight="bold" fill="#333" text-anchor="middle">' + escapeXml(nameText) + '</text>');
+
+    // Position
+    var posText = n.position || '';
+    if (posText.length > 10) posText = posText.substring(0, 10);
+    if (posText) {
+      svgParts.push('<text x="' + (x + w / 2) + '" y="' + (y + 42) + '" font-size="11" fill="#888" text-anchor="middle">' + escapeXml(posText) + '</text>');
+    }
+
+    // Tag A badge
+    var tag = n.tagA || '';
+    if (tag) {
+      var badgeCx = x + w - 14;
+      var badgeCy = y + 14;
+      svgParts.push('<circle cx="' + badgeCx + '" cy="' + badgeCy + '" r="10" fill="#E84040"/>');
+      svgParts.push('<text x="' + badgeCx + '" y="' + (badgeCy + 4) + '" font-size="11" font-weight="bold" fill="white" text-anchor="middle">' + escapeXml(tag) + '</text>');
+    }
+  }
+
+  svgParts.push('</svg>');
+  document.getElementById('container').innerHTML = svgParts.join('');
+  window.__LAYOUT_DONE__ = true;
+}
+
+function escapeXml(s) {
+  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+// Auto-render on load
+renderGraph();
+</script>
+</body>
+</html>

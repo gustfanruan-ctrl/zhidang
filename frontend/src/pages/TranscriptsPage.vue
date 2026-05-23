@@ -93,10 +93,21 @@
     <!-- Zone B: Table -->
     <Card>
       <CardHeader class="pb-3">
-        <div class="flex items-center justify-between">
+        <div class="flex items-center justify-between flex-wrap gap-2">
           <CardTitle class="text-base">{{ sourceMode === 'followup' ? '跟进记录' : '转写记录' }}</CardTitle>
           <div class="flex items-center gap-2">
-            <Badge v-if="selectedIds.size > 0" variant="default">已选 {{ selectedIds.size }}</Badge>
+            <Button
+              v-if="selectedIds.size > 0"
+              variant="default"
+              size="sm"
+              class="h-7 text-xs"
+              :disabled="batchAnalyzing"
+              @click="batchAnalyzeSelected"
+            >
+              <Loader2 v-if="batchAnalyzing" class="h-3 w-3 mr-1 animate-spin" />
+              分析所选 ({{ selectedIds.size }})
+            </Button>
+            <Badge v-if="selectedIds.size > 0" variant="default">已选 {{ selectedIds.size }} 条</Badge>
             <Badge variant="secondary">{{ transcripts.length }} 条记录</Badge>
           </div>
         </div>
@@ -104,10 +115,11 @@
       <CardContent>
         <div v-if="transcripts.length === 0" class="text-center py-12 space-y-2">
           <FileText class="h-10 w-10 mx-auto text-muted-foreground/30" />
-          <p class="text-sm text-muted-foreground">暂无转写记录</p>
+          <p class="text-sm text-muted-foreground">{{ sourceMode === 'followup' ? '暂无跟进记录，点击右上角"刷新跟进记录"从简道云同步' : '暂无转写记录' }}</p>
         </div>
         <div v-else class="overflow-x-auto">
-          <table class="w-full caption-bottom text-sm">
+          <!-- Transcript mode table -->
+          <table v-if="sourceMode === 'transcript'" class="w-full caption-bottom text-sm">
             <thead>
               <tr class="border-b border-border">
                 <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground w-[40px]">
@@ -155,6 +167,72 @@
                 <td class="p-3 text-sm text-muted-foreground">{{ summaryText(t.extraction_summary) }}</td>
                 <td class="p-3 text-sm text-center">{{ t.card_count || 0 }}</td>
                 <td class="p-3 text-xs text-muted-foreground whitespace-nowrap">{{ formatDate(t.created_at) }}</td>
+                <td class="p-3">
+                  <div class="flex gap-1.5">
+                    <Button
+                      v-if="t.status === 'parsed' || t.status === 'error'"
+                      variant="outline"
+                      size="sm"
+                      class="h-7 text-xs"
+                      :disabled="analyzingIds.has(t.id)"
+                      @click.stop="triggerAnalysis(t.id)"
+                    >
+                      <Loader2 v-if="analyzingIds.has(t.id)" class="h-3 w-3 mr-1 animate-spin" />
+                      {{ analyzingIds.has(t.id) ? '分析中' : '分析' }}
+                    </Button>
+                    <Button variant="ghost" size="sm" class="h-7 text-xs" @click.stop="selectTranscript(t)">详情</Button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <!-- Followup mode table: simpler columns (no input_type / extraction_summary / card_count) -->
+          <table v-else class="w-full caption-bottom text-sm">
+            <thead>
+              <tr class="border-b border-border">
+                <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground w-[40px]">
+                  <input
+                    type="checkbox"
+                    class="h-3.5 w-3.5 cursor-pointer accent-primary"
+                    :checked="pagedTranscripts.length > 0 && pagedTranscripts.every(t => isRowSelected(t.id))"
+                    @change="onToggleSelectAll($event)"
+                  />
+                </th>
+                <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground w-[30%]">标题</th>
+                <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground w-[16%]">客户</th>
+                <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground w-[14%]">状态</th>
+                <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground w-[18%]">时间</th>
+                <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground w-[18%]">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="t in pagedTranscripts"
+                :key="t.id"
+                class="border-b border-border/50 transition-colors hover:bg-muted/30 cursor-pointer"
+                :class="{ 'bg-primary/5': selectedId === t.id }"
+                @click="selectTranscript(t)"
+              >
+                <td class="p-3" @click.stop>
+                  <input
+                    type="checkbox"
+                    class="h-3.5 w-3.5 cursor-pointer accent-primary"
+                    :checked="isRowSelected(t.id)"
+                    @change="toggleRowSelected(t.id)"
+                  />
+                </td>
+                <td class="p-3 text-sm font-medium truncate max-w-[280px]">
+                  <div class="flex items-center gap-2">
+                    <FileText class="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
+                    <span class="truncate">{{ t.title || '未命名跟进' }}</span>
+                  </div>
+                </td>
+                <td class="p-3 text-sm text-muted-foreground truncate max-w-[160px]">{{ t.company_name || '-' }}</td>
+                <td class="p-3">
+                  <StatusBadge :status="t.status || 'parsed'">{{ statusLabel(t.status) }}</StatusBadge>
+                </td>
+                <td class="p-3 text-xs text-muted-foreground whitespace-nowrap">{{ formatDate(t.review_date || t.created_at) }}</td>
                 <td class="p-3">
                   <div class="flex gap-1.5">
                     <Button
@@ -421,7 +499,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Upload, FileText, Image, X, Check, Plus, Send, AlertTriangle, Loader2 } from '@lucide/vue'
 import { api } from '../api'
 import { useCustomerStore } from '../stores/customer'
@@ -579,15 +657,53 @@ function goPage(n) { currentPage.value = Math.max(1, Math.min(n, totalPages.valu
 
 async function loadTranscripts() {
   try {
-    const data = sourceMode.value === 'followup'
-      ? await fetchFollowupRecords()
-      : await fetchTranscripts()
+    let data
+    if (sourceMode.value === 'followup') {
+      const cid = customerStore.currentCustomer?.company_id || ''
+      data = await fetchFollowupRecords(cid ? { company_id: cid } : {})
+    } else {
+      data = await fetchTranscripts()
+    }
     transcripts.value = data.items || []
     currentPage.value = 1
     startPollIfNeeded()
   } catch (e) {
     console.warn('加载列表失败', e)
   }
+}
+
+const batchAnalyzing = ref(false)
+
+async function batchAnalyzeSelected() {
+  if (batchAnalyzing.value || selectedIds.value.size === 0) return
+  const ids = [...selectedIds.value]
+  const eligible = transcripts.value.filter(t => ids.includes(t.id) && (t.status === 'parsed' || t.status === 'error'))
+  if (eligible.length === 0) {
+    showMessage('所选记录均不可分析（仅"待分析"或"失败"状态可触发）', 'error')
+    return
+  }
+  if (eligible.length < ids.length) {
+    showMessage(`已跳过 ${ids.length - eligible.length} 条不可分析的记录`, 'info')
+  }
+  batchAnalyzing.value = true
+  let ok = 0, fail = 0
+  for (const t of eligible) {
+    try {
+      if (sourceMode.value === 'followup') {
+        await startFollowupAnalysis(t.id)
+      } else {
+        await startTranscriptAnalysis(t.id)
+      }
+      ok += 1
+    } catch (e) {
+      fail += 1
+      console.warn('分析触发失败', t.id, e)
+    }
+  }
+  batchAnalyzing.value = false
+  showMessage(`已触发 ${ok} 条分析${fail ? `，失败 ${fail}` : ''}`, ok > 0 ? 'success' : 'error')
+  selectedIds.value = new Set()
+  await loadTranscripts()
 }
 
 function startPollIfNeeded() {
@@ -879,6 +995,16 @@ function formatFileSize(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
 }
+
+watch(() => customerStore.currentCustomer?.company_id, (id, prev) => {
+  if (id === prev) return
+  if (sourceMode.value === 'followup') {
+    selectedIds.value = new Set()
+    selectedId.value = null
+    selectedTranscript.value = null
+    loadTranscripts()
+  }
+})
 
 onMounted(async () => {
   customerStore.hydrateCurrentCustomer()

@@ -1,800 +1,596 @@
 <template>
-  <div class="review-page">
-    <!-- 顶部输入区 -->
-    <div class="review-header">
-      <h1>跟进记录生成</h1>
+  <div class="max-w-5xl mx-auto space-y-8">
+    <!-- Page header -->
+    <div>
+      <h1 class="text-xl font-bold">跟进记录生成</h1>
+      <p class="text-sm text-muted-foreground mt-1">上传会议内容，自动生成结构化跟进记录，审核后提交到简道云</p>
     </div>
 
-    <!-- 步骤进度指示器 -->
-    <div class="step-indicator">
-      <div class="step" :class="{ active: currentStep >= 1, current: currentStep === 1 }">
-        <div class="step-number">1</div>
-        <div class="step-label">上传文件</div>
-      </div>
-      <div class="step-line" :class="{ active: currentStep >= 2 }"></div>
-      <div class="step" :class="{ active: currentStep >= 2, current: currentStep === 2 }">
-        <div class="step-number">2</div>
-        <div class="step-label">LLM生成</div>
-      </div>
-      <div class="step-line" :class="{ active: currentStep >= 3 }"></div>
-      <div class="step" :class="{ active: currentStep >= 3, current: currentStep === 3 }">
-        <div class="step-number">3</div>
-        <div class="step-label">审核编辑</div>
-      </div>
-      <div class="step-line" :class="{ active: currentStep >= 4 }"></div>
-      <div class="step" :class="{ active: currentStep >= 4, current: currentStep === 4 }">
-        <div class="step-number">4</div>
-        <div class="step-label">提交</div>
-      </div>
-    </div>
-
-    <div class="review-input-section">
-      <!-- 当前选中的客户名称 -->
-      <div class="form-row">
-        <label>当前客户：</label>
-        <input type="text" :value="companyName" readonly />
-      </div>
-
-      <!-- 文件上传区域 -->
-      <div class="form-row">
-        <label>上传文件：</label>
-        <div class="upload-area-wrapper">
+    <!-- Step indicator -->
+    <div class="flex items-center justify-center gap-0 py-4">
+      <template v-for="(step, idx) in steps" :key="step.num">
+        <div class="flex flex-col items-center gap-2">
           <div
-            class="upload-area"
-            :class="{ 'drag-over': isDragOver, 'has-file': uploadedFile }"
-            @dragover.prevent="onDragOver"
-            @dragleave.prevent="onDragLeave"
-            @drop.prevent="onFileDrop"
-            @click="triggerFileInput"
+            class="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold transition-all duration-300"
+            :class="currentStep > step.num
+              ? 'bg-emerald-500 text-white'
+              : currentStep === step.num
+                ? 'bg-primary text-primary-foreground shadow-lg shadow-primary/20'
+                : 'border-2 border-muted-foreground/25 text-muted-foreground'"
           >
-            <input
-              ref="fileInput"
-              type="file"
-              accept=".txt,.jpg,.jpeg,.png,.webp"
-              style="display: none"
-              @change="onFileSelect"
-            />
-            <div v-if="!uploadedFile" class="upload-placeholder">
-              <div class="upload-icon">+</div>
-              <div class="upload-text">点击或拖拽上传文件</div>
-              <div class="upload-hint">支持 .txt, .jpg, .jpeg, .png, .webp</div>
+            <Check v-if="currentStep > step.num" class="h-5 w-5" />
+            <span v-else>{{ step.num }}</span>
+          </div>
+          <span
+            class="text-xs font-medium transition-colors"
+            :class="currentStep >= step.num ? 'text-foreground' : 'text-muted-foreground'"
+          >{{ step.label }}</span>
+        </div>
+        <div
+          v-if="idx < steps.length - 1"
+          class="w-16 h-0.5 rounded-full transition-colors duration-300"
+          :class="currentStep > step.num ? 'bg-emerald-500' : 'bg-muted-foreground/20'"
+        />
+      </template>
+    </div>
+
+    <!-- Step 0: Pick from existing records (optional shortcut) -->
+    <Card v-if="currentStep <= 2 || !reviewData">
+      <CardHeader class="pb-3">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <CardTitle class="text-base">从已有记录拼接（可选）</CardTitle>
+            <CardDescription>勾选若干条转写或跟进记录，一键拼接到下方内容</CardDescription>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="inline-flex rounded-lg border border-border p-0.5 bg-muted/30">
+              <button
+                class="px-3 py-1 text-xs font-medium rounded-md transition-colors"
+                :class="sourceType === 'transcript' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'"
+                @click="switchSourceType('transcript')"
+              >会议转写</button>
+              <button
+                class="px-3 py-1 text-xs font-medium rounded-md transition-colors"
+                :class="sourceType === 'followup' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'"
+                @click="switchSourceType('followup')"
+              >跟进记录</button>
             </div>
-            <div v-else class="file-info">
-              <div class="file-name">{{ uploadedFile.name }}</div>
-              <button class="remove-file-btn" @click.stop="removeFile">移除</button>
+            <Badge v-if="selectedSourceIds.size > 0" variant="default">已选 {{ selectedSourceIds.size }}</Badge>
+            <Button variant="ghost" size="sm" class="h-7 text-xs" @click="sourcePanelOpen = !sourcePanelOpen">
+              <ChevronDown class="h-3.5 w-3.5 mr-1 transition-transform" :class="sourcePanelOpen ? '' : '-rotate-90'" />
+              {{ sourcePanelOpen ? '收起' : '展开' }}
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent v-if="sourcePanelOpen">
+        <div v-if="loadingSource" class="text-sm text-muted-foreground py-6 text-center flex items-center justify-center gap-2">
+          <Loader2 class="h-3.5 w-3.5 animate-spin" />
+          加载中...
+        </div>
+        <div v-else-if="!sourceList.length" class="text-sm text-muted-foreground py-6 text-center">
+          {{ sourceType === 'followup' ? '当前客户暂无跟进记录' : '暂无转写记录' }}
+        </div>
+        <div v-else>
+          <div class="rounded-lg border border-border max-h-[260px] overflow-y-auto">
+            <label
+              v-for="item in sourceList"
+              :key="item.id"
+              class="flex items-start gap-3 px-3 py-2 border-b border-border/40 last:border-0 cursor-pointer hover:bg-muted/30 transition-colors"
+              :class="{ 'bg-primary/5': selectedSourceIds.has(item.id) }"
+            >
+              <input
+                type="checkbox"
+                class="h-3.5 w-3.5 cursor-pointer accent-primary mt-1"
+                :checked="selectedSourceIds.has(item.id)"
+                @change="toggleSourceSelected(item.id)"
+              />
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium truncate">{{ item.title || '未命名' }}</div>
+                <div class="flex items-center gap-2 mt-0.5 flex-wrap">
+                  <span class="text-xs text-muted-foreground truncate">{{ item.company_name || '-' }}</span>
+                  <span class="text-xs text-muted-foreground/60">·</span>
+                  <span class="text-xs text-muted-foreground/80 tabular-nums">{{ formatSourceDate(item.review_date || item.created_at) }}</span>
+                </div>
+              </div>
+            </label>
+          </div>
+          <div class="mt-3 flex items-center justify-between flex-wrap gap-2">
+            <span class="text-xs text-muted-foreground">
+              <span v-if="selectedSourceIds.size === 0">未选中任何记录</span>
+              <span v-else>将拼接 <span class="text-foreground font-medium">{{ selectedSourceIds.size }}</span> 条到下方"转写内容"</span>
+            </span>
+            <div class="flex gap-1.5">
+              <Button variant="ghost" size="sm" class="h-7 text-xs" :disabled="selectedSourceIds.size === 0" @click="clearSourceSelection">清空</Button>
+              <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="selectedSourceIds.size === 0" @click="applySelectedSources">
+                <Plus class="h-3.5 w-3.5 mr-1" />拼接到内容
+              </Button>
             </div>
           </div>
-
-          <!-- 图片预览 -->
-          <div v-if="filePreview && isImageFile" class="image-preview">
-            <img :src="filePreview" alt="预览" />
+          <div v-if="appliedSources.length" class="mt-3 rounded-lg bg-primary/5 border border-primary/20 px-3 py-2">
+            <div class="flex items-center gap-2 mb-1.5">
+              <Check class="h-3.5 w-3.5 text-primary" />
+              <span class="text-xs font-medium text-foreground">即将分析以下 {{ appliedSources.length }} 条记录：</span>
+            </div>
+            <div class="flex flex-wrap gap-1.5">
+              <Badge v-for="s in appliedSources" :key="s.id" variant="secondary" class="text-[11px] font-normal">
+                {{ s.title || '未命名' }}
+              </Badge>
+            </div>
           </div>
         </div>
-      </div>
+      </CardContent>
+    </Card>
 
-      <!-- 转写内容 -->
-      <div class="form-row">
-        <label>转写内容：</label>
-        <textarea
-          v-model="transcriptText"
-          placeholder="粘贴会议转写内容，或上传 txt 文件自动填充..."
-          rows="10"
-        ></textarea>
-      </div>
+    <!-- Step 1: Input section -->
+    <Card v-if="currentStep <= 2 || !reviewData">
+      <CardHeader>
+        <CardTitle class="text-base">上传与输入</CardTitle>
+        <CardDescription>上传文件或粘贴转写内容</CardDescription>
+      </CardHeader>
+      <CardContent class="space-y-5">
+        <div class="space-y-1.5">
+          <Label>当前客户</Label>
+          <Input :value="companyName" readonly class="bg-muted/50" />
+        </div>
 
-      <!-- 生成按钮 -->
-      <div class="form-row">
-        <button @click="generateReview" :disabled="!canGenerate || generating" :class="{ 'loading': generating }">
-          {{ generating ? '生成中...' : '生成跟进记录' }}
-        </button>
-      </div>
-    </div>
-    
-    <!-- 中部预览编辑区 -->
-    <div v-if="reviewData" class="review-preview-section">
-      <h2>跟进记录预览</h2>
-      
-      <!-- 跟进类型 -->
-      <div class="form-row">
-        <label>跟进类型：</label>
-        <select v-model="reviewData.follow_type">
-          <option value="线上跟进">线上跟进</option>
-          <option value="线下跟进">线下跟进</option>
-          <option value="内部沟通">内部沟通</option>
-        </select>
-      </div>
-      
-      <!-- 跟进日期 -->
-      <div class="form-row">
-        <label>跟进日期：</label>
-        <input type="date" v-model="reviewData.review_date">
-      </div>
-      
-      <!-- 跟进记录 -->
-      <div class="form-row">
-        <label>跟进记录：</label>
-        <textarea v-model="reviewData.review_record" rows="15"></textarea>
-      </div>
-      
-      <!-- 联系人 -->
-      <div class="form-row">
-        <label>客户方参与人：</label>
-        <input type="text" v-model="reviewData.contact_names" placeholder="如：张经理（采购部）">
-      </div>
-      
-      <!-- 推送前方 -->
-      <div class="form-row">
-        <label>推送前方：</label>
-        <div class="radio-group">
-          <label><input type="radio" v-model="reviewData.if_tuisong" value="是"> 是</label>
-          <label><input type="radio" v-model="reviewData.if_tuisong" value="否"> 否</label>
+        <div class="space-y-1.5">
+          <Label>上传文件</Label>
+          <div class="flex gap-5 items-start">
+            <div class="flex-1">
+              <div
+                class="border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all"
+                :class="isDragOver ? 'border-primary bg-primary/5 scale-[1.01]' : 'border-muted-foreground/20 hover:border-primary/40 hover:bg-muted/50'"
+                @dragover.prevent="onDragOver"
+                @dragleave.prevent="onDragLeave"
+                @drop.prevent="onFileDrop"
+                @click="triggerFileInput"
+              >
+                <input ref="fileInput" type="file" accept=".txt,.jpg,.jpeg,.png,.webp" class="hidden" @change="onFileSelect" />
+                <div v-if="!uploadedFile" class="space-y-2">
+                  <Upload class="h-8 w-8 mx-auto text-muted-foreground/40" />
+                  <p class="text-sm text-muted-foreground">点击或拖拽上传文件</p>
+                  <p class="text-xs text-muted-foreground/60">支持 .txt, .jpg, .jpeg, .png, .webp</p>
+                </div>
+                <div v-else class="flex items-center justify-between bg-muted/50 rounded-lg px-4 py-3">
+                  <div class="flex items-center gap-3">
+                    <FileText class="h-5 w-5 text-muted-foreground" />
+                    <span class="text-sm font-medium">{{ uploadedFile.name }}</span>
+                  </div>
+                  <Button variant="ghost" size="sm" class="text-destructive hover:text-destructive" @click.stop="removeFile">
+                    <X class="h-4 w-4 mr-1" />移除
+                  </Button>
+                </div>
+              </div>
+            </div>
+            <div v-if="filePreview && isImageFile" class="w-[200px] shrink-0">
+              <img :src="filePreview" alt="预览" class="w-full rounded-xl border border-border" />
+            </div>
+          </div>
         </div>
-      </div>
-      
-      <!-- 跟进标签 -->
-      <div class="form-row">
-        <label>跟进标签：</label>
-        <div class="tag-table">
-          <table>
-            <thead>
-              <tr>
-                <th>一级标签</th>
-                <th>二级标签</th>
-                <th>三级标签</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(tag, index) in reviewData.genjin_tags" :key="index">
-                <td>
-                  <select v-model="tag.level1" @change="updateTagLevel2(index)">
-                    <option value="">请选择</option>
-                    <option v-for="level1 in tagTree" :key="level1.level1" :value="level1.level1">
-                      {{ level1.level1 }}
-                    </option>
-                  </select>
-                </td>
-                <td>
-                  <select v-model="tag.level2" @change="updateTagLevel3(index)" :disabled="!tag.level1">
-                    <option value="">请选择</option>
-                    <option 
-                      v-for="level2 in getLevel2Options(tag.level1)" 
-                      :key="level2.label" 
-                      :value="level2.label"
-                    >
-                      {{ level2.label }}
-                    </option>
-                  </select>
-                </td>
-                <td>
-                  <select v-model="tag.level3" :disabled="!tag.level2">
-                    <option value="">请选择</option>
-                    <option 
-                      v-for="level3 in getLevel3Options(tag.level1, tag.level2)" 
-                      :key="level3" 
-                      :value="level3"
-                    >
-                      {{ level3 }}
-                    </option>
-                  </select>
-                </td>
-                <td>
-                  <button @click="removeTag(index)">删除</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <button @click="addTag">新增标签</button>
+
+        <div class="space-y-1.5">
+          <Label>转写内容</Label>
+          <Textarea v-model="transcriptText" placeholder="粘贴会议转写内容，或上传 txt 文件自动填充..." rows="10" />
         </div>
-      </div>
-      
-      <!-- 提交按钮 -->
-      <div class="form-row">
-        <button @click="submitReview" :disabled="!canSubmit || submitting" class="submit-btn">{{ submitting ? '提交中...' : '提交到简道云' }}</button>
-      </div>
-    </div>
-    
-    <!-- 提示信息 -->
-    <div v-if="message" class="message" :class="messageType">
-      {{ message }}
-    </div>
+
+        <Button @click="generateReview" :disabled="!canGenerate || generating" size="lg">
+          <Loader2 v-if="generating" class="h-4 w-4 mr-2 animate-spin" />
+          <Sparkles v-else class="h-4 w-4 mr-2" />
+          {{ generating ? 'AI 生成中...' : '生成跟进记录' }}
+        </Button>
+      </CardContent>
+    </Card>
+
+    <!-- Step 2-3: Preview / Edit -->
+    <Card v-if="reviewData">
+      <CardHeader>
+        <CardTitle class="text-base">跟进记录预览与编辑</CardTitle>
+        <CardDescription>审核 AI 生成的内容，确认无误后提交</CardDescription>
+      </CardHeader>
+      <CardContent class="space-y-5">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="space-y-1.5">
+            <Label>跟进类型</Label>
+            <SelectNative v-model="reviewData.follow_type" class="w-full">
+              <option value="线上跟进">线上跟进</option>
+              <option value="线下跟进">线下跟进</option>
+              <option value="内部沟通">内部沟通</option>
+            </SelectNative>
+          </div>
+          <div class="space-y-1.5">
+            <Label>跟进日期</Label>
+            <Input v-model="reviewData.review_date" type="date" />
+          </div>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label>跟进记录</Label>
+          <Textarea v-model="reviewData.review_record" rows="12" />
+        </div>
+
+        <div class="space-y-1.5">
+          <Label>客户方参与人</Label>
+          <Input v-model="reviewData.contact_names" placeholder="如：张经理（采购部）" />
+        </div>
+
+        <div class="space-y-1.5">
+          <Label>推送前方</Label>
+          <div class="flex gap-6">
+            <label class="flex items-center gap-2 cursor-pointer text-sm">
+              <input type="radio" v-model="reviewData.if_tuisong" value="是" class="accent-primary"> 是
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer text-sm">
+              <input type="radio" v-model="reviewData.if_tuisong" value="否" class="accent-primary"> 否
+            </label>
+          </div>
+        </div>
+
+        <div class="space-y-2">
+          <Label>跟进标签</Label>
+          <div class="overflow-x-auto rounded-lg border border-border">
+            <table class="w-full caption-bottom text-sm">
+              <thead>
+                <tr class="border-b border-border bg-muted/30">
+                  <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground">一级标签</th>
+                  <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground">二级标签</th>
+                  <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground">三级标签</th>
+                  <th class="h-10 px-3 text-left text-xs font-medium text-muted-foreground w-[80px]">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(tag, index) in reviewData.genjin_tags" :key="index" class="border-b border-border/50 last:border-0">
+                  <td class="p-2">
+                    <SelectNative v-model="tag.level1" class="w-full h-8 text-xs" @update:model-value="updateTagLevel2(index)">
+                      <option value="">请选择</option>
+                      <option v-for="level1 in tagTree" :key="level1.level1" :value="level1.level1">{{ level1.level1 }}</option>
+                    </SelectNative>
+                  </td>
+                  <td class="p-2">
+                    <SelectNative v-model="tag.level2" class="w-full h-8 text-xs" :disabled="!tag.level1" @update:model-value="updateTagLevel3(index)">
+                      <option value="">请选择</option>
+                      <option v-for="level2 in getLevel2Options(tag.level1)" :key="level2.label" :value="level2.label">{{ level2.label }}</option>
+                    </SelectNative>
+                  </td>
+                  <td class="p-2">
+                    <SelectNative v-model="tag.level3" class="w-full h-8 text-xs" :disabled="!tag.level2">
+                      <option value="">请选择</option>
+                      <option v-for="level3 in getLevel3Options(tag.level1, tag.level2)" :key="level3" :value="level3">{{ level3 }}</option>
+                    </SelectNative>
+                  </td>
+                  <td class="p-2">
+                    <Button variant="ghost" size="sm" class="h-7 text-xs text-destructive hover:text-destructive" @click="removeTag(index)">
+                      <Trash2 class="h-3.5 w-3.5" />
+                    </Button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <Button variant="outline" size="sm" @click="addTag">
+            <Plus class="h-3.5 w-3.5 mr-1" />新增标签
+          </Button>
+        </div>
+
+        <Button class="w-full bg-emerald-600 hover:bg-emerald-700 text-white" size="lg" :disabled="!canSubmit || submitting" @click="submitReview">
+          <Send v-if="!submitting" class="h-4 w-4 mr-2" />
+          <Loader2 v-else class="h-4 w-4 mr-2 animate-spin" />
+          {{ submitting ? '提交中...' : '提交到简道云' }}
+        </Button>
+      </CardContent>
+    </Card>
+
+    <!-- Message toast -->
+    <div v-if="message" class="fixed bottom-6 left-1/2 -translate-x-1/2 px-5 py-2.5 rounded-xl z-50 text-sm shadow-lg max-w-[90vw] break-words transition-all" :class="{
+      'bg-primary text-primary-foreground': messageType === 'info',
+      'bg-emerald-600 text-white': messageType === 'success',
+      'bg-destructive text-destructive-foreground': messageType === 'error',
+    }">{{ message }}</div>
   </div>
 </template>
 
-<script>
+<script setup>
+import { computed, onMounted, ref, reactive, watch } from 'vue'
+import { Upload, FileText, X, Check, Plus, Send, Sparkles, Trash2, Loader2, ChevronDown } from '@lucide/vue'
 import { api } from '../api'
 import { useCustomerStore } from '../stores/customer'
+import { fetchTranscripts as fetchAllTranscripts } from '../api/operation'
+import { fetchFollowupRecords } from '../api/followup-records'
+import Card from '../components/ui/Card.vue'
+import CardHeader from '../components/ui/CardHeader.vue'
+import CardTitle from '../components/ui/CardTitle.vue'
+import CardDescription from '../components/ui/CardDescription.vue'
+import CardContent from '../components/ui/CardContent.vue'
+import Button from '../components/ui/Button.vue'
+import Input from '../components/ui/Input.vue'
+import Textarea from '../components/ui/Textarea.vue'
+import Label from '../components/ui/Label.vue'
+import SelectNative from '../components/ui/SelectNative.vue'
+import Badge from '../components/ui/Badge.vue'
 
-export default {
-  name: 'ReviewPage',
-  data() {
-    return {
-      // 页面数据
-      transcriptText: '',
-      reviewData: null,
-      tagTree: [],
-      config: {
-        review_entry_id: '670a28334883adafb152a869',
-        review_system_prompt: ''
-      },
-      generating: false,
-      submitting: false,
-      showAdvanced: false,
-      message: '',
-      messageType: 'info',
-      // 文延上传相关
-      uploadedFile: null,
-      filePreview: null,
-      isDragOver: false,
-      currentStep: 1
+const steps = [
+  { num: 1, label: '上传文件' },
+  { num: 2, label: 'AI 生成' },
+  { num: 3, label: '审核编辑' },
+  { num: 4, label: '提交' },
+]
+
+const today = new Date().toISOString().split('T')[0]
+
+const transcriptText = ref('')
+const reviewData = ref(null)
+const tagTree = ref([])
+const config = reactive({
+  review_entry_id: '670a28334883adafb152a869',
+  review_system_prompt: ''
+})
+const generating = ref(false)
+const submitting = ref(false)
+const showAdvanced = ref(false)
+const message = ref('')
+const messageType = ref('info')
+const uploadedFile = ref(null)
+const filePreview = ref(null)
+const isDragOver = ref(false)
+const currentStep = ref(1)
+const todayDate = ref(today)
+const fileInput = ref(null)
+
+const customerStore = useCustomerStore()
+
+const sourceType = ref('transcript') // 'transcript' | 'followup'
+const sourceList = ref([])
+const selectedSourceIds = ref(new Set())
+const loadingSource = ref(false)
+const sourcePanelOpen = ref(false)
+const appliedSources = ref([])
+
+async function loadSourceList() {
+  loadingSource.value = true
+  try {
+    if (sourceType.value === 'followup') {
+      const params = companyId.value ? { company_id: companyId.value } : {}
+      const data = await fetchFollowupRecords(params)
+      sourceList.value = data.items || []
+    } else {
+      const data = await fetchAllTranscripts()
+      let items = data.items || []
+      if (companyId.value) {
+        items = items.filter(t => t.company_id === companyId.value)
+      }
+      sourceList.value = items
     }
-  },
-  computed: {
-    companyId() {
-      const store = useCustomerStore()
-      return store.currentCustomer?.company_id || ''
-    },
-    companyName() {
-      const store = useCustomerStore()
-      return store.currentCustomer?.company_name || ''
-    },
-    canGenerate() {
-      return this.transcriptText.trim() && this.companyName
-    },
-    isImageFile() {
-      if (!this.uploadedFile) return false
-      const ext = this.uploadedFile.name.split('.').pop().toLowerCase()
-      return ['jpg', 'jpeg', 'png', 'webp'].includes(ext)
-    },
-    canSubmit() {
-      return this.reviewData && this.reviewData.follow_type && this.reviewData.review_date && this.reviewData.review_record
-    }
-  },
-  async mounted() {
-    await this.loadTagTree()
-    await this.loadConfig()
-  },
-  methods: {
-    // --- 文件上传相关方法 ---
-    triggerFileInput() {
-      this.$refs.fileInput.click()
-    },
-
-    onDragOver(e) {
-      this.isDragOver = true
-    },
-
-    onDragLeave(e) {
-      this.isDragOver = false
-    },
-
-    onFileDrop(e) {
-      this.isDragOver = false
-      const files = e.dataTransfer.files
-      if (files.length > 0) {
-        this.handleFile(files[0])
-      }
-    },
-
-    onFileSelect(e) {
-      const files = e.target.files
-      if (files.length > 0) {
-        this.handleFile(files[0])
-      }
-    },
-
-    validateFile(file) {
-      const allowedTypes = ['.txt', '.jpg', '.jpeg', '.png', '.webp']
-      const ext = '.' + file.name.split('.').pop().toLowerCase()
-      return allowedTypes.includes(ext)
-    },
-
-    handleFile(file) {
-      if (!this.validateFile(file)) {
-        this.showMessage('不支持的文件类型，请上传 .txt, .jpg, .jpeg, .png, .webp 文件', 'error')
-        return
-      }
-
-      this.uploadedFile = file
-      this.filePreview = null
-
-      const ext = file.name.split('.').pop().toLowerCase()
-
-      if (ext === 'txt') {
-        // 读取文本内容
-        const reader = new FileReader()
-        reader.onload = (e) => {
-          this.transcriptText = e.target.result
-          this.showMessage('文本文件读取成功', 'success')
-          this.currentStep = 1
-        }
-        reader.onerror = () => {
-          this.showMessage('读取文本文件失败', 'error')
-        }
-        reader.readAsText(file)
-      } else {
-        // 图片文件：生成预览并设置位文本
-        const reader = new FileReader()
-        reader.onload = (e) => {
-          this.filePreview = e.target.result
-          this.transcriptText = `[图片上传: ${file.name}]`
-          this.showMessage('图片上传成功，请确认后生成', 'success')
-          this.currentStep = 1
-        }
-        reader.readAsDataURL(file)
-      }
-    },
-
-    removeFile() {
-      this.uploadedFile = null
-      this.filePreview = null
-      this.transcriptText = ''
-      this.currentStep = 1
-    },
-
-    // --- 标签劳数据方法 ---
-    async loadTagTree() {
-      try {
-        const response = await api.get('/api/v1/followup/tags')
-        // 后端返回 {&#34;使用推进&#34;: {&#34;常态化跟进&#34;: [], ...}}
-        // 转为前端需要的 [{level1, children: [{label, children}]}]
-        const raw = response.data.tags || {}
-        this.tagTree = Object.entries(raw).map(([level1, children]) => ({
-          level1,
-          children: Object.entries(children).map(([label, subChildren]) => ({
-            label,
-            children: subChildren || []
-          }))
-        }))
-      } catch (error) {
-        console.error('初始化标签失败', error)
-        this.tagTree = []
-      }
-    },
-
-    getLevel2Options(level1) {
-      const level1Item = this.tagTree.find(item => item.level1 === level1)
-      return level1Item ? level1Item.children : []
-    },
-
-    getLevel3Options(level1, level2) {
-      const level1Item = this.tagTree.find(item => item.level1 === level1)
-      if (!level1Item) return []
-      const level2Item = level1Item.children.find(item => item.label === level2)
-      return level2Item ? level2Item.children : []
-    },
-
-    updateTagLevel2(index) {
-      this.reviewData.genjin_tags[index].level2 = ''
-      this.reviewData.genjin_tags[index].level3 = ''
-    },
-
-    updateTagLevel3(index) {
-      this.reviewData.genjin_tags[index].level3 = ''
-    },
-
-    addTag() {
-      if (!this.reviewData) return
-      if (!this.reviewData.genjin_tags) {
-        this.reviewData.genjin_tags = []
-      }
-      this.reviewData.genjin_tags.push({ level1: '', level2: '', level3: '' })
-    },
-
-    removeTag(index) {
-      this.reviewData.genjin_tags.splice(index, 1)
-    },
-
-    // --- 配置方法 ---
-    async loadConfig() {
-      try {
-        const response = await api.get('/api/v1/admin/config')
-        if (response.data.field_mappings) {
-          this.config = {
-            ...this.config,
-            ...response.data.field_mappings
-          }
-        }
-      } catch (error) {
-        console.error('自定义配置失败', error)
-      }
-    },
-
-    // --- 生成跟进记录 ---
-    async generateReview() {
-      if (!this.canGenerate) return
-
-      this.generating = true
-      this.message = ''
-      this.currentStep = 2
-
-      try {
-        const response = await api.post('/api/v1/followup/generate', {
-          input_type: this.uploadedFile && this.isImageFile ? 'screenshot' : 'text',
-          content: this.transcriptText,
-          company_id: this.companyId,
-          company_name: this.companyName
-        })
-
-        const raw = response.data
-        // 映射 LLM 返回字段 → 前端模板绑定字段
-        this.reviewData = {
-          follow_type: raw.business_action || '',
-          review_date: raw.followup_date || '',
-          review_record: raw.background && raw.communication_details
-            ? `【跟进目的】${raw.background}\n【沟通详情】\n${raw.communication_details.map((d,i) => `${i+1}. ${d}`).join('\n')}\n【参与人】${raw.contact_person || ''}`
-            : '',
-          contact_names: raw.contact_person || '',
-          if_tuisong: '否',
-          genjin_tags: raw.genjin_tags || [],
-          company_name: raw.company_name || this.companyName,
-        }
-        this.currentStep = 3
-        this.showMessage('跟进记录生成成功，请审核后提交', 'success')
-      } catch (error) {
-        console.error('生成失败', error)
-        this.showMessage('生成失败：' + (error.response?.data?.detail || error.message), 'error')
-        this.currentStep = 1
-      } finally {
-        this.generating = false
-      }
-    },
-
-    // --- 提交到简道云 ---
-    async submitReview() {
-      if (!this.canSubmit) return
-
-      this.submitting = true
-      this.message = ''
-      this.currentStep = 4
-
-      try {
-        const payload = {
-          company_id: this.companyId,
-          company_name: this.companyName,
-          follower: this.reviewData.follower || '',
-          follow_type: this.reviewData.follow_type,
-          review_date: this.reviewData.review_date,
-          review_record: this.reviewData.review_record,
-          genjin_tags: this.reviewData.genjin_tags || [],
-          if_tuisong: this.reviewData.if_tuisong || '否',
-          contname: this.reviewData.contact_names || '',
-          contid: '',
-          yuqi_id: ''
-        }
-
-        await api.post('/api/v1/followup/submit', payload)
-        this.showMessage('成功提交到简道云', 'success')
-      } catch (error) {
-        console.error('提交失败', error)
-        this.showMessage('提交失败：' + (error.response?.data?.detail || error.message), 'error')
-        this.currentStep = 3
-      } finally {
-        this.submitting = false
-      }
-    },
-
-    // --- 关闭方法 ---
-    showMessage(text, type = 'info') {
-      this.message = text
-      this.messageType = type
-      setTimeout(() => {
-        this.message = ''
-      }, 3000)
-    }
+  } catch (e) {
+    console.warn('加载来源列表失败', e)
+    sourceList.value = []
+  } finally {
+    loadingSource.value = false
   }
 }
+
+function toggleSourceSelected(id) {
+  const next = new Set(selectedSourceIds.value)
+  if (next.has(id)) next.delete(id); else next.add(id)
+  selectedSourceIds.value = next
+}
+
+function clearSourceSelection() {
+  selectedSourceIds.value = new Set()
+  appliedSources.value = []
+}
+
+function applySelectedSources() {
+  if (selectedSourceIds.value.size === 0) return
+  const chosen = sourceList.value.filter(s => selectedSourceIds.value.has(s.id))
+  const parts = chosen
+    .map(s => `--- ${s.title || s.id} (${s.company_name || ''}) ---\n${s.raw_text || ''}`)
+    .filter(Boolean)
+  transcriptText.value = parts.join('\n\n')
+  appliedSources.value = chosen.map(s => ({ id: s.id, title: s.title, company_name: s.company_name }))
+  currentStep.value = 1
+  showMessage(`已拼接 ${chosen.length} 条来源到下方内容`, 'success')
+}
+
+function switchSourceType(t) {
+  if (sourceType.value === t) return
+  sourceType.value = t
+  selectedSourceIds.value = new Set()
+  appliedSources.value = []
+  loadSourceList()
+}
+
+function formatSourceDate(d) {
+  if (!d) return '-'
+  try {
+    return new Date(d).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  } catch { return '-' }
+}
+
+const companyId = computed(() => customerStore.currentCustomer?.company_id || '')
+const companyName = computed(() => customerStore.currentCustomer?.company_name || '')
+const canGenerate = computed(() => transcriptText.value.trim() && companyName.value)
+const isImageFile = computed(() => {
+  if (!uploadedFile.value) return false
+  const ext = uploadedFile.value.name.split('.').pop().toLowerCase()
+  return ['jpg', 'jpeg', 'png', 'webp'].includes(ext)
+})
+const canSubmit = computed(() => reviewData.value && reviewData.value.follow_type && reviewData.value.review_date && reviewData.value.review_record)
+
+// File methods
+function triggerFileInput() { fileInput.value?.click() }
+function onDragOver() { isDragOver.value = true }
+function onDragLeave() { isDragOver.value = false }
+function onFileDrop(e) {
+  isDragOver.value = false
+  const files = e.dataTransfer.files
+  if (files.length > 0) handleFile(files[0])
+}
+function onFileSelect(e) {
+  const files = e.target.files
+  if (files.length > 0) handleFile(files[0])
+}
+function validateFile(file) {
+  const allowedTypes = ['.txt', '.jpg', '.jpeg', '.png', '.webp']
+  const ext = '.' + file.name.split('.').pop().toLowerCase()
+  return allowedTypes.includes(ext)
+}
+function handleFile(file) {
+  if (!validateFile(file)) {
+    showMessage('不支持的文件类型，请上传 .txt, .jpg, .jpeg, .png, .webp 文件', 'error')
+    return
+  }
+  uploadedFile.value = file
+  filePreview.value = null
+  const ext = file.name.split('.').pop().toLowerCase()
+  if (ext === 'txt') {
+    const reader = new FileReader()
+    reader.onload = (e) => { transcriptText.value = e.target.result; showMessage('文本文件读取成功', 'success'); currentStep.value = 1 }
+    reader.onerror = () => { showMessage('读取文本文件失败', 'error') }
+    reader.readAsText(file)
+  } else {
+    const reader = new FileReader()
+    reader.onload = (e) => { filePreview.value = e.target.result; transcriptText.value = `[图片上传: ${file.name}]`; showMessage('图片上传成功，请确认后生成', 'success'); currentStep.value = 1 }
+    reader.readAsDataURL(file)
+  }
+}
+function removeFile() {
+  uploadedFile.value = null
+  filePreview.value = null
+  transcriptText.value = ''
+  currentStep.value = 1
+}
+
+// Tag methods
+async function loadTagTree() {
+  try {
+    const response = await api.get('/api/v1/followup/tags')
+    tagTree.value = Array.isArray(response.data) ? response.data : (response.data.tags || [])
+  } catch (error) {
+    console.error('初始化标签失败', error)
+    tagTree.value = []
+  }
+}
+function getLevel2Options(level1) {
+  const level1Item = tagTree.value.find(item => item.level1 === level1)
+  return level1Item ? level1Item.children : []
+}
+function getLevel3Options(level1, level2) {
+  const level1Item = tagTree.value.find(item => item.level1 === level1)
+  if (!level1Item) return []
+  const level2Item = level1Item.children.find(item => item.label === level2)
+  return level2Item ? level2Item.children : []
+}
+function updateTagLevel2(index) {
+  reviewData.value.genjin_tags[index].level2 = ''
+  reviewData.value.genjin_tags[index].level3 = ''
+}
+function updateTagLevel3(index) {
+  reviewData.value.genjin_tags[index].level3 = ''
+}
+function addTag() {
+  if (!reviewData.value) return
+  if (!reviewData.value.genjin_tags) reviewData.value.genjin_tags = []
+  reviewData.value.genjin_tags.push({ level1: '', level2: '', level3: '' })
+}
+function removeTag(index) {
+  reviewData.value.genjin_tags.splice(index, 1)
+}
+
+// Config
+async function loadConfig() {
+  try {
+    const response = await api.get('/api/v1/admin/config')
+    if (response.data.field_mappings) {
+      Object.assign(config, response.data.field_mappings)
+    }
+  } catch (error) {
+    console.error('自定义配置失败', error)
+  }
+}
+
+// Generate
+async function generateReview() {
+  if (!canGenerate.value) return
+  generating.value = true
+  message.value = ''
+  currentStep.value = 2
+  try {
+    const response = await api.post('/api/v1/followup/generate', {
+      input_type: uploadedFile.value && isImageFile.value ? 'screenshot' : 'text',
+      content: transcriptText.value,
+      company_id: companyId.value,
+      company_name: companyName.value
+    })
+    const raw = response.data
+    reviewData.value = {
+      follow_type: raw.follow_type || raw.business_action || '',
+      review_date: todayDate.value,
+      review_record: raw.review_record || '',
+      contact_names: raw.contact_names || raw.contact_person || '',
+      if_tuisong: raw.if_tuisong || '否',
+      genjin_tags: raw.genjin_tags || [],
+      company_name: raw.company_name || companyName.value,
+    }
+    currentStep.value = 3
+    showMessage('跟进记录生成成功，请审核后提交', 'success')
+  } catch (error) {
+    console.error('生成失败', error)
+    showMessage('生成失败：' + (error.response?.data?.detail || error.message), 'error')
+    currentStep.value = 1
+  } finally {
+    generating.value = false
+  }
+}
+
+// Submit
+async function submitReview() {
+  if (!canSubmit.value) return
+  submitting.value = true
+  message.value = ''
+  currentStep.value = 4
+  try {
+    const payload = {
+      company_id: companyId.value,
+      company_name: companyName.value,
+      follower: reviewData.value.follower || '',
+      follow_type: reviewData.value.follow_type,
+      review_date: reviewData.value.review_date,
+      review_record: reviewData.value.review_record,
+      genjin_tags: reviewData.value.genjin_tags || [],
+      if_tuisong: reviewData.value.if_tuisong || '否',
+      contname: reviewData.value.contact_names || '',
+      contid: '',
+      yuqi_id: reviewData.value.yuqi_id || '',
+      yuqi_first_value: reviewData.value.yuqi_first_value || '',
+      relevent_tag: reviewData.value.relevent_tag || []
+    }
+    await api.post('/api/v1/followup/submit', payload)
+    showMessage('成功提交到简道云', 'success')
+  } catch (error) {
+    console.error('提交失败', error)
+    showMessage('提交失败：' + (error.response?.data?.detail || error.message), 'error')
+    currentStep.value = 3
+  } finally {
+    submitting.value = false
+  }
+}
+
+function showMessage(text, type = 'info') {
+  message.value = text
+  messageType.value = type
+  setTimeout(() => { message.value = '' }, 3000)
+}
+
+watch(() => customerStore.currentCustomer?.company_id, (id, prev) => {
+  if (id === prev) return
+  selectedSourceIds.value = new Set()
+  appliedSources.value = []
+  loadSourceList()
+})
+
+onMounted(async () => {
+  await loadTagTree()
+  await loadConfig()
+  await loadSourceList()
+})
 </script>
-
-<style scoped>
-.review-page {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 20px;
-}
-
-.review-header {
-  margin-bottom: 20px;
-}
-
-.review-header h1 {
-  font-size: 24px;
-  color: #333;
-}
-
-/* -- 步骤进度指示器 -- */
-.step-indicator {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 30px;
-  padding: 20px 0;
-  background: #f8f9fa;
-  border-radius: 8px;
-}
-
-.step {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.step-number {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: bold;
-  font-size: 18px;
-  background: #ddd;
-  color: #999;
-}
-
-.step.active .step-number {
-  background: #4285f4;
-  color: white;
-}
-
-.step.current .step-number {
-  background: #1a73e8;
-  color: white;
-}
-
-.step-label {
-  font-size: 14px;
-  color: #999;
-}
-
-.step.active .step-label {
-  color: #333;
-}
-
-.step.current .step-label {
-  color: #1a73e8;
-  font-weight: bold;
-}
-
-.step-line {
-  width: 80px;
-  height: 2px;
-  background: #ddd;
-  margin: 0 10px;
-}
-
-.step-line.active {
-  background: #4285f4;
-}
-
-/* -- 输入区 -- */
-.review-input-section {
-  background: white;
-  padding: 24px;
-  border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  margin-bottom: 24px;
-}
-
-.form-row {
-  margin-bottom: 16px;
-}
-
-.form-row label {
-  display: block;
-  font-weight: 600;
-  margin-bottom: 8px;
-  color: #555;
-}
-
-.form-row input[type="text"],
-.form-row input[type="date"],
-.form-row textarea,
-.form-row select {
-  width: 100%;
-  padding: 10px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 14px;
-}
-
-.form-row textarea {
-  resize: vertical;
-  min-height: 120px;
-}
-
-/* -- 上传区域 -- */
-.upload-area-wrapper {
-  display: flex;
-  gap: 20px;
-  align-items: flex-start;
-}
-
-.upload-area {
-  flex: 1;
-  border: 2px dashed #ccc;
-  border-radius: 8px;
-  padding: 30px;
-  text-align: center;
-  cursor: pointer;
-  transition: border-color 0.3s;
-}
-
-.upload-area:hover {
-  border-color: #1a73e8;
-}
-
-.upload-area.drag-over {
-  border-color: #1a73e8;
-  background: #e8f0fe;
-}
-
-.upload-placeholder {
-  color: #999;
-}
-
-.upload-icon {
-  font-size: 32px;
-  margin-bottom: 10px;
-}
-
-.upload-text {
-  font-size: 16px;
-  margin-bottom: 8px;
-}
-
-.upload-hint {
-  font-size: 12px;
-  color: #bbb;
-}
-
-.file-info {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.file-name {
-  font-size: 14px;
-  color: #333;
-}
-
-.remove-file-btn {
-  padding: 4px 12px;
-  background: #e74c3c;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.image-preview {
-  width: 200px;
-}
-
-.image-preview img {
-  width: 100%;
-  border-radius: 8px;
-  border: 1px solid #ddd;
-}
-
-/* -- 预览编辑区 -- */
-.review-preview-section {
-  background: white;
-  padding: 24px;
-  border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-}
-
-.review-preview-section h2 {
-  margin-bottom: 20px;
-  color: #333;
-}
-
-/* -- 标签表格 -- */
-.tag-table {
-  margin-top: 10px;
-}
-
-.tag-table table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.tag-table th,
-.tag-table td {
-  padding: 8px 12px;
-  border: 1px solid #ddd;
-  text-align: left;
-}
-
-.tag-table th {
-  background: #f5f5f5;
-  font-weight: 600;
-}
-
-.tag-table select {
-  width: 100%;
-  padding: 6px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-}
-
-/* -- 提交按钮 -- */
-.subit-btn {
-  width: 100%;
-  padding: 12px;
-  background: #27ae60;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 16px;
-  cursor: pointer;
-  transition: background 0.3s;
-}
-
-.submit-btn:hover:not(:disabled) {
-  background: #219a52;
-}
-
-.submit-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-/* -- 提示信息 -- */
-.message {
-  padding: 12px;
-  border-radius: 6px;
-  margin-top: 16px;
-  font-size: 14px;
-}
-
-.message.info {
-  background: #e3f2fd;
-  color: #1565c0;
-}
-
-.message.success {
-  background: #e8f5e9;
-  color: #2e7d32;
-}
-
-.message.error {
-  background: #fdecea;
-  color: #c62828;
-}
-
-/* -- 攻用按钮 -- */
-button {
-  padding: 8px 20px;
-  background: #1a73e8;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 14px;
-}
-
-button:hover:not(:disabled) {
-  background: #1557b0;
-}
-
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.radio-group {
-  display: flex;
-  gap: 20px;
-}
-
-.radio-group label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-}
-</style>

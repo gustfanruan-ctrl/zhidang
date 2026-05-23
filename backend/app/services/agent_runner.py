@@ -26,8 +26,8 @@ class AgentResult:
 
 class AgentRunner:
     MAX_ITERATIONS = 8
-    TOOL_TIMEOUT_SECONDS = 30
-    TOTAL_TIMEOUT_SECONDS = 300
+    TOOL_TIMEOUT_SECONDS = 7200
+    TOTAL_TIMEOUT_SECONDS = 7200
 
     def __init__(
         self,
@@ -88,7 +88,7 @@ class AgentRunner:
 
                 create_kwargs: dict[str, Any] = {
                     "model": self.model_name,
-                    "max_tokens": 4096,
+                    "max_tokens": 8192,
                     "system": self.system_prompt,
                     "tools": self.tools,
                     "messages": messages,

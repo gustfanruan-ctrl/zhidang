@@ -15,6 +15,7 @@ class ReviewAction(BaseModel):
 class OperationExecuteRequest(BaseModel):
     transcript_id: str
     card_ids: list[str] = Field(default_factory=list)
+    field_updates: dict[str, dict[str, str]] = Field(default_factory=dict, description="card_id -> {field_name: new_value}")
 
 
 class OperationExecuteResult(BaseModel):

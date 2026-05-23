@@ -1,49 +1,182 @@
 <template>
-  <div class="grid">
-    <section class="card">
-      <h2>LLM 配置</h2>
-      <div class="form-grid">
-        <label>Provider<select v-model="form.provider" class="input"><option value="dashscope">dashscope</option><option value="openai_compatible">openai_compatible</option></select></label>
-        <label>
-          LLM API Key
-          <input v-model="form.api_key" class="input" type="password" :placeholder="apiKeyConfigured ? '已配置，留空不修改' : '留空不修改'" />
-        </label>
-        <label>Base URL<input v-model="form.base_url" class="input"></label>
-        <label>Temperature<input v-model.number="form.temperature" class="input" type="number" step="0.1" min="0" max="1"></label>
-        <label>Max Tokens<input v-model.number="form.max_tokens" class="input" type="number"></label>
-        <label>Agent-A 模型<input v-model="form.agent_a_model" class="input"></label>
-        <label>Agent-B 模型<input v-model="form.agent_b_model" class="input"></label>
-        <label>对话模型<input v-model="form.nl_chat_model" class="input"></label>
-        <label>前端请求超时(ms)<input v-model.number="frontendTimeoutMs" class="input" type="number" min="5000" max="300000" step="1000"></label>
-        <label>LLM请求超时(s)<input v-model.number="backendTimeoutConfig.llm_request_timeout_seconds" class="input" type="number" min="10" max="600"></label>
-        <label>LLM连接超时(s)<input v-model.number="backendTimeoutConfig.llm_connect_timeout_seconds" class="input" type="number" min="3" max="120"></label>
-        <label>Agent总超时(s)<input v-model.number="backendTimeoutConfig.agent_total_timeout_seconds" class="input" type="number" min="30" max="900"></label>
-        <label>Tool超时(s)<input v-model.number="backendTimeoutConfig.agent_tool_timeout_seconds" class="input" type="number" min="5" max="300"></label>
-        <label>最大迭代轮次<input v-model.number="backendTimeoutConfig.agent_max_iterations" class="input" type="number" min="1" max="20"></label>
-      </div>
-      <label>Agent-A Prompt<textarea v-model="form.agent_a_prompt" class="input"></textarea></label>
-      <label>Agent-B Prompt<textarea v-model="form.agent_b_prompt" class="input"></textarea></label>
-      <label>NL 查询 Prompt<textarea v-model="form.nl_query_prompt" class="input"></textarea></label>
-      <label>NL 修改 Prompt<textarea v-model="form.nl_modify_prompt" class="input"></textarea></label>
-      <div class="row">
-        <button class="btn" @click="restore">恢复默认</button>
-        <button class="btn" @click="test">测试</button>
-        <button class="btn ok" :disabled="saving" @click="save">{{ saving ? '保存中...' : '保存配置' }}</button>
-      </div>
-      <div class="msg">{{ msg }}</div>
-      <div class="row"><span class="badge">{{ versions.agent_a }}</span><span class="badge">{{ versions.agent_b }}</span></div>
-    </section>
+  <Toaster />
+  <div class="space-y-6">
+    <div>
+      <h1 class="text-xl font-bold">LLM 配置</h1>
+      <p class="text-sm text-muted-foreground mt-1">管理大模型连接、提示词和超时参数</p>
+    </div>
 
-    <section class="card">
-      <h2>测试输出</h2>
-      <pre>{{ preview }}</pre>
-    </section>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <!-- LLM 配置 -->
+      <Card>
+        <CardHeader>
+          <CardTitle class="text-base">模型配置</CardTitle>
+        </CardHeader>
+        <CardContent class="space-y-5">
+          <!-- Tab Bar -->
+          <div class="flex gap-0.5 p-1 bg-muted rounded-lg">
+            <button
+              v-for="tab in tabs"
+              :key="tab.key"
+              class="flex-1 h-8 rounded-md text-xs font-medium transition-colors"
+              :class="activeTab === tab.key
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'"
+              @click="activeTab = tab.key"
+            >{{ tab.label }}</button>
+          </div>
+
+          <!-- 通用 -->
+          <div v-show="activeTab === 'general'" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Provider</span>
+              <SelectNative v-model="form.provider">
+                <option value="dashscope">dashscope</option>
+                <option value="openai_compatible">openai_compatible</option>
+              </SelectNative>
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">LLM API Key</span>
+              <Input v-model="form.api_key" type="password" :placeholder="apiKeyConfigured ? '已配置，留空不修改' : '留空不修改'" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Base URL</span>
+              <Input v-model="form.base_url" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Temperature</span>
+              <Input v-model.number="form.temperature" type="number" :step="0.1" :min="0" :max="1" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Max Tokens</span>
+              <Input v-model.number="form.max_tokens" type="number" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Agent-A 模型</span>
+              <Input v-model="form.agent_a_model" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Agent-B 模型</span>
+              <Input v-model="form.agent_b_model" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">对话模型</span>
+              <Input v-model="form.nl_chat_model" />
+            </label>
+          </div>
+
+          <!-- Agent-A -->
+          <div v-show="activeTab === 'agenta'" class="space-y-4">
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Agent-A Prompt</span>
+              <Textarea v-model="form.agent_a_prompt" class="min-h-[120px] font-mono text-xs" :rows="8" />
+            </label>
+          </div>
+
+          <!-- Agent-B -->
+          <div v-show="activeTab === 'agentb'" class="space-y-4">
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Agent-B Prompt</span>
+              <Textarea v-model="form.agent_b_prompt" class="min-h-[120px] font-mono text-xs" :rows="8" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">NL 查询 Prompt</span>
+              <Textarea v-model="form.nl_query_prompt" class="min-h-[120px] font-mono text-xs" :rows="8" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">NL 修改 Prompt</span>
+              <Textarea v-model="form.nl_modify_prompt" class="min-h-[120px] font-mono text-xs" :rows="8" />
+            </label>
+          </div>
+
+          <!-- 超时 -->
+          <div v-show="activeTab === 'timeout'" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">前端请求超时(ms)</span>
+              <Input v-model.number="frontendTimeoutMs" type="number" :min="5000" :max="3600000" :step="1000" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">LLM请求超时(s)</span>
+              <Input v-model.number="backendTimeoutConfig.llm_request_timeout_seconds" type="number" :min="10" :max="7200" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">LLM连接超时(s)</span>
+              <Input v-model.number="backendTimeoutConfig.llm_connect_timeout_seconds" type="number" :min="3" :max="7200" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Agent总超时(s)</span>
+              <Input v-model.number="backendTimeoutConfig.agent_total_timeout_seconds" type="number" :min="30" :max="7200" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Tool超时(s)</span>
+              <Input v-model.number="backendTimeoutConfig.agent_tool_timeout_seconds" type="number" :min="5" :max="7200" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">最大迭代轮次</span>
+              <Input v-model.number="backendTimeoutConfig.agent_max_iterations" type="number" :min="1" :max="20" />
+            </label>
+          </div>
+
+          <Separator />
+
+          <div class="flex gap-3 flex-wrap">
+            <Button variant="secondary" size="sm" @click="restore">恢复默认</Button>
+            <Button variant="outline" size="sm" :disabled="testing" @click="test">
+              <Loader2 v-if="testing" class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              {{ testing ? '测试中...' : '测试' }}
+            </Button>
+            <Button size="sm" :disabled="saving" @click="save">
+              <Loader2 v-if="saving" class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              {{ saving ? '保存中...' : '保存配置' }}
+            </Button>
+          </div>
+
+          <div class="flex gap-2">
+            <Badge variant="secondary" class="text-[11px]">{{ versions.agent_a }}</Badge>
+            <Badge variant="secondary" class="text-[11px]">{{ versions.agent_b }}</Badge>
+          </div>
+        </CardContent>
+      </Card>
+
+      <!-- 测试输出 -->
+      <Card>
+        <CardHeader>
+          <CardTitle class="text-base">测试输出</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <pre class="whitespace-pre-wrap bg-muted text-muted-foreground p-4 rounded-lg border text-xs font-mono max-h-[70vh] overflow-auto">{{ preview || '点击"测试"查看输出' }}</pre>
+        </CardContent>
+      </Card>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
+import { Loader2 } from '@lucide/vue'
 import { api, getApiTimeout, setApiTimeout, getBackendTimeoutConfig, setBackendTimeoutConfig } from '../api'
+import { useToast } from '../composables/useToast'
+import Card from '../components/ui/Card.vue'
+import CardHeader from '../components/ui/CardHeader.vue'
+import CardTitle from '../components/ui/CardTitle.vue'
+import CardContent from '../components/ui/CardContent.vue'
+import Input from '../components/ui/Input.vue'
+import Textarea from '../components/ui/Textarea.vue'
+import Button from '../components/ui/Button.vue'
+import Badge from '../components/ui/Badge.vue'
+import Separator from '../components/ui/Separator.vue'
+import SelectNative from '../components/ui/SelectNative.vue'
+import Toaster from '../components/ui/Toaster.vue'
+
+const { toast } = useToast()
+
+const tabs = [
+  { key: 'general', label: '通用' },
+  { key: 'agenta', label: 'Agent-A' },
+  { key: 'agentb', label: 'Agent-B' },
+  { key: 'timeout', label: '超时' },
+]
+const activeTab = ref('general')
 
 const DEFAULT_A = '你是一个专业的客户成功分析师。请从以下客户拜访会议转写中提取信息。'
 const DEFAULT_B = '你是一个客户档案管理专家。请将新提取的客户预期/场景与已有档案数据进行比对。'
@@ -85,21 +218,27 @@ async function save() {
     await api.put('/api/v1/admin/llm-config', payload)
     setApiTimeout(frontendTimeoutMs.value)
     setBackendTimeoutConfig(backendTimeoutConfig)
-    msg.value = `保存成功（${new Date().toLocaleTimeString()}）`
+    toast({ title: '保存成功', description: new Date().toLocaleTimeString(), variant: 'default' })
     await load()
   } catch (error) {
-    msg.value = `保存失败：${toErrorText(error)}`
+    toast({ title: '保存失败', description: toErrorText(error), variant: 'destructive' })
   } finally {
     saving.value = false
   }
 }
+const testing = ref(false)
+
 async function test() {
+  if (testing.value) return
+  testing.value = true
   try {
     const { data } = await api.post('/api/v1/admin/llm-config/test', { target: 'agent_a', transcript_text: form.agent_a_prompt.slice(0, 80) })
     preview.value = data.preview
-    msg.value = '测试成功'
+    toast({ title: '测试成功', variant: 'default' })
   } catch (error) {
-    msg.value = `测试失败：${toErrorText(error)}`
+    toast({ title: '测试失败', description: toErrorText(error), variant: 'destructive' })
+  } finally {
+    testing.value = false
   }
 }
 function restore() {
@@ -113,18 +252,3 @@ onMounted(async () => {
   await load()
 })
 </script>
-
-<style scoped>
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:18px;box-shadow:var(--shadow)}
-.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-label{display:grid;gap:6px;font-size:14px;margin-top:12px}
-.input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--text)}
-textarea.input{min-height:120px}
-.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
-.btn{padding:10px 14px;border-radius:12px;border:0;background:var(--surface-soft);color:var(--text);cursor:pointer}.ok{background:var(--primary);color:#fff}
-.badge{display:inline-block;padding:4px 10px;border-radius:999px;background:var(--primary-weak);color:var(--primary);font-size:12px}
-pre{white-space:pre-wrap;background:var(--surface-soft);color:var(--text);padding:12px;border-radius:12px;border:1px solid var(--line)}
-.msg{margin-top:10px;color:var(--muted)}
-@media (max-width: 1100px){.grid,.form-grid{grid-template-columns:1fr}}
-</style>

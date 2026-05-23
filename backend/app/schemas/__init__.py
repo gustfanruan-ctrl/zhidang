@@ -38,6 +38,10 @@ class AdminConfigPayload(BaseAPIModel):
     agent_a_max_rounds: int | None = Field(default=None, ge=1, le=20)
     agent_b_max_rounds: int | None = Field(default=None, ge=1, le=20)
     data_retention_days: int | None = Field(default=None, ge=30, le=3650)
+    power_map_base_url: str | None = None
+    power_map_get_path: str | None = None
+    power_map_update_path: str | None = None
+    power_map_auth_token: str | None = None
 
 class LlmConfigPayload(BaseAPIModel):
     api_key: str | None = None
@@ -72,10 +76,10 @@ class AgentExtractionPayload(AgentTaskBase):
     input_type: Literal["text", "image", "mixed"] = "text"
     content: str | None = None
     images: list[ImageInputItem] = Field(default_factory=list)
-    llm_request_timeout_seconds: int | None = Field(default=None, ge=10, le=600)
-    llm_connect_timeout_seconds: int | None = Field(default=None, ge=3, le=120)
-    agent_total_timeout_seconds: int | None = Field(default=None, ge=30, le=900)
-    agent_tool_timeout_seconds: int | None = Field(default=None, ge=5, le=300)
+    llm_request_timeout_seconds: int | None = Field(default=None, ge=10, le=7200)
+    llm_connect_timeout_seconds: int | None = Field(default=None, ge=3, le=7200)
+    agent_total_timeout_seconds: int | None = Field(default=None, ge=30, le=7200)
+    agent_tool_timeout_seconds: int | None = Field(default=None, ge=5, le=7200)
     agent_max_iterations: int | None = Field(default=None, ge=1, le=20)
 
 class ComparisonTaskPayload(AgentTaskBase):
@@ -167,6 +171,13 @@ class TranscriptUploadResponse(BaseAPIModel):
     segment_count: int = Field(ge=0)
     status: str
     preview: str
+    file_count: int = 1
+
+
+class TranscriptAnalyzeResponse(BaseAPIModel):
+    transcript_id: str
+    status: str
+    message: str
 
 class CompanySearchQuery(BaseAPIModel):
     q: str = Field(default="", max_length=100)
@@ -186,6 +197,40 @@ class AdminFetchWidgetsPayload(BaseAPIModel):
     entry_id: str = Field(min_length=1, max_length=100)
 
 ConfigPayload = AdminConfigPayload
+
+
+# ── 权利地图 ──────────────────────────────────────
+class PowerMapChatPayload(BaseAPIModel):
+    message: str = Field(min_length=1, max_length=4000)
+    session_id: str | None = None  # DEPRECATED: rejected with 400; every chat starts a new session
+    confirm: bool = False
+    version: str | None = None
+
+    @field_validator("message")
+    @classmethod
+    def normalize_message(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("message 不能为空")
+        return normalized
+
+
+class PowerMapConfirmPayload(BaseAPIModel):
+    proposed_changes: dict[str, Any]
+    version: str | None = None
+
+
+class PowerMapRelayoutPayload(BaseAPIModel):
+    mode: str = "new_nodes_only"  # "new_nodes_only" | "single_dept" | "full"
+    dept_id: str | None = None    # required for mode "single_dept"
+    version: str | None = None
+
+
+class PowerMapPreviewPayload(BaseAPIModel):
+    """Payload for power map preview (dry-run layout)."""
+    proposed_changes: dict[str, Any]
+    version: str | None = None
+
 
 # ── US-2 跟进记录生成 ──────────────────────────────────────
 from .followup import (  # noqa: E402, F401
