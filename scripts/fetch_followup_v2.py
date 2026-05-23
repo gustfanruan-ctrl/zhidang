@@ -234,6 +234,7 @@ async def insert_to_db(records: list[dict]) -> dict[str, int]:
 
         # Extract with proper field mapping
         com_name = extract_field(row, "com_name")
+        com_id = extract_field(row, "_widget_1744600409845") or None
         follower_name = extract_field(row, "follower")
         follow_type = extract_field(row, "follow_type")
         review_date = extract_field(row, "review_date")
@@ -248,6 +249,7 @@ async def insert_to_db(records: list[dict]) -> dict[str, int]:
             source_id=source_id,
             title=title[:255],
             raw_text=raw_text,
+            company_id=com_id,
             company_name=com_name,
             sso_user_name=follower_name,
             review_date=review_date or None,
