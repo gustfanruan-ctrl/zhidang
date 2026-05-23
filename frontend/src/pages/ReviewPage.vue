@@ -354,11 +354,7 @@ async function loadSourceList() {
       sourceList.value = data.items || []
     } else {
       const data = await fetchAllTranscripts()
-      let items = data.items || []
-      if (companyId.value) {
-        items = items.filter(t => t.company_id === companyId.value)
-      }
-      sourceList.value = items
+      sourceList.value = data.items || []
     }
   } catch (e) {
     console.warn('加载来源列表失败', e)

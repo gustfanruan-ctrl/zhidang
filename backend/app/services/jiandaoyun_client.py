@@ -159,8 +159,10 @@ class JiandaoyunClient:
                 return v2_response.json()
         self._raise_for_status(v5_response.status_code, v5_response.text)
 
-    async def create_data(self, app_id: str, entry_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    async def create_data(self, app_id: str, entry_id: str, data: dict[str, Any], data_creator: str = "") -> dict[str, Any]:
         payload = {"app_id": app_id, "entry_id": entry_id, "data": data}
+        if data_creator:
+            payload["data_creator"] = data_creator
         url = f"{self.v5_base_url}/app/entry/data/create"
         async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
             response = await client.post(url, headers=self._headers, json=payload)
@@ -168,8 +170,10 @@ class JiandaoyunClient:
             self._raise_for_status(response.status_code, response.text)
         return response.json()
 
-    async def update_data(self, app_id: str, entry_id: str, data_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    async def update_data(self, app_id: str, entry_id: str, data_id: str, data: dict[str, Any], data_creator: str = "") -> dict[str, Any]:
         payload = {"app_id": app_id, "entry_id": entry_id, "data_id": data_id, "data": data}
+        if data_creator:
+            payload["data_creator"] = data_creator
         url = f"{self.v5_base_url}/app/entry/data/update"
         async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
             response = await client.post(url, headers=self._headers, json=payload)

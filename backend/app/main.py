@@ -2243,7 +2243,8 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         if not api_key or not app_id:
             results = [{"card_id": c.get("card_id"), "execute_status": "skipped", "error": "jiandaoyun_api_key_not_configured"} for c in approved]
             return {"success": True, "results": results}
-        writer = JiandaoyunWriter(api_key=api_key, app_id=app_id)
+        data_creator = user.get("integrate_id") or user.get("username", "")
+        writer = JiandaoyunWriter(api_key=api_key, app_id=app_id, data_creator=data_creator)
         results = await execute_cards(db=db, transcript_id=req.transcript_id, cards=approved, writer=writer, mapping_forms=forms_cfg)
         # Write back execution statuses.
         by_id = {r["card_id"]: r for r in results}
@@ -2297,7 +2298,8 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         target_form = str(tool_input.get("target_form") or "")
         form_config = mapping_forms.get(target_form, {}) or {}
         entry_id = get_entry_id(target_form, mapping_forms)
-        writer = JiandaoyunWriter(api_key=api_key, app_id=app_id)
+        data_creator = user.get("integrate_id") or user.get("username", "")
+        writer = JiandaoyunWriter(api_key=api_key, app_id=app_id, data_creator=data_creator)
         try:
             if tool_name == "create_customer_record":
                 result = await writer.create_record(entry_id=entry_id, data=build_jiandaoyun_payload(tool_input, form_config))
@@ -3325,7 +3327,8 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
             })
         jiandaoyun_data["genjin"] = {"value": subform_rows}
 
-    writer = JiandaoyunWriter(api_key=jiandaoyun_api_key, app_id=jiandaoyun_app_id)
+    data_creator = user.get("integrate_id") or user.get("username", "")
+    writer = JiandaoyunWriter(api_key=jiandaoyun_api_key, app_id=jiandaoyun_app_id, data_creator=data_creator)
     result = await writer.create_record(entry_id, jiandaoyun_data)
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("detail", "写入简道云失败"))
