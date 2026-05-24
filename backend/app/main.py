@@ -1290,7 +1290,7 @@ def spa_fallback_preview(full_path: str):
 
 
 @app.post("/api/v1/transcript/upload")
-async def transcript_upload(files: list[UploadFile] = File(...), company_name_hint: str = Form(default=""), db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+async def transcript_upload(files: list[UploadFile] = File(...), company_name_hint: str = Form(default=""), company_id: str = Form(default=""), db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     allowed_types = {
         ".txt": "text",
         ".srt": "text",
@@ -1360,7 +1360,7 @@ async def transcript_upload(files: list[UploadFile] = File(...), company_name_hi
         input_type=input_type,
         status="parsed",
         company_name=normalized_company or None,
-        company_id=(payload.get("company_id") or "").strip() or (hash_company_id(normalized_company) if normalized_company else None),
+        company_id=company_id.strip() or (hash_company_id(normalized_company) if normalized_company else None),
         sso_user_name=user.get("display_name") or user.get("user_name") or user.get("username"),
         sso_user_id=user.get("user_id") if user.get("source") == "sso" else None,
     )

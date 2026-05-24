@@ -453,7 +453,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, reactive, watch } from 'vue'
 import { Upload, FileText, Image, X, Check, Plus, Send, AlertTriangle, Loader2 } from '@lucide/vue'
 import { api } from '../api'
 import { useCustomerStore } from '../stores/customer'
