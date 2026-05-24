@@ -206,10 +206,36 @@
         </div>
         <div class="space-y-1.5">
           <Label>客户方参与人</Label>
-          <SelectNative v-model="selectedContactId" class="w-full h-9 text-sm" @update:model-value="onContactChange">
-            <option value="">-- 请选择联系人 --</option>
-            <option v-for="c in contactList" :key="c.cont_id" :value="c.cont_id">{{ c.cont_name }}</option>
-          </SelectNative>
+          <!-- Selected contact -->
+          <div v-if="selectedContact" class="flex items-center justify-between bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-medium truncate">{{ selectedContact.cont_name }}</div>
+              <div class="text-[10px] text-muted-foreground font-mono">{{ selectedContact.cont_id }}</div>
+            </div>
+            <Button variant="ghost" size="sm" class="h-6 w-6 p-0 text-muted-foreground hover:text-destructive" @click="selectedContactId = ''">
+              <X class="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          <!-- Contact search -->
+          <div class="flex gap-2">
+            <Input v-model="contactKeyword" class="flex-1 h-8 text-xs" placeholder="搜索联系人..." @input="filterContacts" />
+          </div>
+          <!-- Contact list -->
+          <div class="rounded-lg border border-border max-h-[160px] overflow-y-auto">
+            <div v-if="!filteredContacts.length" class="text-xs text-muted-foreground py-3 text-center">暂无匹配联系人</div>
+            <div v-for="c in pagedContacts" :key="c.cont_id"
+                 class="px-3 py-1.5 text-xs border-b border-border/30 last:border-0 cursor-pointer hover:bg-muted/40 transition-colors"
+                 :class="{ 'bg-primary/5 border-primary/20': selectedContactId === c.cont_id }"
+                 @click="selectedContactId = c.cont_id">
+              <span class="font-medium">{{ c.cont_name }}</span>
+            </div>
+          </div>
+          <!-- Contact pagination -->
+          <div v-if="filteredContacts.length > 20" class="flex items-center justify-between gap-1">
+            <Button variant="ghost" size="sm" class="h-6 text-[10px]" :disabled="contactPage <= 1" @click="contactPage--">上一页</Button>
+            <span class="text-[10px] text-muted-foreground">{{ contactPage }} / {{ Math.ceil(filteredContacts.length / 20) }}</span>
+            <Button variant="ghost" size="sm" class="h-6 text-[10px]" :disabled="contactPage >= Math.ceil(filteredContacts.length / 20)" @click="contactPage++">下一页</Button>
+          </div>
         </div>
         <div class="space-y-1.5">
           <Label>推送前方</Label>
@@ -312,6 +338,8 @@ const reviewData = ref(null)
 const contactList = ref([])
 const taskList = ref([])
 const selectedContactId = ref("")
+const contactKeyword = ref("")
+const contactPage = ref(1)
 const selectedTaskIds = ref([])
 const tagTree = ref([])
 const config = reactive({
@@ -465,6 +493,15 @@ async function loadTasks() {
   } catch { taskList.value = [] }
 }
 function onContactChange() { /* selectedContactId already updated by v-model */ }
+const filteredContacts = computed(() => {
+  const k = contactKeyword.value.trim().toLowerCase()
+  return !k ? contactList.value : contactList.value.filter(c => (c.cont_name || "").toLowerCase().includes(k))
+})
+const pagedContacts = computed(() => {
+  const start = (contactPage.value - 1) * 20
+  return filteredContacts.value.slice(start, start + 20)
+})
+function filterContacts() { contactPage.value = 1 }
 const selectedContact = computed(() => contactList.value.find(c => c.cont_id === selectedContactId.value) || null)
 async function loadTagTree() {
   try {
