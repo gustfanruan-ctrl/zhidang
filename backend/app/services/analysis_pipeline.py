@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import logging
+import time
+import json
 from typing import Any
 
 from ..database import SessionLocal
+from .tracing import new_trace, emit, emit_llm
 from ..models import FollowupRecord, Transcript, SystemConfig
 
 logger = logging.getLogger("zhidang.pipeline")
@@ -36,9 +39,17 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
 
         cfg = ensure_system_config(db)
 
+        trace_id = new_trace("ext")
+        char_count = len(transcript.raw_text or "")
+        emit("pipeline_started", pipeline_type="extraction", source_type=source_type,
+             input_char_count=char_count, input_type=transcript.input_type or "text",
+             trace_id=trace_id)
+
         # ── Phase 1: 提取 ──
         transcript.status = "extracting"
         db.commit()
+        t_p1 = time.monotonic()
+        emit("extraction_start", trace_id=trace_id)
 
         TASK_PROGRESS[transcript_id] = {
             "mode": "llm",
@@ -63,12 +74,19 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
             transcript.agent_a_result = result
             transcript.status = "extraction_done"
             db.commit()
+            t_p1e = (time.monotonic() - t_p1) * 1000
+            facts_count = len((result.get("result", {}) or {}).get("facts", []))
+            emit("extraction_done", trace_id=trace_id, extraction_total_ms=t_p1e,
+                 facts_count=facts_count, status="ok")
             _append_llm_line(transcript_id, "提取完成，结果已保存")
         except Exception as exc:
             logger.exception("Extraction failed for %s", transcript_id)
             transcript.status = "error"
             transcript.agent_a_result = {"error": str(exc), "phase": "extraction"}
             db.commit()
+            t_p1e = (time.monotonic() - t_p1) * 1000
+            emit("extraction_done", trace_id=trace_id, extraction_total_ms=t_p1e,
+                 status="error", error_type=type(exc).__name__, error_msg=str(exc)[:200], degraded=True)
             TASK_PROGRESS.setdefault(transcript_id, {}).update({"extraction_status": "error"})
             _append_llm_line(transcript_id, f"提取失败：{_format_exc(exc)}")
             return
@@ -76,6 +94,8 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
         # ── Phase 2: 比对 ──
         transcript.status = "comparing"
         db.commit()
+        t_p2 = time.monotonic()
+        emit("comparison_start", trace_id=trace_id)
 
         TASK_PROGRESS.setdefault(transcript_id, {}).update({"comparison_status": "processing"})
         _append_llm_line(transcript_id, "进入比对阶段：生成操作卡片")
@@ -90,6 +110,7 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
 
             # 拉取简道云客户档案
             executors = get_executors("comparison")
+            t_jdy = time.monotonic()
             profile = await executors["fetch_customer_profile"](
                 {
                     "company_id": company_id,
@@ -97,8 +118,12 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
                     "runtime_cfg": runtime_cfg,
                 }
             )
+            t_jdye = (time.monotonic() - t_jdy) * 1000
+            emit("comparison_profile_fetch", trace_id=trace_id, jdy_fetch_ms=t_jdye,
+                 profile_size=len(json.dumps(profile, default=str)) if profile else 0, status="ok")
 
             # 比对生成操作卡片
+            t_cmp = time.monotonic()
             compare_result = await executors["compare_and_generate_operations"](
                 {
                     "extracted_facts": extraction_result.get("facts", []),
@@ -108,6 +133,8 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
                     "agent_b_prompt": cfg.agent_b_prompt,
                 }
             )
+            t_cmpe = (time.monotonic() - t_cmp) * 1000
+            emit("comparison_llm", trace_id=trace_id, comparison_total_ms=t_cmpe, status="ok")
 
             # 安全校验
             cfg_mapping = (cfg.field_mappings or {}).get("jiandaoyun", {})
@@ -134,6 +161,12 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
             transcript.agent_b_result = full_result
             transcript.status = "comparison_done"
             db.commit()
+            t_p2e = (time.monotonic() - t_p2) * 1000
+            cmp_result = full_result.get("result", {})
+            cards_count = len(cmp_result.get("operation_cards", []))
+            mode = "fallback" if profile.get("_mock") else "llm"
+            emit("comparison_done", trace_id=trace_id, comparison_total_ms=t_p2e,
+                 cards_count=cards_count, mode=mode, status="ok")
 
             # 加载到内存供审核端点使用
             OPERATION_CARD_STORE[transcript_id] = [
@@ -148,6 +181,9 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
             transcript.status = "error"
             transcript.agent_b_result = {"error": str(exc), "phase": "comparison"}
             db.commit()
+            t_p2e = (time.monotonic() - t_p2) * 1000
+            emit("comparison_done", trace_id=trace_id, comparison_total_ms=t_p2e,
+                 status="error", error_type=type(exc).__name__, error_msg=str(exc)[:200], degraded=True)
             TASK_PROGRESS.setdefault(transcript_id, {}).update({"comparison_status": "error"})
             _append_llm_line(transcript_id, f"比对失败：{_format_exc(exc)}")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import time
 import logging
 import json
 import re
@@ -3304,6 +3305,11 @@ async def generate_review(data: dict[str, Any], user: dict[str, Any] = Depends(r
     company_name = (data.get("company_name") or "").strip()
     if not transcript_text or not company_name:
         raise HTTPException(status_code=400, detail="缺少 transcript_text 或 company_name")
+    t0 = time.monotonic()
+    trace_id = new_trace("rvw")
+    image_count = len(data.get("images") or [])
+    emit("review_generate_start", trace_id=trace_id, char_count=len(transcript_text),
+         image_count=image_count, company_name=company_name[:40])
 
     cfg = db.scalars(select(SystemConfig)).first()
     if not cfg:
@@ -3354,21 +3360,38 @@ if_tuisong：默认"否"
         user_message = {"role": "user", "content": user_prompt}
 
     try:
+        emit_llm(event="review_llm_attempt_start", model=model, attempt_no=1)
+        t_llm = time.monotonic()
         async with httpx.AsyncClient(timeout=3600) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json={"model": model, "messages": [{"role": "system", "content": system_prompt}, user_message], "stream": False},
             )
+        t_elapsed = (time.monotonic() - t_llm) * 1000
         if resp.status_code != 200:
+            emit_llm(event="review_llm_error", model=model, attempt_no=1,
+                     total_ms=t_elapsed, error_type="http_error", error_msg=str(resp.status_code),
+                     will_retry=False, final_status="error", degraded=True)
             return {"error": f"LLM 返回 HTTP {resp.status_code}"}
         content = resp.json()["choices"][0]["message"]["content"].strip()
+        usage = resp.json().get("usage", {})
+        inp_tok = usage.get("prompt_tokens", 0)
+        out_tok = usage.get("completion_tokens", 0)
+        emit_llm(event="review_llm_done", model=model, attempt_no=1,
+                 input_tokens=inp_tok, output_tokens=out_tok, total_ms=t_elapsed,
+                 status="ok", final_status="ok")
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         return json.loads(content)
     except json.JSONDecodeError:
+        e2e = (time.monotonic() - t0) * 1000
+        emit("review_generate_done", trace_id=trace_id, e2e_ms=e2e, status="json_error", degraded=True)
         return {"error": "LLM 返回内容不是有效 JSON"}
     except Exception as exc:
+        e2e = (time.monotonic() - t0) * 1000
+        emit("review_generate_done", trace_id=trace_id, e2e_ms=e2e,
+             status="error", error_type=type(exc).__name__, error_msg=str(exc)[:200], degraded=True)
         return {"error": f"调用 LLM 失败: {exc}"}
 
 
@@ -3506,10 +3529,26 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
 
     data_creator = user.get("integrate_id") or user.get("username", "")
     writer = JiandaoyunWriter(api_key=jiandaoyun_api_key, app_id=jiandaoyun_app_id, data_creator=data_creator)
-    result = await writer.create_record(entry_id, jiandaoyun_data)
-    if not result.get("success"):
-        raise HTTPException(status_code=500, detail=result.get("detail", "写入简道云失败"))
-    return {"message": "跟进记录已成功提交到简道云", "data": result.get("data")}
+    t_jdy = time.monotonic()
+    jdy_trace = new_trace("rwj")
+    emit("review_jdy_write_attempt", attempt_no=1)
+    try:
+        result = await writer.create_record(entry_id, jiandaoyun_data)
+        t_jdye = (time.monotonic() - t_jdy) * 1000
+        if not result.get("success"):
+            emit("review_jdy_write_error", jdy_latency_ms=t_jdye,
+                 error_type="jdy_api_error", error_msg=str(result.get("detail", ""))[:200],
+                 will_retry=False, final_status="error", degraded=True)
+            raise HTTPException(status_code=500, detail=result.get("detail", "写入简道云失败"))
+        emit("review_jdy_write_done", jdy_latency_ms=t_jdye, status="ok")
+        return {"message": "跟进记录已成功提交到简道云", "data": result.get("data")}
+    except Exception as exc:
+        t_jdye = (time.monotonic() - t_jdy) * 1000
+        if not isinstance(exc, HTTPException):
+            emit("review_jdy_write_error", jdy_latency_ms=t_jdye,
+                 error_type=type(exc).__name__, error_msg=str(exc)[:200],
+                 will_retry=False, final_status="error", degraded=True)
+        raise
 
 
 @app.on_event("startup")
