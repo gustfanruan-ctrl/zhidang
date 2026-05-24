@@ -56,26 +56,28 @@
           <MapIcon class="h-4 w-4 shrink-0" />
           <span class="truncate">权利地图</span>
         </RouterLink>
+      </nav>
 
-        <Separator v-if="isSuperadmin" class="!my-2" />
-
-        <RouterLink v-if="isSuperadmin" to="/config" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+      <!-- Admin nav (fixed, not scrollable) -->
+      <div v-if="isSuperadmin" class="px-3 pb-1 space-y-1">
+        <Separator class="!my-1" />
+        <RouterLink to="/config" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
           <Settings class="h-4 w-4 shrink-0" />
           <span class="truncate">简道云配置</span>
         </RouterLink>
-        <RouterLink v-if="isSuperadmin" to="/llm" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+        <RouterLink to="/llm" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
           <Brain class="h-4 w-4 shrink-0" />
           <span class="truncate">LLM 配置</span>
         </RouterLink>
-        <RouterLink v-if="isSuperadmin" to="/maintenance" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+        <RouterLink to="/maintenance" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
           <Wrench class="h-4 w-4 shrink-0" />
           <span class="truncate">维护</span>
         </RouterLink>
-        <RouterLink v-if="isSuperadmin" to="/admin/users" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
+        <RouterLink to="/admin/users" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
           <Users class="h-4 w-4 shrink-0" />
           <span class="truncate">用户管理</span>
         </RouterLink>
-      </nav>
+      </div>
 
       <!-- Footer -->
       <div class="px-3 py-3 border-t border-border/50 space-y-1.5">
