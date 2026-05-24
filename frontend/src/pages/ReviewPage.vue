@@ -237,19 +237,19 @@
               <tbody>
                 <tr v-for="(tag, index) in reviewData.genjin_tags" :key="index" class="border-b border-border/50 last:border-0">
                   <td class="p-2">
-                    <SelectNative v-model="tag.level1" class="w-full h-8 text-xs" @update:model-value="updateTagLevel2(index)">
+                    <SelectNative v-model="tag.level1" class="w-full h-auto py-1 text-xs leading-snug" @update:model-value="updateTagLevel2(index)">
                       <option value="">请选择</option>
                       <option v-for="level1 in tagTree" :key="level1.level1" :value="level1.level1">{{ level1.level1 }}</option>
                     </SelectNative>
                   </td>
                   <td class="p-2">
-                    <SelectNative v-model="tag.level2" class="w-full h-8 text-xs" :disabled="!tag.level1" @update:model-value="updateTagLevel3(index)">
+                    <SelectNative v-model="tag.level2" class="w-full h-auto py-1 text-xs leading-snug" :disabled="!tag.level1" @update:model-value="updateTagLevel3(index)">
                       <option value="">请选择</option>
                       <option v-for="level2 in getLevel2Options(tag.level1)" :key="level2.label" :value="level2.label">{{ level2.label }}</option>
                     </SelectNative>
                   </td>
                   <td class="p-2">
-                    <SelectNative v-model="tag.level3" class="w-full h-8 text-xs" :disabled="!tag.level2">
+                    <SelectNative v-model="tag.level3" class="w-full h-auto py-1 text-xs leading-snug" :disabled="!tag.level2">
                       <option value="">请选择</option>
                       <option v-for="level3 in getLevel3Options(tag.level1, tag.level2)" :key="level3" :value="level3">{{ level3 }}</option>
                     </SelectNative>

@@ -3462,6 +3462,9 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     }
     if jiandaoyun_follower:
         jiandaoyun_data["follower"] = {"value": jiandaoyun_follower}
+    en_name_val = user.get("integrate_id") or user.get("username", "")
+    if en_name_val:
+        jiandaoyun_data["en_name"] = {"value": en_name_val}
     company_id = data.get("company_id")
     if data.get("comid"):
         jiandaoyun_data["comid"] = {"value": data["comid"]}

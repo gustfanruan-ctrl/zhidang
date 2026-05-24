@@ -18,15 +18,39 @@
       <!-- Customer Section -->
       <div class="px-3 py-3 border-b border-border/50 space-y-2.5">
         <div class="flex gap-2">
-          <Input v-model="customerKeyword" class="flex-1 h-8 text-xs" placeholder="搜索客户" @keyup.enter="searchCustomers" />
+          <Input v-model="customerKeyword" class="flex-1 h-8 text-xs" placeholder="搜索客户" @keyup.enter="searchCustomers"/>
           <Button variant="secondary" size="sm" class="h-8 text-xs shrink-0" :disabled="customerLoading" @click="searchCustomers">
             <Search class="h-3.5 w-3.5" />
           </Button>
         </div>
-        <SelectNative v-model="selectedCustomerId" class="h-9 text-xs" @update:model-value="(v) => onCustomerChange({ target: { value: v } })">
-          <option value="">请选择客户</option>
-          <option v-for="c in filteredCustomers" :key="c.company_id" :value="c.company_id">{{ c.company_name }}</option>
-        </SelectNative>
+        <!-- Selected customer -->
+        <div v-if="selectedCustomerId" class="flex items-center justify-between bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
+          <div class="flex-1 min-w-0">
+            <div class="text-xs font-medium truncate">{{ customerStore.currentCustomer?.company_name || '已选择' }}</div>
+            <div class="text-[10px] text-muted-foreground">{{ customerStore.currentCustomer?.csm || '' }}</div>
+          </div>
+          <Button variant="ghost" size="sm" class="h-6 w-6 p-0 text-muted-foreground hover:text-destructive" @click="selectedCustomerId = ''; customerStore.clearContext()">
+            <X class="h-3.5 w-3.5" />
+          </Button>
+        </div>
+        <!-- Customer list -->
+        <div class="rounded-lg border border-border max-h-[220px] overflow-y-auto">
+          <div v-if="customerLoading" class="text-xs text-muted-foreground py-4 text-center">加载中...</div>
+          <div v-else-if="!filteredCustomers.length" class="text-xs text-muted-foreground py-4 text-center">暂无客户</div>
+          <div v-else v-for="c in pagedCustomers" :key="c.company_id"
+               class="px-3 py-2 text-xs border-b border-border/30 last:border-0 cursor-pointer hover:bg-muted/40 transition-colors"
+               :class="{ 'bg-primary/5 border-primary/20': selectedCustomerId === c.company_id }"
+               @click="onCustomerSelect(c)">
+            <div class="font-medium truncate">{{ c.company_name }}</div>
+            <div class="text-[10px] text-muted-foreground truncate">{{ c.csm || '' }}</div>
+          </div>
+        </div>
+        <!-- Pagination -->
+        <div v-if="filteredCustomers.length > pageSize" class="flex items-center justify-between gap-1">
+          <Button variant="ghost" size="sm" class="h-6 text-[10px]" :disabled="customerPage <= 1" @click="customerPage--">上一页</Button>
+          <span class="text-[10px] text-muted-foreground">{{ customerPage }} / {{ Math.ceil(filteredCustomers.length / pageSize) }}</span>
+          <Button variant="ghost" size="sm" class="h-6 text-[10px]" :disabled="customerPage >= Math.ceil(filteredCustomers.length / pageSize)" @click="customerPage++">下一页</Button>
+        </div>
         <div class="flex gap-2">
           <Button variant="ghost" size="sm" class="flex-1 h-7 text-xs" :disabled="customerLoading" @click="refreshCustomers">
             <RefreshCw :class="['h-3 w-3 mr-1', customerLoading && 'animate-spin']" />
@@ -149,12 +173,12 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from './api'
 import { getCachedMe } from './main'
 import { useCustomerStore } from './stores/customer'
-import { Search, RefreshCw, Sun, Moon, LogOut, MessageSquare, FileText, Upload, Map as MapIcon, Settings, Brain, Wrench, User, Users, BookOpen } from '@lucide/vue'
+import { Search, RefreshCw, Sun, Moon, LogOut, MessageSquare, FileText, Upload, Map as MapIcon, Settings, Brain, Wrench, User, Users, BookOpen, X } from '@lucide/vue'
 import Button from './components/ui/Button.vue'
 import Input from './components/ui/Input.vue'
 import SelectNative from './components/ui/SelectNative.vue'
@@ -175,6 +199,8 @@ const userDisplayName = ref('')
 const userRoleLabel = ref('')
 const customerLoading = ref(false)
 const customerWarning = ref('')
+const customerPage = ref(1)
+const pageSize = 20
 const showSettings = ref(false)
 const showGuide = ref(false)
 const onboardingEnabled = ref(true)
@@ -224,11 +250,20 @@ function logout() {
   router.push('/login')
 }
 
+const pagedCustomers = computed(() => {
+  const start = (customerPage.value - 1) * pageSize
+  return filteredCustomers.value.slice(start, start + pageSize)
+})
 function filterCustomers() {
   const k = customerKeyword.value.trim().toLowerCase()
   filteredCustomers.value = !k ? customerStore.customers : customerStore.customers.filter((c) => c.company_name.toLowerCase().includes(k))
+  customerPage.value = 1
 }
 
+function onCustomerSelect(c) {
+  selectedCustomerId.value = c.company_id
+  customerStore.switchCustomer(c, 'manual')
+}
 async function searchCustomers() {
   const keyword = customerKeyword.value.trim()
   customerLoading.value = true
