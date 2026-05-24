@@ -639,7 +639,13 @@ watch(() => customerStore.currentCustomer?.company_id, (id, prev) => {
   if (id === prev) return
   selectedSourceIds.value = new Set()
   appliedSources.value = []
+  contactList.value = []
+  taskList.value = []
+  selectedContactId.value = ''
+  selectedTaskIds.value = []
   loadSourceList()
+  loadContacts()
+  loadTasks()
 })
 onMounted(async () => {
   await loadContacts()
