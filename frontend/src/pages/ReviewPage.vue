@@ -407,26 +407,28 @@ function clearSourceSelection() {
 async function applySelectedSources() {
   if (selectedSourceIds.value.size === 0) return
   const chosen = sourceList.value.filter(s => selectedSourceIds.value.has(s.id))
-  // 按需加载全文（列表接口只返回预览）
   const details = await Promise.all(chosen.map(async s => {
     if (s.raw_text) return s.raw_text
     try {
       const isFollowup = sourceType.value === "followup"
-      const url = isFollowup ? `/api/v1/followup-records/${s.id}` : `/api/v1/transcripts/${s.id}`
-      const { data } = await api.get(url)
-      return data.raw_text || ""
-    } catch { return "" }
+      const url = isFollowup ? "/api/v1/followup-records/" + s.id : "/api/v1/transcripts/" + s.id
+      const resp = await api.get(url)
+      return resp.data.raw_text || ""
+    } catch (e) { return "" }
   }))
-  const parts = chosen
-    .map((s, idx) => `--- ${s.title || s.id} (${s.company_name || ""}) ---
-${details[idx] || s.raw_text_preview || ""}`)
-    .filter(Boolean)
-  transcriptText.value = parts.join("
-
-")
+  const NL = String.fromCharCode(10)
+  const parts = []
+  for (let i = 0; i < chosen.length; i++) {
+    const s = chosen[i]
+    const title = s.title || s.id
+    const company = s.company_name || ""
+    const text = details[i] || s.raw_text_preview || ""
+    if (text) parts.push("--- " + title + " (" + company + ") ---" + NL + text)
+  }
+  transcriptText.value = parts.join(NL + NL)
   appliedSources.value = chosen.map(s => ({ id: s.id, title: s.title, company_name: s.company_name }))
   currentStep.value = 1
-  showMessage(`已拼接 ${chosen.length} 条来源到下方内容`, "success")
+  showMessage("已拼接 " + chosen.length + " 条来源到下方内容", "success")
 }
 function switchSourceType(t) {
   if (sourceType.value === t) return
