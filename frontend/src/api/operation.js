@@ -7,8 +7,10 @@ export async function reviewCard(data) {
   return resp.data
 }
 
-export async function executeCards(data) {
-  const resp = await api.post('/api/v1/operations/execute', data)
+export async function executeCards(data, companyId) {
+  const body = { ...data }
+  if (companyId) body.company_id = companyId
+  const resp = await api.post('/api/v1/operations/execute', body)
   return resp.data
 }
 

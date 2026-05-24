@@ -2357,6 +2357,11 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         api_key = runtime_cfg.get("api_key") or ""
         app_id = runtime_cfg.get("app_id") or ""
 
+        # 前端传入 company_id 时覆盖卡片内的 customer_id（兜底分析阶段绑错/未绑客户）
+        if req.company_id:
+            for card in approved:
+                card["customer_id"] = req.company_id
+
         # 合并前端传回的字段更新（如 status、is_first_value 等用户修改项）
         if req.field_updates:
             for card in approved:

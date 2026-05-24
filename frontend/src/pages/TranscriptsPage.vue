@@ -429,7 +429,20 @@
             </Button>
           </div>
 
-          <div v-if="cardGroups.expectations.length || cardGroups.scenarios.length">
+          <div v-if="cardGroups.expectations.length || cardGroups.scenarios.length" class="space-y-3">
+            <div class="flex items-center gap-2 flex-wrap">
+              <Label class="text-xs text-muted-foreground shrink-0">提交到客户：</Label>
+              <SelectNative v-model="targetCompanyId" class="h-8 text-xs min-w-[160px]">
+                <option value="">-- 自动（卡片内记录） --</option>
+                <option v-for="c in customerStore.customers" :key="c.company_id" :value="c.company_id">{{ c.company_name }}</option>
+              </SelectNative>
+              <span v-if="!targetCompanyId && cardCustomerId && cardCustomerId !== 'demo'" class="text-[10px] text-muted-foreground">
+                当前：{{ cardCustomerId.slice(0, 12) }}...
+              </span>
+              <span v-else-if="!targetCompanyId && (!cardCustomerId || cardCustomerId === 'demo')" class="text-[10px] text-amber-600">
+                卡片未绑定客户，请手动选择
+              </span>
+            </div>
             <Button :disabled="!hasApprovedCards || submitting" @click="submitCards">
               <Send v-if="!submitting" class="h-4 w-4 mr-2" />
               <Loader2 v-else class="h-4 w-4 mr-2 animate-spin" />
@@ -757,6 +770,7 @@ const cardGroups = computed(() => {
       operationType: card.operation_type || 'create',
       approved: reviewState.get(card.card_id) === 'approved' || (card._manual ? true : card.operation_type === 'create' && !reviewState.has(card.card_id)),
       rejected: reviewState.get(card.card_id) === 'rejected' || (card.operation_type === 'skip' && !reviewState.has(card.card_id)),
+      customerId: card.customer_id || '',
       _targetForm: tf,
     }
     if (tf === '预期表') expectations.push(item)
@@ -768,6 +782,14 @@ const cardGroups = computed(() => {
 const hasApprovedCards = computed(() => {
   return [...cardGroups.value.expectations, ...cardGroups.value.scenarios].some(c => c.approved)
 })
+
+const cardCustomerId = computed(() => {
+  const allCards = [...cardGroups.value.expectations, ...cardGroups.value.scenarios]
+  const firstId = allCards.find(c => c.customerId)?.customerId
+  return firstId || customerStore.currentCustomer?.company_id || ''
+})
+const targetCompanyId = ref('')
+const effectiveCompanyId = computed(() => targetCompanyId.value || cardCustomerId.value)
 
 function safeUUID() {
   try { return crypto.randomUUID() } catch { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random()*16|0; return (c==='x'?r:r&0x3|0x8).toString(16) }) }
@@ -871,7 +893,7 @@ async function submitCards() {
   if (!approved.length) return
   submitting.value = true
   try {
-    const resp = await executeCards({ transcript_id: selectedId.value, card_ids: approved })
+    const resp = await executeCards({ transcript_id: selectedId.value, card_ids: approved }, effectiveCompanyId.value)
     const results = resp.results || []
     const ok = results.filter(r => r.execute_status === 'success').length
     const fail = results.length - ok

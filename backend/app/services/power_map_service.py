@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import functools
 import json
@@ -7931,6 +7932,25 @@ async def _run_llm_tool_loop(
 
     round_idx = 0
     consecutive_no_tool_rounds = 0
+
+    async def _maybe_queue_review(exit_reason: str) -> None:
+        """Fire-and-forget 异步效率评审，不阻塞主流程。"""
+        try:
+            from .efficiency_review import extract_trace_from_messages, should_review, async_efficiency_review
+            if should_review(rounds_completed, exit_reason):
+                trace = extract_trace_from_messages(
+                    accumulated_messages=accumulated_messages,
+                    session_id=session_id,
+                    user_query=user_text,
+                    rounds_completed=rounds_completed,
+                    exit_reason=exit_reason,
+                    executed=executed,
+                )
+                asyncio.create_task(async_efficiency_review(trace, cfg))
+                logger.info("[DEBUG-J review] queued review for session=%s rounds=%d", session_id, rounds_completed)
+        except Exception as exc:
+            logger.warning("[DEBUG-J review] failed to queue: %s", exc)
+
     while round_idx < max_rounds:
         rounds_completed = round_idx + 1
         yield HarnessEvent(
@@ -8179,6 +8199,7 @@ async def _run_llm_tool_loop(
                     int((time.time() - _loop_start_ms) * 1000),
                     len(ctx.all_nodes), len(ctx.edges), exit_reason,
                 )
+                await _maybe_queue_review(exit_reason)
                 yield HarnessEvent(
                     type="done",
                     data={
@@ -8198,6 +8219,7 @@ async def _run_llm_tool_loop(
                     int((time.time() - _loop_start_ms) * 1000),
                     len(ctx.all_nodes), len(ctx.edges), exit_reason,
                 )
+                await _maybe_queue_review(exit_reason)
                 yield HarnessEvent(
                     type="done",
                     data={
@@ -8390,6 +8412,7 @@ async def _run_llm_tool_loop(
         int((time.time() - _loop_start_ms) * 1000),
         len(ctx.all_nodes), len(ctx.edges), "max_rounds_hit",
     )
+    await _maybe_queue_review("max_rounds_hit")
     yield HarnessEvent(
         type="done",
         data={

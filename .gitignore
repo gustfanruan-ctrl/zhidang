@@ -66,6 +66,10 @@ cas-auth-doc.txt
 opus-power-map-plan.md
 production_assessment.md
 
+# Efficiency reviews — only keep .gitkeep, ignore generated reviews
+backend/efficiency_reviews/**/*.json
+!backend/efficiency_reviews/.gitkeep
+
 # Other temp
 data/
 test.har/
