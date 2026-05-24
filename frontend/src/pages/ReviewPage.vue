@@ -238,6 +238,19 @@
           </div>
         </div>
         <div class="space-y-1.5">
+          <Label>关联出差（可选）</Label>
+          <div v-if="!taskList.length" class="text-xs text-muted-foreground py-2">当前客户暂无出差记录</div>
+          <div v-else class="rounded-lg border border-border max-h-[160px] overflow-y-auto">
+            <label v-for="t in taskList" :key="t.task_id" class="flex items-center gap-3 px-3 py-2 border-b border-border/40 last:border-0 cursor-pointer hover:bg-muted/30 transition-colors">
+              <input type="checkbox" :value="t.task_id" v-model="selectedTaskIds" class="h-3.5 w-3.5 cursor-pointer accent-primary mt-0.5" />
+              <div class="flex-1 min-w-0">
+                <div class="text-sm truncate">{{ t.task_remarks || '无备注' }}</div>
+                <div class="text-xs text-muted-foreground">{{ (t.task_predate || '').split(' ')[0] }}</div>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div class="space-y-1.5">
           <Label>推送前方</Label>
           <div class="flex gap-6">
             <label class="flex items-center gap-2 cursor-pointer text-sm">
@@ -291,6 +304,7 @@
           </div>
           <Button variant="outline" size="sm" @click="addTag">
             <Plus class="h-3.5 w-3.5 mr-1" />新增标签
+
           </Button>
         </div>
         <Button class="w-full bg-emerald-600 hover:bg-emerald-700 text-white" size="lg" :disabled="!canSubmit || submitting" @click="submitReview">
