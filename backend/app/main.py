@@ -50,6 +50,7 @@ from .services.sandbox_infra import (
 from .services.prompts import CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
 from .services.chat_executor import OP_LABELS, build_jiandaoyun_payload, build_preview_text, get_entry_id, log_operation
 from .services.tool_registry import build_chat_executors, get_chat_tools, get_executors, get_tools
+from .services.tracing import new_trace, emit, emit_llm
 from .sso import build_sso_token, verify_sso_token
 from .validators import validate_operations
 from .writeflow import merge_and_write

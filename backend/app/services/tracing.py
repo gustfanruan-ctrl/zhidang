@@ -48,6 +48,7 @@ def emit(event: str, **fields) -> None:
 
 def emit_llm(
     *,
+    event: str = "llm_done",
     segment_index: int = -1,
     model: str = "",
     attempt_no: int = 1,
