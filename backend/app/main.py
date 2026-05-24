@@ -3428,30 +3428,10 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     from datetime import date
     review_date = data.get("review_date", "") or date.today().isoformat()
 
-    jiandaoyun_follower = None
-    candidate_name = data.get("follower") or _user_name(user)
-    if user.get("source") == "superadmin":
-        pass  # 超管不在简道云人员字段中
-    elif candidate_name and candidate_name != "unknown":
-        # 按"英文名-中文名"规则提取 username，再查完整用户对象
-        jdy_username = candidate_name.split("-", 1)[0].strip()
-        try:
-            import httpx
-            headers = {"Authorization": f"Bearer {jiandaoyun_api_key}", "Content-Type": "application/json"}
-            async with httpx.AsyncClient(timeout=3600.0) as hc:
-                resp = await hc.post(
-                    "https://api.jiandaoyun.com/api/v5/corp/user/get",
-                    headers=headers, json={"username": jdy_username}
-                )
-                if resp.status_code == 200:
-                    body = resp.json()
-                    print("[DEBUG] corp/user/get response: %s" % json.dumps(body, ensure_ascii=False)[:300])
-                    jdy_user = body.get("user")
-                    if jdy_user:
-                        # 简道云成员单选字段只需传 username 字符串
-                        jiandaoyun_follower = jdy_user["username"]
-        except Exception:
-            pass
+    # 跟进人：优先取用户 integrate_id（简道云 username），旧 Superadmin 表管理员无 integrate_id 则跳过
+    jiandaoyun_follower = user.get("integrate_id") or ""
+    if not jiandaoyun_follower and _user_name(user) not in ("unknown", "admin", "demo"):
+        jiandaoyun_follower = _user_name(user)
 
     jiandaoyun_data = {
         "com_name": {"value": jiandaoyun_com_name},
