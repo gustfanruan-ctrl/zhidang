@@ -582,7 +582,8 @@ async function uploadAndAnalyze() {
   uploading.value = true
   try {
     const companyName = customerStore.currentCustomer?.company_name || ''
-    const result = await uploadTranscript(selectedFiles.value, companyName)
+    const companyId = customerStore.currentCustomer?.company_id || ''
+    const result = await uploadTranscript(selectedFiles.value, companyName, companyId)
     selectedFiles.value = []
     showMessage(`上传成功，${result.file_count} 个文件已合并`, 'success')
     await triggerAnalysis(result.transcript_id)
@@ -705,7 +706,7 @@ async function selectTranscript(t) {
 }
 
 function statusLabel(s) {
-  const map = { parsed: '待分析', extracting: '提取中', extraction_done: '已提取', comparing: '比对中', comparison_done: '待审核', reviewed: '已审核', error: '失败' }
+  const map = { parsed: '待分析', extracting: '提取中', extraction_done: '已提取', comparing: '比对中', comparison_done: '待审核', reviewed: '已完成', error: '失败' }
   return map[s] || s || '未知'
 }
 

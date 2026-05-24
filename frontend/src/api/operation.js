@@ -19,12 +19,13 @@ export async function getExecutionStatus(transcriptId) {
 
 // ── 转写管理（上传/列表/详情/分析/进度） ──
 
-export async function uploadTranscript(files, companyNameHint) {
+export async function uploadTranscript(files, companyNameHint, companyId) {
   const formData = new FormData()
   for (const f of files) {
     formData.append('files', f)
   }
   formData.append('company_name_hint', companyNameHint || '')
+  if (companyId) formData.append('company_id', companyId)
   const resp = await api.post('/api/v1/transcript/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })

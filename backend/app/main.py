@@ -2324,6 +2324,15 @@ def operations_review(payload: ReviewAction, db: Session = Depends(get_db), user
                 card["review_reason"] = payload.reason
             updated = True
             break
+    # 同步写入 DB，防止重启丢失审批状态
+    if updated:
+        t = db.get(Transcript, payload.transcript_id)
+        if t and t.agent_b_result:
+            # 深拷贝避免引用问题
+            result = dict(t.agent_b_result.get("result", {}) or {})
+            result["operation_cards"] = cards
+            t.agent_b_result = {**t.agent_b_result, "result": result}
+            db.commit()
     emit_event(
         db,
         "review.action",
@@ -2388,6 +2397,11 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         if record:
             record.status = 'reviewed'
             db.commit()
+        # 同步更新 OPERATION_CARD_STORE 中的卡片状态
+        store_cards = OPERATION_CARD_STORE.get(req.transcript_id, [])
+        for c in store_cards:
+            if c.get("review_status") == "approved":
+                c["execute_status"] = "executed"
         # Write back execution statuses.
         by_id = {r["card_id"]: r for r in results}
         for card in cards:
