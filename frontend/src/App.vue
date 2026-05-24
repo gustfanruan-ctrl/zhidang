@@ -216,6 +216,7 @@ function logout() {
   localStorage.removeItem('zhidang_token')
   localStorage.removeItem('zhidang_company_id')
   customerStore.clearContext()
+  customerStore.clearCache()
   isAuthed.value = false
   isSuperadmin.value = false
   userDisplayName.value = ''

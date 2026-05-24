@@ -1,8 +1,16 @@
 import { defineStore } from 'pinia'
 import { api } from '../api'
 
-const CACHE_KEY = 'zhidang_customers_cache_v1'
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const CACHE_KEY_PREFIX = 'zhidang_customers_cache_v2'
+
+function cacheKey() {
+  const token = localStorage.getItem('zhidang_token')
+  if (!token) return CACHE_KEY_PREFIX + '::anon'
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    return CACHE_KEY_PREFIX + '::' + (payload.username || payload.user_name || 'anon')
+  } catch { return CACHE_KEY_PREFIX + '::anon' }
+}
 
 export const useCustomerStore = defineStore('customer', {
   state: () => ({
@@ -17,7 +25,7 @@ export const useCustomerStore = defineStore('customer', {
   actions: {
     loadCache() {
       try {
-        const raw = localStorage.getItem(CACHE_KEY)
+        const raw = localStorage.getItem(cacheKey())
         if (!raw) return false
         const parsed = JSON.parse(raw)
         if (!parsed?.cacheAt || Date.now() - new Date(parsed.cacheAt).getTime() > CACHE_TTL_MS) return false
@@ -29,7 +37,7 @@ export const useCustomerStore = defineStore('customer', {
       }
     },
     saveCache() {
-      localStorage.setItem(CACHE_KEY, JSON.stringify({ customers: this.customers, cacheAt: this.cacheAt }))
+      localStorage.setItem(cacheKey(), JSON.stringify({ customers: this.customers, cacheAt: this.cacheAt }))
     },
     async fetchCustomers(force = false, keyword = '') {
       const normalizedKeyword = (keyword || '').trim()
@@ -84,7 +92,7 @@ export const useCustomerStore = defineStore('customer', {
     clearCache() {
       this.customers = []
       this.cacheAt = null
-      localStorage.removeItem(CACHE_KEY)
+      localStorage.removeItem(cacheKey())
     },
   },
 })
