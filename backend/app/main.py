@@ -1360,7 +1360,7 @@ async def transcript_upload(files: list[UploadFile] = File(...), company_name_hi
         input_type=input_type,
         status="parsed",
         company_name=normalized_company or None,
-        company_id=hash_company_id(normalized_company) if normalized_company else None,
+        company_id=(payload.get("company_id") or "").strip() or (hash_company_id(normalized_company) if normalized_company else None),
         sso_user_name=user.get("display_name") or user.get("user_name") or user.get("username"),
         sso_user_id=user.get("user_id") if user.get("source") == "sso" else None,
     )
@@ -1385,8 +1385,8 @@ def transcript_dingtalk_fetch(payload: DingtalkFetchPayload, db: Session = Depen
         segments=parsed["segments"],
         input_type="text",
         status="parsed",
-        company_name=None,
-        company_id=None,
+        company_name=payload.get("company_name") or None,
+        company_id=payload.get("company_id") or None,
         sso_user_name=user.get("display_name") or user.get("user_name") or user.get("username"),
         sso_user_id=user.get("user_id") if user.get("source") == "sso" else None,
     )
@@ -2382,6 +2382,12 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         data_creator = user.get("integrate_id") or user.get("username", "")
         writer = JiandaoyunWriter(api_key=api_key, app_id=app_id, data_creator=data_creator)
         results = await execute_cards(db=db, transcript_id=req.transcript_id, cards=approved, writer=writer, mapping_forms=forms_cfg)
+        # 更新转写状态为已审核
+        from .models import Transcript as _T, FollowupRecord as _F
+        record = db.get(_T, req.transcript_id) or db.get(_F, req.transcript_id)
+        if record:
+            record.status = 'reviewed'
+            db.commit()
         # Write back execution statuses.
         by_id = {r["card_id"]: r for r in results}
         for card in cards:

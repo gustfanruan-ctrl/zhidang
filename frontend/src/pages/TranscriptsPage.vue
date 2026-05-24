@@ -730,6 +730,7 @@ const tabs = [
 
 const selectedCards = ref([])
 const editingItems = ref(new Set())
+const reviewState = reactive(new Map())  // card_id -> 'approved' | 'rejected'
 
 const cardGroups = computed(() => {
   const expectations = []
@@ -753,8 +754,8 @@ const cardGroups = computed(() => {
       source_quote: card.source_quote || '',
       operationId: card.card_id,
       operationType: card.operation_type || 'create',
-      approved: card._manual ? true : (card.operation_type === 'create'),
-      rejected: card.operation_type === 'skip',
+      approved: reviewState.get(card.card_id) === 'approved' || (card._manual ? true : card.operation_type === 'create' && !reviewState.has(card.card_id)),
+      rejected: reviewState.get(card.card_id) === 'rejected' || (card.operation_type === 'skip' && !reviewState.has(card.card_id)),
       _targetForm: tf,
     }
     if (tf === '预期表') expectations.push(item)
@@ -849,8 +850,8 @@ async function markCard(type, index, action) {
   const key = `${type}_${index}_${action}`
   if (cardMarking.value.has(key)) return
   cardMarking.value.add(key)
-  if (action === 'approve') { item.approved = true; item.rejected = false }
-  else { item.approved = false; item.rejected = true }
+  if (action === 'approve') { item.approved = true; item.rejected = false; reviewState.set(item.operationId, 'approved') }
+  else { item.approved = false; item.rejected = true; reviewState.set(item.operationId, 'rejected') }
   try {
     await reviewCard({
       transcript_id: selectedId.value,
