@@ -799,8 +799,8 @@ const cardGroups = computed(() => {
       source_quote: card.source_quote || '',
       operationId: card.card_id,
       operationType: card.operation_type || 'create',
-      approved: reviewState.get(card.card_id) === 'approved' || (card._manual ? true : card.operation_type === 'create' && !reviewState.has(card.card_id)),
-      rejected: reviewState.get(card.card_id) === 'rejected' || (card.operation_type === 'skip' && !reviewState.has(card.card_id)),
+      approved: reviewState.get(card.card_id) === 'approved',
+      rejected: reviewState.get(card.card_id) === 'rejected',
       customerId: card.customer_id || '',
       _targetForm: tf,
     }

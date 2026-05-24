@@ -2357,14 +2357,22 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         api_key = runtime_cfg.get("api_key") or ""
         app_id = runtime_cfg.get("app_id") or ""
 
-        # 前端传入 company_id 时覆盖卡片内的 customer_id（兜底分析阶段绑错/未绑客户）
-        logger.info(f"[DEBUG] execute_operations: company_id from frontend={req.company_id}, approved_cards={len(approved)}")
-        for c in approved:
-            logger.info(f"[DEBUG] execute_operations: card {c.get('card_id','?')[:16]} target={c.get('target_form','?')} old_customer_id={c.get('customer_id','?')[:20]}")
+        # 前端传入 company_id 时覆盖卡片 customer_id 并落盘到 DB + OPERATION_CARD_STORE
         if req.company_id:
             for card in approved:
                 card["customer_id"] = req.company_id
-            logger.info(f"[DEBUG] execute_operations: overrode customer_id to {req.company_id} on {len(approved)} cards")
+            # 同步写入 OPERATION_CARD_STORE 中所有卡片
+            for card in cards:
+                card["customer_id"] = req.company_id
+            # 同步写入 DB
+            t = db.get(Transcript, req.transcript_id) or db.get(FollowupRecord, req.transcript_id)
+            if t and t.agent_b_result:
+                result = dict(t.agent_b_result.get("result", {}) or {})
+                result["operation_cards"] = cards
+                t.agent_b_result = {**t.agent_b_result, "result": result}
+                db.commit()
+            logger.info("[DEBUG] execute: overrode customer_id=%s on %d approved cards (all %d in store persisted to DB)",
+                       req.company_id, len(approved), len(cards))
 
         # 合并前端传回的字段更新（如 status、is_first_value 等用户修改项）
         if req.field_updates:
