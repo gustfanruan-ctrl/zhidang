@@ -102,7 +102,7 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
 
         try:
             extraction_result = result.get("result", {})
-            company_id = transcript.company_id or "demo"
+            company_id = transcript.company_id or ""
             company_name = transcript.company_name or ""
 
             runtime_cfg = get_jiandaoyun_runtime_config(cfg)

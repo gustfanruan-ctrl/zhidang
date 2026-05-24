@@ -430,18 +430,49 @@
           </div>
 
           <div v-if="cardGroups.expectations.length || cardGroups.scenarios.length" class="space-y-3">
-            <div class="flex items-center gap-2 flex-wrap">
-              <Label class="text-xs text-muted-foreground shrink-0">提交到客户：</Label>
-              <SelectNative v-model="targetCompanyId" class="h-8 text-xs min-w-[160px]">
-                <option value="">-- 自动（卡片内记录） --</option>
-                <option v-for="c in customerStore.customers" :key="c.company_id" :value="c.company_id">{{ c.company_name }}</option>
-              </SelectNative>
-              <span v-if="!targetCompanyId && cardCustomerId && cardCustomerId !== 'demo'" class="text-[10px] text-muted-foreground">
-                当前：{{ cardCustomerId.slice(0, 12) }}...
+            <div class="space-y-2.5 max-w-sm">
+              <div class="flex items-center gap-2">
+                <Label class="text-xs text-muted-foreground shrink-0">提交到客户：</Label>
+              </div>
+              <!-- Search -->
+              <div class="flex gap-2">
+                <Input v-model="reviewCustomerKeyword" class="flex-1 h-8 text-xs" placeholder="搜索客户" @keyup.enter="searchReviewCustomers" />
+                <Button variant="secondary" size="sm" class="h-8 text-xs shrink-0" @click="searchReviewCustomers">
+                  <Search class="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <!-- Selected -->
+              <div v-if="targetCompanyId" class="flex items-center justify-between bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
+                <div class="flex-1 min-w-0 text-xs font-medium truncate">{{ selectedReviewCustomerName }}</div>
+                <Button variant="ghost" size="sm" class="h-6 w-6 p-0 text-muted-foreground hover:text-destructive" @click="targetCompanyId = ''">
+                  <X class="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <span v-else-if="cardCustomerId && cardCustomerId !== 'demo'" class="text-[10px] text-muted-foreground">
+                自动：卡片内记录 ({{ cardCustomerId.slice(0, 12) }}...)
               </span>
-              <span v-else-if="!targetCompanyId && (!cardCustomerId || cardCustomerId === 'demo')" class="text-[10px] text-amber-600">
-                卡片未绑定客户，请手动选择
+              <span v-else class="text-[10px] text-amber-600">
+                卡片未绑定客户，请手动搜索并选择
               </span>
+              <!-- Customer list -->
+              <div class="rounded-lg border border-border max-h-[180px] overflow-y-auto">
+                <div v-if="reviewCustomerLoading" class="text-xs text-muted-foreground py-3 text-center">搜索中...</div>
+                <div v-else-if="filteredReviewCustomers.length" v-for="c in pagedReviewCustomers" :key="c.company_id"
+                     class="px-3 py-2 text-xs border-b border-border/30 last:border-0 cursor-pointer hover:bg-muted/40 transition-colors"
+                     :class="{ 'bg-primary/5 border-primary/20': targetCompanyId === c.company_id }"
+                     @click="targetCompanyId = c.company_id">
+                  <div class="font-medium truncate">{{ c.company_name }}</div>
+                  <div class="text-[10px] text-muted-foreground truncate">{{ c.csm || '' }}</div>
+                </div>
+                <div v-else class="text-xs text-muted-foreground py-3 text-center">输入关键词搜索</div>
+              </div>
+              <div v-if="reviewCustomerWarning" class="text-[10px] text-destructive">{{ reviewCustomerWarning }}</div>
+              <!-- Pagination -->
+              <div v-if="filteredReviewCustomers.length > reviewPageSize" class="flex items-center justify-between gap-1">
+                <Button variant="ghost" size="sm" class="h-6 text-[10px]" :disabled="reviewCustomerPage <= 1" @click="reviewCustomerPage--">上一页</Button>
+                <span class="text-[10px] text-muted-foreground">{{ reviewCustomerPage }} / {{ Math.ceil(filteredReviewCustomers.length / reviewPageSize) }}</span>
+                <Button variant="ghost" size="sm" class="h-6 text-[10px]" :disabled="reviewCustomerPage >= Math.ceil(filteredReviewCustomers.length / reviewPageSize)" @click="reviewCustomerPage++">下一页</Button>
+              </div>
             </div>
             <Button :disabled="!hasApprovedCards || submitting" @click="submitCards">
               <Send v-if="!submitting" class="h-4 w-4 mr-2" />
@@ -467,7 +498,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, reactive, watch } from 'vue'
-import { Upload, FileText, Image, X, Check, Plus, Send, AlertTriangle, Loader2 } from '@lucide/vue'
+import { Upload, FileText, Image, X, Check, Plus, Send, AlertTriangle, Loader2, Search } from '@lucide/vue'
 import { api } from '../api'
 import { useCustomerStore } from '../stores/customer'
 import { uploadTranscript, startTranscriptAnalysis, fetchTranscripts, fetchTranscriptDetail } from '../api/operation'
@@ -785,11 +816,55 @@ const hasApprovedCards = computed(() => {
 
 const cardCustomerId = computed(() => {
   const allCards = [...cardGroups.value.expectations, ...cardGroups.value.scenarios]
-  const firstId = allCards.find(c => c.customerId)?.customerId
-  return firstId || customerStore.currentCustomer?.company_id || ''
+  const firstId = allCards.find(c => c.customerId && c.customerId !== 'demo')?.customerId
+  if (firstId) return firstId
+  return customerStore.currentCustomer?.company_id || ''
 })
 const targetCompanyId = ref('')
 const effectiveCompanyId = computed(() => targetCompanyId.value || cardCustomerId.value)
+const reviewCustomerKeyword = ref('')
+const reviewCustomerPage = ref(1)
+const reviewPageSize = 20
+const reviewCustomerLoading = ref(false)
+const reviewCustomerWarning = ref('')
+const reviewSearchResults = ref([])  // remote search results, separate from customerStore.customers
+const filteredReviewCustomers = computed(() => {
+  const k = reviewCustomerKeyword.value.trim().toLowerCase()
+  // 有搜索关键词时用远程结果（已在 searchReviewCustomers 中筛选），否则用本地列表
+  if (k && reviewSearchResults.value.length > 0) return reviewSearchResults.value
+  if (!k) return customerStore.customers
+  return customerStore.customers.filter(c => c.company_name.toLowerCase().includes(k))
+})
+const selectedReviewCustomerName = computed(() => {
+  if (!targetCompanyId.value) return ''
+  const all = [...customerStore.customers, ...reviewSearchResults.value]
+  const found = all.find(c => c.company_id === targetCompanyId.value)
+  return found?.company_name || targetCompanyId.value.slice(0, 12) + '...'
+})
+const pagedReviewCustomers = computed(() => {
+  const start = (reviewCustomerPage.value - 1) * reviewPageSize
+  return filteredReviewCustomers.value.slice(start, start + reviewPageSize)
+})
+async function searchReviewCustomers() {
+  reviewCustomerPage.value = 1
+  const keyword = reviewCustomerKeyword.value.trim()
+  if (!keyword) {
+    reviewSearchResults.value = []
+    reviewCustomerWarning.value = ''
+    return
+  }
+  reviewCustomerLoading.value = true
+  try {
+    const data = await customerStore.searchCustomersRemote(keyword)
+    reviewSearchResults.value = data.customers || []
+    reviewCustomerWarning.value = data.warning || ''
+  } catch (e) {
+    reviewCustomerWarning.value = e?.response?.data?.detail || '搜索失败'
+    reviewSearchResults.value = []
+  } finally {
+    reviewCustomerLoading.value = false
+  }
+}
 
 function safeUUID() {
   try { return crypto.randomUUID() } catch { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random()*16|0; return (c==='x'?r:r&0x3|0x8).toString(16) }) }
@@ -801,6 +876,19 @@ function loadCardsFromTranscript() {
   const cards = (t.agent_b_result || {}).result?.operation_cards || []
   selectedCards.value = cards.map(c => ({ ...c, _targetForm: c.target_form }))
   editingItems.value = new Set()
+  // 从 DB 恢复审核状态
+  for (const c of cards) {
+    if (c.review_status === 'approved' || c.review_status === 'rejected') {
+      reviewState.set(c.card_id, c.review_status)
+    }
+  }
+  // 卡片未绑定客户时默认选中侧边栏当前客户
+  if (!targetCompanyId.value) {
+    const firstValid = cards.find(c => c.customer_id && c.customer_id !== 'demo')
+    if (!firstValid && customerStore.currentCustomer?.company_id) {
+      targetCompanyId.value = customerStore.currentCustomer.company_id
+    }
+  }
 }
 
 async function addManualCard(targetForm) {
