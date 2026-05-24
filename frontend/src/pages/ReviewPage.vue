@@ -404,16 +404,29 @@ function clearSourceSelection() {
   selectedSourceIds.value = new Set()
   appliedSources.value = []
 }
-function applySelectedSources() {
+async function applySelectedSources() {
   if (selectedSourceIds.value.size === 0) return
   const chosen = sourceList.value.filter(s => selectedSourceIds.value.has(s.id))
+  // 按需加载全文（列表接口只返回预览）
+  const details = await Promise.all(chosen.map(async s => {
+    if (s.raw_text) return s.raw_text
+    try {
+      const isFollowup = sourceType.value === "followup"
+      const url = isFollowup ? `/api/v1/followup-records/${s.id}` : `/api/v1/transcripts/${s.id}`
+      const { data } = await api.get(url)
+      return data.raw_text || ""
+    } catch { return "" }
+  }))
   const parts = chosen
-    .map(s => `--- ${s.title || s.id} (${s.company_name || ''}) ---\n${s.raw_text || ''}`)
+    .map((s, idx) => `--- ${s.title || s.id} (${s.company_name || ""}) ---
+${details[idx] || s.raw_text_preview || ""}`)
     .filter(Boolean)
-  transcriptText.value = parts.join('\n\n')
+  transcriptText.value = parts.join("
+
+")
   appliedSources.value = chosen.map(s => ({ id: s.id, title: s.title, company_name: s.company_name }))
   currentStep.value = 1
-  showMessage(`已拼接 ${chosen.length} 条来源到下方内容`, 'success')
+  showMessage(`已拼接 ${chosen.length} 条来源到下方内容`, "success")
 }
 function switchSourceType(t) {
   if (sourceType.value === t) return
