@@ -437,6 +437,200 @@ def _extract_csm_name(success_val: Any) -> str:
     return str(success_val or "")
 
 
+GENJIN_TAG_META: dict[tuple[str, str, str], dict[str, str]] = {
+    ("使用推进", "常态化跟进", ""): {
+        "tag_id": "698408b3bd0e7d9d756beb16",
+        "genjin_uuid": "94439254-506b-4f3e-b105-a2909ca105d6",
+    },
+    ("使用推进", "预期跟进", ""): {
+        "tag_id": "698408bb69e90652ec54e51b",
+        "genjin_uuid": "470ca6f2-68f6-4d97-b3df-b946955977d3",
+    },
+    ("使用推进", "系统部署/环境确认", ""): {
+        "tag_id": "698408ca3b437f8b5333848f",
+        "genjin_uuid": "4462a21e-d8b9-4e4f-ad4a-de1ddca81511",
+    },
+    ("使用推进", "价值汇报/高层触达", ""): {
+        "tag_id": "69844504985868a0350db6bf",
+        "genjin_uuid": "4cd95e77-e31a-453a-a05c-1e2d56e56502",
+    },
+    ("使用推进", "价值宣导/方案讲解", ""): {
+        "tag_id": "6984450c594ce3a9a61c7317",
+        "genjin_uuid": "7c04b440-3db3-4229-a9c0-484c069d7f97",
+    },
+    ("数字人才服务", "线上课程", "意愿触达"): {
+        "tag_id": "6984451f7a2383052f8f5a88",
+        "genjin_uuid": "a5e27459-74c0-4d2a-b922-4e624e9700e9",
+    },
+    ("数字人才服务", "线上课程", "过程执行"): {
+        "tag_id": "6984452870249b47d399e8b2",
+        "genjin_uuid": "3c35d7d0-9d34-4930-ad29-306907449f5f",
+    },
+    ("数字人才服务", "线下培训", "意愿触达"): {
+        "tag_id": "69844534f8b4ec3e66c5006a",
+        "genjin_uuid": "a0d1d60a-cd7b-4650-bc2e-decddbcacc0d",
+    },
+    ("数字人才服务", "线下培训", "过程执行"): {
+        "tag_id": "6984453bc3c2eedc86d70f5c",
+        "genjin_uuid": "782adc3b-c13c-4ab9-b8de-db92c1bbb44c",
+    },
+    ("数字人才服务", "业务沙盘", "意愿触达"): {
+        "tag_id": "69844542072acdec04f74ebd",
+        "genjin_uuid": "7c00f22f-f5cd-4455-a60f-fbecd17f10f5",
+    },
+    ("数字人才服务", "业务沙盘", "过程执行"): {
+        "tag_id": "69844548ff891587d82a0acc",
+        "genjin_uuid": "80474cc0-b848-4efa-be5e-322df73b3b52",
+    },
+    ("数字人才服务", "翻转课堂", "意愿触达"): {
+        "tag_id": "69844552592ec3aad5d09e55",
+        "genjin_uuid": "d596b555-3431-4bb0-9faa-ada8ee3b9b07",
+    },
+    ("数字人才服务", "翻转课堂", "过程执行"): {
+        "tag_id": "6984455b20de93ef23b50ce8",
+        "genjin_uuid": "ee245baf-1290-42f2-ab8e-d8b67b8c12c9",
+    },
+    ("数字人才服务", "人才大赛", "意愿触达"): {
+        "tag_id": "6984456495872ace5fcc67a4",
+        "genjin_uuid": "d9912827-481c-4293-be63-247038c58244",
+    },
+    ("数字人才服务", "人才大赛", "过程执行"): {
+        "tag_id": "69844569b573eed671b83681",
+        "genjin_uuid": "7a282de7-3de4-426f-8c12-09d6bddc518d",
+    },
+    ("续费增购", "服务ARR推动", ""): {
+        "tag_id": "698445840911e7166adf1358",
+        "genjin_uuid": "5a671370-29cc-4a00-bd18-05c956b9c4c6",
+    },
+    ("续费增购", "年费续费推动", ""): {
+        "tag_id": "6984458a03687e30e5017325",
+        "genjin_uuid": "8fa03331-73ae-4ef3-9747-8ce36fc6696e",
+    },
+    ("续费增购", "增购推动", ""): {
+        "tag_id": "6984458e04e3cf8186b7107d",
+        "genjin_uuid": "b14e4ea2-a4e2-4e7d-94cc-860695a9e151",
+    },
+    ("续费增购", "签单辅助", ""): {
+        "tag_id": "69844592c9dbdc85a9fd173c",
+        "genjin_uuid": "e6df92c5-5f20-40c4-8e03-74c2ff39335b",
+    },
+}
+
+
+def _genjin_tag_label(level1: str, level2: str, level3: str) -> str:
+    parts = [part for part in [level1, level2, level3] if part]
+    return "-".join(parts)
+
+
+def _resolve_genjin_tag_meta(tag: dict[str, Any]) -> dict[str, str]:
+    level1 = str(tag.get("level1") or "").strip()
+    level2 = str(tag.get("level2") or "").strip()
+    level3 = str(tag.get("level3") or "").strip()
+    meta = dict(GENJIN_TAG_META.get((level1, level2, level3), {}))
+    if not meta and level3:
+        meta = dict(GENJIN_TAG_META.get((level1, level2, ""), {}))
+    tag_id = str(meta.get("tag_id") or tag.get("tag_id") or "").strip()
+    genjin_uuid = str(meta.get("genjin_uuid") or tag.get("genjin_uuid") or "").strip()
+    return {
+        "tag_id": tag_id,
+        "genjin_uuid": genjin_uuid,
+        "label": _genjin_tag_label(level1, level2, level3),
+    }
+
+
+def _customer_write_context_from_item(item: dict[str, Any] | None) -> dict[str, str]:
+    if not item:
+        return {}
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    com_id = str(item.get("com_id") or raw.get("com_id") or "").strip()
+    com_name = str(
+        item.get("com_name")
+        or raw.get("com_name")
+        or item.get("company_name")
+        or raw.get("comname_01")
+        or raw.get("企业名称")
+        or raw.get("客户名称")
+        or raw.get("公司名称")
+        or ""
+    ).strip()
+    return {"customer_com_id": com_id, "customer_com_name": com_name}
+
+
+async def _resolve_customer_write_context(company_id: str, runtime_cfg: dict[str, Any]) -> dict[str, str]:
+    company_id = str(company_id or "").strip()
+    if not company_id:
+        return {}
+    for item in CUSTOMER_INDEX_CACHE.get("items", []) or []:
+        if str(item.get("company_id") or "") == company_id:
+            return _customer_write_context_from_item(item)
+    shared = _load_shared_cache()
+    for item in (shared or {}).get("items", []) or []:
+        if str(item.get("company_id") or "") == company_id:
+            return _customer_write_context_from_item(item)
+
+    mapping = runtime_cfg.get("mapping", {}) or {}
+    main_form = ((mapping.get("forms") or {}).get("客户主表") or {})
+    app_id = str(runtime_cfg.get("app_id") or "").strip()
+    api_key = str(runtime_cfg.get("api_key") or "").strip()
+    entry_id = str(main_form.get("entry_id") or runtime_cfg.get("main_entry_id") or "").strip()
+    if not api_key or not app_id or not entry_id:
+        return {}
+    try:
+        client = JiandaoyunClient(api_key=api_key)
+        profile = await client.query_single_data(app_id=app_id, entry_id=entry_id, data_id=company_id)
+    except Exception as exc:
+        logger.warning("resolve customer write context failed for %s: %s", company_id, exc)
+        return {}
+    row = profile.get("data") or {}
+    return _customer_write_context_from_item(
+        {
+            "company_id": row.get("_id") or company_id,
+            "company_name": row.get("comname_01") or row.get("com_name") or "",
+            "com_name": row.get("com_name") or "",
+            "com_id": row.get("com_id") or "",
+            "raw": row,
+        }
+    )
+
+
+def _apply_customer_write_context(card: dict[str, Any], company_id: str, context: dict[str, str]) -> None:
+    card["customer_id"] = company_id
+    if context.get("customer_com_id"):
+        card["customer_com_id"] = context["customer_com_id"]
+    if context.get("customer_com_name"):
+        card["customer_com_name"] = context["customer_com_name"]
+
+
+RELATED_YUQI_OVERRIDE_FIELDS = {
+    "related_yuqi_id",
+    "related_yuqi_card_id",
+    "related_yuqi_source",
+    "related_yuqi_summary",
+    "related_yuqi_reason",
+    "related_yuqi_confidence",
+}
+
+
+def _apply_operation_card_override(card: dict[str, Any], override: dict[str, Any], forms_cfg: dict[str, Any]) -> None:
+    if not override:
+        return
+    target_form = str(override.get("target_form") or "").strip()
+    if target_form:
+        card["target_form"] = target_form
+        new_fc = forms_cfg.get(target_form, {})
+        card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
+
+    for key in RELATED_YUQI_OVERRIDE_FIELDS:
+        if key not in override:
+            continue
+        value = override.get(key)
+        card[key] = None if value is None else str(value).strip()
+
+    if card.get("target_form") != "场景表":
+        for key in RELATED_YUQI_OVERRIDE_FIELDS:
+            card.pop(key, None)
+
+
 async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str, Any]:
     mapping = runtime_cfg.get("mapping", {})
     main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
@@ -2360,18 +2554,15 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         # ── 应用前端传入的所有覆写（company_id / card_overrides / field_updates）──
         logger.info(f"[DEBUG] execute: company_id='{req.company_id}' card_overrides={list(req.card_overrides.keys())[:5]} field_updates={list(req.field_updates.keys())[:5]} approved={len(approved)}")
 
+        customer_write_context: dict[str, str] = {}
         if req.company_id:
+            customer_write_context = await _resolve_customer_write_context(req.company_id, runtime_cfg)
             for card in approved:
-                card["customer_id"] = req.company_id
+                _apply_customer_write_context(card, req.company_id, customer_write_context)
 
         for card in approved:
             cid = card.get("card_id")
-            # target_form override（用户把场景改成预期）→ 同步切 lookup_widget + entry_id
-            ov = req.card_overrides.get(cid, {})
-            if ov.get("target_form"):
-                card["target_form"] = ov["target_form"]
-                new_fc = forms_cfg.get(ov["target_form"], {})
-                card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
+            _apply_operation_card_override(card, req.card_overrides.get(cid, {}), forms_cfg)
             # field_updates
             up = req.field_updates.get(cid, {})
             if up:
@@ -2401,13 +2592,9 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         # ── 全部覆写落盘到 OPERATION_CARD_STORE + DB ──
         for card in cards:
             if req.company_id:
-                card["customer_id"] = req.company_id
+                _apply_customer_write_context(card, req.company_id, customer_write_context)
             cid = card.get("card_id")
-            ov = req.card_overrides.get(cid, {})
-            if ov.get("target_form"):
-                card["target_form"] = ov["target_form"]
-                new_fc = forms_cfg.get(ov["target_form"], {})
-                card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
+            _apply_operation_card_override(card, req.card_overrides.get(cid, {}), forms_cfg)
         t = db.get(Transcript, req.transcript_id) or db.get(FollowupRecord, req.transcript_id)
         if t and t.agent_b_result:
             result = dict(t.agent_b_result.get("result", {}) or {})
@@ -2438,6 +2625,11 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
             cid = card.get("card_id")
             if cid in by_id:
                 card["execute_status"] = by_id[cid]["execute_status"]
+        if record and record.agent_b_result:
+            result_payload = dict(record.agent_b_result.get("result", {}) or {})
+            result_payload["operation_cards"] = cards
+            record.agent_b_result = {**record.agent_b_result, "result": result_payload}
+            db.commit()
         return {"success": True, "results": results}
 
     # Legacy flow compatibility.
@@ -3524,13 +3716,16 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     if genjin_tags:
         subform_rows = []
         for tag in genjin_tags:
+            tag_meta = _resolve_genjin_tag_meta(tag)
             row = {
-                "genjin_uuid": {"value": str(uuid4())},
+                "genjin_uuid": {"value": tag_meta.get("genjin_uuid") or str(uuid4())},
                 "genjin_level1": {"value": tag.get("level1", "")},
                 "genjin_level2": {"value": tag.get("level2", "")},
                 "genjin_level3": {"value": tag.get("level3", "")},
             }
-            tid = tag.get("tag_id", "")
+            if tag_meta.get("label"):
+                row["_widget_1773986788645"] = {"value": tag_meta["label"]}
+            tid = tag_meta.get("tag_id", "")
             if tid:
                 row["genjin_id"] = {"value": {"id": tid}}
             subform_rows.append(row)

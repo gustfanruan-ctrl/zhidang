@@ -59,6 +59,8 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
     lastDone: null,
     lastError: '',
     lastScreenshot: null,
+    commitRefreshKey: 0,
+    sandboxRefreshKey: 0,
   }),
   actions: {
     reset() {
@@ -70,6 +72,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
       this.lastDone = null
       this.lastError = ''
       this.lastScreenshot = null
+      this.sandboxRefreshKey = 0
     },
 
     async sendMessage(companyId, message, { version = null } = {}) {
@@ -180,6 +183,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
                 this.lastDone = data
                 assistant.done = data
                 if (data?.session_id) this.currentSessionId = data.session_id
+                if (!data?.error) this.sandboxRefreshKey += 1
                 if (data?.error) {
                   const friendly = mapDoneError(data.error)
                   if (!assistant.content) assistant.content = friendly
@@ -242,6 +246,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
         }
         if (res.ok) {
           toast({ title: '已提交' })
+          this.commitRefreshKey += 1
           this.reset()
           return
         }

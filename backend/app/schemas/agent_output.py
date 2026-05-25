@@ -84,6 +84,16 @@ class OperationCard(BaseModel):
     customer_id: str | None = None
     lookup_widget: str | None = None
     data_id: str | None = None
+    customer_com_id: str | None = None
+    customer_com_name: str | None = None
+    # 场景表关联预期：related_yuqi_id 是简道云记录 id；
+    # related_yuqi_card_id 是本次审核队列中预期卡片的 card_id，执行时会解析成记录 id。
+    related_yuqi_id: str | None = None
+    related_yuqi_card_id: str | None = None
+    related_yuqi_source: str | None = None
+    related_yuqi_summary: str | None = None
+    related_yuqi_reason: str | None = None
+    related_yuqi_confidence: float | None = None
 
     @field_validator("field_name")
     @classmethod

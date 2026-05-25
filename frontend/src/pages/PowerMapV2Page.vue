@@ -66,6 +66,7 @@
           </div>
           <iframe
             v-else
+            :key="'bi-' + chatStore.commitRefreshKey"
             :src="biIframeUrl"
             class="absolute inset-0 w-full h-full border-none"
             @load="onIframeLoad"
@@ -80,18 +81,21 @@
           </div>
         </div>
 
-        <!-- Preview mode (沙箱截图) -->
-        <div v-else class="absolute inset-0 flex items-center justify-center p-4 bg-muted/20">
-          <div v-if="!lastScreenshot" class="text-center space-y-2">
+        <!-- Preview mode (沙箱 iframe) -->
+        <div v-else class="absolute inset-0 bg-muted/20">
+          <div v-if="!sandboxIframeUrl" class="absolute inset-0 flex items-center justify-center text-center">
+            <div class="space-y-2">
             <ImageIcon class="h-10 w-10 mx-auto text-muted-foreground/30" />
             <p class="text-sm text-muted-foreground">暂无预览，请先在右侧发起聊天</p>
-            <p class="text-xs text-muted-foreground/70">AI 会在调整过程中生成沙箱截图</p>
+              <p class="text-xs text-muted-foreground/70">AI 完成调整后会刷新沙箱预览</p>
+            </div>
           </div>
-          <img
+          <iframe
             v-else
-            :src="lastScreenshot"
-            alt="sandbox preview"
-            class="max-w-full max-h-full object-contain rounded-lg shadow-md border border-border/40"
+            :key="sandboxIframeKey"
+            :src="sandboxIframeUrl"
+            class="absolute inset-0 w-full h-full border-none bg-background"
+            title="sandbox preview"
           />
         </div>
       </template>
@@ -173,6 +177,13 @@ const biBaseUrl = ref('')
 const showBiLoginHint = ref(false)
 
 const lastScreenshot = computed(() => chatStore.lastScreenshot)
+const sandboxIframeUrl = computed(() => {
+  const sessionId = chatStore.currentSessionId
+  if (!sessionId) return ''
+  const sid = encodeURIComponent(sessionId)
+  return `/sandbox/render?session_id=${sid}&r=${chatStore.sandboxRefreshKey}`
+})
+const sandboxIframeKey = computed(() => `${chatStore.currentSessionId || 'empty'}-${chatStore.sandboxRefreshKey}`)
 
 async function loadBiUrl() {
   if (!customerStore.currentCustomer) return
@@ -256,6 +267,15 @@ watch(lastScreenshot, (shot) => {
     viewMode.value = 'preview'
   }
 })
+
+watch(
+  () => chatStore.currentSessionId,
+  (sessionId) => {
+    if (sessionId && viewMode.value === 'iframe') {
+      viewMode.value = 'preview'
+    }
+  },
+)
 
 onMounted(() => {
   loadMap()

@@ -323,6 +323,9 @@
                       <option value="预期表">预期</option>
                       <option value="场景表">场景</option>
                     </SelectNative>
+                    <Badge v-if="item.approved" variant="outline" class="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200">已批准</Badge>
+                    <Badge v-else-if="item.rejected" variant="outline" class="text-[10px] bg-red-50 text-red-700 border-red-200">已拒绝</Badge>
+                    <Badge v-else variant="outline" class="text-[10px] bg-amber-50 text-amber-700 border-amber-200">待审核</Badge>
                     <Badge v-if="item.confidence" variant="outline" class="text-[10px] bg-purple-50 text-purple-700 border-purple-200">置信度 {{ (item.confidence * 100).toFixed(0) }}%</Badge>
                     <Badge variant="outline" class="text-[10px]" :class="{
                       'bg-emerald-50 text-emerald-700 border-emerald-200': item.operationType === 'create',
@@ -383,6 +386,9 @@
                       <option value="预期表">预期</option>
                       <option value="场景表">场景</option>
                     </SelectNative>
+                    <Badge v-if="item.approved" variant="outline" class="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200">已批准</Badge>
+                    <Badge v-else-if="item.rejected" variant="outline" class="text-[10px] bg-red-50 text-red-700 border-red-200">已拒绝</Badge>
+                    <Badge v-else variant="outline" class="text-[10px] bg-amber-50 text-amber-700 border-amber-200">待审核</Badge>
                     <Badge v-if="item.confidence" variant="outline" class="text-[10px] bg-purple-50 text-purple-700 border-purple-200">置信度 {{ (item.confidence * 100).toFixed(0) }}%</Badge>
                     <Badge variant="outline" class="text-[10px]" :class="{
                       'bg-emerald-50 text-emerald-700 border-emerald-200': item.operationType === 'create',
@@ -411,6 +417,29 @@
                     <Textarea v-model="item.description" rows="2" class="text-sm mt-1" />
                   </div>
                   <p v-else class="text-muted-foreground mb-2 break-words">{{ item.description || '暂无描述' }}</p>
+                  <div class="mb-2 space-y-1.5">
+                    <Label class="text-xs text-muted-foreground">关联预期</Label>
+                    <SelectNative
+                      class="h-8 px-2 py-0 text-xs"
+                      :model-value="scenarioRelatedValue(item)"
+                      @update:model-value="(v) => updateScenarioRelatedYuqi(index, v)"
+                    >
+                      <option value="">不关联</option>
+                      <option
+                        v-if="scenarioRelatedValue(item) && !hasRelatedOption(scenarioRelatedValue(item))"
+                        :value="scenarioRelatedValue(item)"
+                      >当前：{{ truncateLabel(item.relatedYuqiSummary || scenarioRelatedValue(item)) }}</option>
+                      <optgroup v-if="relatedYuqiOptions.generated.length" label="本次生成">
+                        <option v-for="opt in relatedYuqiOptions.generated" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                      </optgroup>
+                      <optgroup v-if="relatedYuqiOptions.existing.length" label="已有预期">
+                        <option v-for="opt in relatedYuqiOptions.existing" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                      </optgroup>
+                    </SelectNative>
+                    <p v-if="item.relatedYuqiReason" class="text-[10px] text-muted-foreground break-words">{{ item.relatedYuqiReason }}</p>
+                    <p v-else-if="yuqiLoading" class="text-[10px] text-muted-foreground">正在加载已有预期...</p>
+                    <p v-else-if="yuqiWarning" class="text-[10px] text-amber-600">{{ yuqiWarning }}</p>
+                  </div>
                   <div v-if="item.source_quote" class="bg-muted/50 rounded-lg p-2.5 mt-2 text-xs">
                     <p class="text-muted-foreground mb-1">原文引用：</p>
                     <p class="italic break-words">"{{ item.source_quote }}"</p>
@@ -803,6 +832,11 @@ const cardGroups = computed(() => {
       rejected: reviewState.get(card.card_id) === 'rejected',
       customerId: card.customer_id || '',
       _targetForm: tf,
+      relatedYuqiId: card.related_yuqi_id || '',
+      relatedYuqiCardId: card.related_yuqi_card_id || '',
+      relatedYuqiSource: card.related_yuqi_card_id ? 'generated' : (card.related_yuqi_id ? 'existing' : ''),
+      relatedYuqiSummary: card.related_yuqi_summary || '',
+      relatedYuqiReason: card.related_yuqi_reason || '',
     }
     if (tf === '预期表') expectations.push(item)
     else if (tf === '场景表') scenarios.push(item)
@@ -845,6 +879,99 @@ const pagedReviewCustomers = computed(() => {
   const start = (reviewCustomerPage.value - 1) * reviewPageSize
   return filteredReviewCustomers.value.slice(start, start + reviewPageSize)
 })
+
+const yuqiLoading = ref(false)
+const yuqiWarning = ref('')
+const customerYuqiItems = ref([])
+
+function truncateLabel(text, limit = 32) {
+  const value = String(text || '').trim()
+  return value.length <= limit ? value : value.slice(0, limit) + '...'
+}
+
+function yuqiSummary(row) {
+  return String(row?.detail_brief || row?.['预期简述'] || row?.detail || row?._id || '').trim()
+}
+
+const relatedYuqiOptions = computed(() => {
+  const generated = cardGroups.value.expectations.map(item => ({
+    value: `card:${item.operationId}`,
+    label: `本次生成：${truncateLabel(item.summary || item.operationId)}`,
+    summary: item.summary || '',
+    cardId: item.operationId,
+  }))
+  const existing = customerYuqiItems.value
+    .filter(row => row && row._id)
+    .map(row => ({
+      value: `existing:${row._id}`,
+      label: `已有：${truncateLabel(yuqiSummary(row) || row._id)}`,
+      summary: yuqiSummary(row),
+      id: row._id,
+    }))
+  return { generated, existing }
+})
+
+function scenarioRelatedValue(item) {
+  if (item.relatedYuqiCardId) return `card:${item.relatedYuqiCardId}`
+  if (item.relatedYuqiId) return `existing:${item.relatedYuqiId}`
+  return ''
+}
+
+function findRelatedOption(value) {
+  return [...relatedYuqiOptions.value.generated, ...relatedYuqiOptions.value.existing].find(opt => opt.value === value)
+}
+
+function hasRelatedOption(value) {
+  return !!findRelatedOption(value)
+}
+
+function updateScenarioRelatedYuqi(index, value) {
+  const item = cardGroups.value.scenarios[index]
+  if (!item) return
+  const card = selectedCards.value.find(c => c.card_id === item.operationId)
+  if (!card) return
+  const opt = findRelatedOption(value)
+  card.related_yuqi_summary = opt?.summary || ''
+  card.related_yuqi_reason = value ? '人工审核选择' : ''
+  if (!value) {
+    card.related_yuqi_id = ''
+    card.related_yuqi_card_id = ''
+    card.related_yuqi_source = ''
+  } else if (value.startsWith('existing:')) {
+    card.related_yuqi_id = value.slice('existing:'.length)
+    card.related_yuqi_card_id = ''
+    card.related_yuqi_source = 'existing'
+  } else if (value.startsWith('card:')) {
+    card.related_yuqi_id = ''
+    card.related_yuqi_card_id = value.slice('card:'.length)
+    card.related_yuqi_source = 'generated'
+  }
+}
+
+async function loadCustomerYuqiOptions(companyId) {
+  const id = String(companyId || '').trim()
+  if (!id || id === 'demo') {
+    customerYuqiItems.value = []
+    yuqiWarning.value = ''
+    return
+  }
+  yuqiLoading.value = true
+  try {
+    const resp = await api.get(`/api/v1/customers/${id}/yuqi`, { params: { limit: 100 } })
+    customerYuqiItems.value = resp.data?.items || []
+    yuqiWarning.value = resp.data?.warning || ''
+  } catch (e) {
+    customerYuqiItems.value = []
+    yuqiWarning.value = e?.response?.data?.detail || '已有预期加载失败'
+  } finally {
+    yuqiLoading.value = false
+  }
+}
+
+watch(effectiveCompanyId, (id) => {
+  loadCustomerYuqiOptions(id)
+})
+
 async function searchReviewCustomers() {
   reviewCustomerPage.value = 1
   const keyword = reviewCustomerKeyword.value.trim()
@@ -889,36 +1016,38 @@ function loadCardsFromTranscript() {
       targetCompanyId.value = customerStore.currentCustomer.company_id
     }
   }
+  loadCustomerYuqiOptions(effectiveCompanyId.value)
 }
 
 async function addManualCard(targetForm) {
   const cardId = safeUUID()
+  const changeItems = targetForm === '预期表'
+    ? [
+        { field_name: '预期简述', widget_name: 'detail_brief', new_value: '' },
+        { field_name: '预期详情', widget_name: 'detail', new_value: '' },
+        { field_name: '预期状态', widget_name: 'yuqi_status', new_value: '未启动' },
+        { field_name: '是否第一价值实现预期', widget_name: 'is_first_value', new_value: '否' },
+      ]
+    : [
+        { field_name: '场景标题', widget_name: 'title', new_value: '' },
+        { field_name: '解决什么问题', widget_name: 'solve_what_ques', new_value: '' },
+        { field_name: '怎样解决', widget_name: 'solve_what_ans', new_value: '' },
+      ]
   const newCard = {
     card_id: cardId,
     target_form: targetForm,
     _targetForm: targetForm,
     operation_type: 'create',
     operationType: 'create',
-    change_items: [],
+    change_items: changeItems,
     confidence: 0,
     source_quote: '',
+    review_status: 'approved',
     approved: true,
     rejected: false,
     _manual: true,
   }
   try {
-    const changeItems = targetForm === '预期表'
-      ? [
-          { field_name: '预期简述', widget_name: 'detail_brief', new_value: '' },
-          { field_name: '预期详情', widget_name: 'detail', new_value: '' },
-          { field_name: '预期状态', widget_name: 'yuqi_status', new_value: '未启动' },
-          { field_name: '是否第一价值实现预期', widget_name: 'is_first_value', new_value: '否' },
-        ]
-      : [
-          { field_name: '场景标题', widget_name: 'title', new_value: '' },
-          { field_name: '解决什么问题', widget_name: 'solve_what_ques', new_value: '' },
-          { field_name: '怎样解决', widget_name: 'solve_what_ans', new_value: '' },
-        ]
     await api.post('/api/v1/operations/add', {
       transcript_id: selectedId.value,
       card: {
@@ -930,18 +1059,43 @@ async function addManualCard(targetForm) {
     })
   } catch (e) { console.warn('添加卡片到后端失败:', e) }
   selectedCards.value.push(newCard)
+  reviewState.set(cardId, 'approved')
 }
 
 function switchCardType(type, index, event) {
-  const newTarget = event.target.value
+  const newTarget = typeof event === 'string' ? event : event?.target?.value
+  if (!newTarget) return
   const list = cardGroups.value[type === 'expectation' ? 'expectations' : 'scenarios']
   if (!list || !list[index]) return
   const item = list[index]
+  const oldTarget = item._targetForm
+  if (oldTarget === newTarget) return
   item._targetForm = newTarget
   for (const card of selectedCards.value) {
     if (card.card_id === item.operationId || (card._manual && card.card_id === item.operationId)) {
       card.target_form = newTarget
       card._targetForm = newTarget
+      // 重新映射 change_items：找到旧表单的字段值，写入新表单的对应字段
+      const items = card.change_items || []
+      const getVal = (name) => {
+        const ci = items.find(i => i.field_name === name || i.widget_name === name)
+        return ci ? ci.new_value : ''
+      }
+      const newItems = []
+      if (oldTarget === '场景表' && newTarget === '预期表') {
+        const title = getVal('场景标题') || getVal('title')
+        const ques = getVal('解决什么问题') || getVal('solve_what_ques')
+        const ans  = getVal('怎样解决') || getVal('solve_what_ans')
+        const desc = [ques, ans].filter(Boolean).join('；')
+        if (title) newItems.push({ field_name: '预期简述', widget_name: 'detail_brief', new_value: title })
+        if (desc) newItems.push({ field_name: '预期详情', widget_name: 'detail', new_value: desc })
+      } else if (oldTarget === '预期表' && newTarget === '场景表') {
+        const brief = getVal('预期简述') || getVal('detail_brief')
+        const detail = getVal('预期详情') || getVal('detail')
+        if (brief) newItems.push({ field_name: '场景标题', widget_name: 'title', new_value: brief })
+        if (detail) newItems.push({ field_name: '解决什么问题', widget_name: 'solve_what_ques', new_value: detail })
+      }
+      card.change_items = newItems
       break
     }
   }
@@ -975,13 +1129,42 @@ async function markCard(type, index, action) {
 
 async function submitCards() {
   if (submitting.value) return
-  const approved = [...cardGroups.value.expectations, ...cardGroups.value.scenarios]
-    .filter(c => c.approved)
-    .map(c => c.operationId)
+  const allApproved = [...cardGroups.value.expectations, ...cardGroups.value.scenarios].filter(c => c.approved)
+  const approved = allApproved.map(c => c.operationId)
   if (!approved.length) return
+  const approvedSet = new Set(approved)
+  const brokenRelation = allApproved.find(c => c._targetForm === '场景表' && c.relatedYuqiCardId && !approvedSet.has(c.relatedYuqiCardId))
+  if (brokenRelation) {
+    showMessage('场景关联了本次生成的预期，请先批准对应预期卡片', 'error')
+    return
+  }
+  // 收集 UI 中用户修改过的字段值
+  const fieldUpdates = {}
+  const cardOverrides = {}
+  for (const item of allApproved) {
+    const up = {}
+    if (item._targetForm === '预期表') {
+      if (item.status) up['预期状态'] = item.status
+      if (item.is_first_value) up['是否第一价值实现预期'] = item.is_first_value
+    }
+    if (Object.keys(up).length) fieldUpdates[item.operationId] = up
+    // 始终带 target_form，后端用它覆盖 OPERATION_CARD_STORE 中的旧值
+    const override = { target_form: item._targetForm }
+    if (item._targetForm === '场景表') {
+      override.related_yuqi_id = item.relatedYuqiId || ''
+      override.related_yuqi_card_id = item.relatedYuqiCardId || ''
+      override.related_yuqi_source = item.relatedYuqiCardId ? 'generated' : (item.relatedYuqiId ? 'existing' : '')
+      override.related_yuqi_summary = item.relatedYuqiSummary || ''
+      override.related_yuqi_reason = item.relatedYuqiReason || ''
+    }
+    cardOverrides[item.operationId] = override
+  }
   submitting.value = true
   try {
-    const resp = await executeCards({ transcript_id: selectedId.value, card_ids: approved }, effectiveCompanyId.value)
+    const resp = await executeCards(
+      { transcript_id: selectedId.value, card_ids: approved, field_updates: fieldUpdates, card_overrides: cardOverrides },
+      effectiveCompanyId.value
+    )
     const results = resp.results || []
     const ok = results.filter(r => r.execute_status === 'success').length
     const fail = results.length - ok

@@ -550,6 +550,102 @@ async def _llm_post_with_retry(url: str, headers: dict, payload: dict, max_retri
     raise RuntimeError(f"比较 LLM 请求重试 {max_retries} 次后仍失败: {last_exc}")
 
 
+def _compact_text(value: Any, limit: int = 80) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text if len(text) <= limit else f"{text[:limit]}..."
+
+
+def _grouped_card_text(card: dict[str, Any]) -> str:
+    values = [str(card.get("primary_value") or "")]
+    for item in (card.get("item_by_field") or {}).values():
+        val = str(item.get("new_value") or "").strip()
+        if val and val not in values:
+            values.append(val)
+    return " ".join(values)
+
+
+def _yuqi_row_summary(row: dict[str, Any], mapping: dict[str, Any]) -> str:
+    primary_widget = (
+        mapping.get("预期表", {})
+        .get("field_mapping", {})
+        .get("预期简述", {})
+        .get("widget", "detail_brief")
+    )
+    return str(
+        row.get(primary_widget)
+        or row.get("detail_brief")
+        or row.get("detail")
+        or row.get("_id")
+        or ""
+    ).strip()
+
+
+def _clean_optional_id(value: Any) -> str:
+    text = str(value or "").strip()
+    return "" if text.lower() in {"", "null", "none", "无", "不关联"} else text
+
+
+def _resolve_related_yuqi_from_decision(
+    *,
+    decision: dict[str, Any],
+    grouped: dict[str, dict[str, Any]],
+    decisions_by_group_key: dict[str, dict[str, Any]],
+    existing_rows_by_form: dict[str, list[dict[str, Any]]],
+    mapping: dict[str, Any],
+) -> dict[str, Any]:
+    reason = str(decision.get("related_yuqi_reason") or decision.get("relation_reason") or "").strip()
+    confidence_raw = decision.get("related_yuqi_confidence")
+    confidence: float | None = None
+    try:
+        if confidence_raw is not None:
+            confidence = max(0.0, min(1.0, float(confidence_raw)))
+    except (TypeError, ValueError):
+        confidence = None
+
+    related_id = _clean_optional_id(
+        decision.get("related_yuqi_id")
+        or decision.get("related_expectation_id")
+        or decision.get("related_record_id")
+    )
+    if related_id:
+        for row in existing_rows_by_form.get("预期表", []):
+            if str(row.get("_id") or "") == related_id:
+                return {
+                    "related_yuqi_id": related_id,
+                    "related_yuqi_card_id": None,
+                    "related_yuqi_source": "existing",
+                    "related_yuqi_summary": _compact_text(_yuqi_row_summary(row, mapping)),
+                    "related_yuqi_reason": reason,
+                    "related_yuqi_confidence": confidence,
+                }
+
+    group_keys = list(grouped.keys())
+    related_group_key = _clean_optional_id(decision.get("related_yuqi_group_key"))
+    related_index = decision.get("related_yuqi_index") or decision.get("related_expectation_index")
+    if not related_group_key and related_index not in (None, ""):
+        try:
+            idx = int(str(related_index).strip()) - 1
+            if 0 <= idx < len(group_keys):
+                related_group_key = group_keys[idx]
+        except (TypeError, ValueError):
+            related_group_key = ""
+
+    if related_group_key and related_group_key in grouped:
+        target = grouped[related_group_key]
+        target_decision = decisions_by_group_key.get(related_group_key) or {}
+        if target.get("target_form") == "预期表" and target_decision.get("operation") in {"create", "update"}:
+            return {
+                "related_yuqi_id": None,
+                "related_yuqi_card_id": target.get("card_id"),
+                "related_yuqi_source": "generated",
+                "related_yuqi_summary": _compact_text(target.get("primary_value")),
+                "related_yuqi_reason": reason,
+                "related_yuqi_confidence": confidence,
+            }
+
+    return {}
+
+
 async def _call_llm_comparison(
     *,
     llm_cfg: dict[str, str],
@@ -591,7 +687,7 @@ async def _call_llm_comparison(
 
     # 构建待比对的新数据描述
     new_items_lines = []
-    for gk, card in grouped.items():
+    for idx, (gk, card) in enumerate(grouped.items(), start=1):
         target_form = card.get("target_form", "未知")
         primary_value = card.get("primary_value", "")
         non_primary = [
@@ -600,7 +696,7 @@ async def _call_llm_comparison(
             if fk != card.get("primary_field")
         ]
         extras = "；".join(non_primary) if non_primary else ""
-        new_items_lines.append(f"  - 表单: {target_form} | 核心: {primary_value} | 额外字段: {extras}")
+        new_items_lines.append(f"  {idx}. group_key: {gk} | 表单: {target_form} | 核心: {primary_value} | 额外字段: {extras}")
     new_items_text = "\n".join(new_items_lines)
 
     # system prompt
@@ -628,6 +724,10 @@ async def _call_llm_comparison(
   {
     "operation": "create | update | skip",
     "matched_record_id": null,
+    "related_yuqi_id": null,
+    "related_yuqi_index": null,
+    "related_yuqi_reason": "",
+    "related_yuqi_confidence": null,
     "reason": "判断理由"
   }
 ]
@@ -636,7 +736,16 @@ async def _call_llm_comparison(
 注意：
 - 数组顺序与输入的新数据顺序一致
 - matched_record_id 只在 update 时填写已有记录的完整 _id（例如 '67f9002404ad14d923d362fb'），create/skip 时为 null
+- 只有“场景表”条目需要判断 related_yuqi：如果关联已有预期，填写 related_yuqi_id；如果关联本次新提取的预期，填写 related_yuqi_index（输入序号，1 开始）；无法确定时都填 null
 - reason 必须用中文说明判断依据"""
+
+    association_prompt = """## 场景关联预期规则
+- 每条“场景表”数据都要额外判断是否属于某条客户预期下的具体落地场景。
+- 可以关联“已有档案数据”里的预期，也可以关联“新提取的数据”里同批生成的预期。
+- 关联已有预期时，填写 related_yuqi_id 为该预期完整 _id。
+- 关联本次生成预期时，填写 related_yuqi_index 为输入列表里的预期序号；不要填写场景序号。
+- 只有当场景是某个预期的具体执行、应用、方案、流程或指标承接时才关联；只是同属一个客户或弱相关时不要关联。
+- related_yuqi_reason 用一句中文说明为什么关联；related_yuqi_confidence 填 0 到 1 的置信度。"""
 
     user_prompt = f"""## 已有档案数据
 
@@ -648,7 +757,7 @@ async def _call_llm_comparison(
 
 请逐条判断每条新数据与已有档案的关系（create / update / skip），按相同顺序返回 JSON 数组。"""
 
-    system_prompt = user_prompt_override or default_system_prompt
+    system_prompt = f"{user_prompt_override or default_system_prompt}\n\n{association_prompt}"
 
     url = f"{base_url}/chat/completions"
     messages = [
@@ -694,7 +803,18 @@ async def _call_llm_comparison(
     # 兜底：如果 LLM 全判 create 但明明有已有记录，回退到字符串匹配
     all_create = all(d.get("operation") == "create" for d in decisions)
     has_existing = any(len(rows) > 0 for rows in existing_rows_by_form.values())
-    if all_create and has_existing:
+    has_related_yuqi = any(
+        _clean_optional_id(
+            d.get("related_yuqi_id")
+            or d.get("related_expectation_id")
+            or d.get("related_record_id")
+            or d.get("related_yuqi_group_key")
+        )
+        or d.get("related_yuqi_index")
+        or d.get("related_expectation_index")
+        for d in decisions
+    )
+    if all_create and has_existing and not has_related_yuqi:
         import logging
         logger = logging.getLogger("zhidang")
         logger.warning("LLM returned all-create but existing records found, raw decisions: %s", json.dumps(decisions, ensure_ascii=False)[:500])
@@ -712,6 +832,7 @@ def _build_cards_from_llm_decisions(
 ) -> list[dict[str, Any]]:
     """根据 LLM 的 decisions 构建 operation_cards。"""
     cards: list[dict[str, Any]] = []
+    decisions_by_group_key = {str(item.get("group_key") or ""): item for item in decisions}
 
     for decision in decisions:
         gk = decision.get("group_key")
@@ -763,6 +884,16 @@ def _build_cards_from_llm_decisions(
             "lookup_widget": str(grouped_card.get("lookup_widget") or ""),
             "change_items": change_items,
         }
+        if target_form == "场景表":
+            card.update(
+                _resolve_related_yuqi_from_decision(
+                    decision=decision,
+                    grouped=grouped,
+                    decisions_by_group_key=decisions_by_group_key,
+                    existing_rows_by_form=existing_rows_by_form,
+                    mapping=mapping,
+                )
+            )
         safe = check_operation_cards([card], form_cfg)[0]
         cards.append(safe)
     return cards
@@ -797,6 +928,56 @@ def _build_cards_by_string_match(
                 best_score = score
                 best_row = row
         return best_row if best_score >= threshold else None
+
+    def _best_related_yuqi(scene_card: dict[str, Any]) -> dict[str, Any]:
+        scene_text = _grouped_card_text(scene_card)
+        candidates: list[dict[str, Any]] = []
+
+        for row in existing_rows_by_form.get("预期表", []):
+            related_id = str(row.get("_id") or "").strip()
+            if not related_id:
+                continue
+            summary = _yuqi_row_summary(row, mapping)
+            candidates.append(
+                {
+                    "source": "existing",
+                    "id": related_id,
+                    "summary": summary,
+                    "text": " ".join([summary, str(row.get("detail") or "")]),
+                }
+            )
+
+        for candidate_card in grouped.values():
+            if candidate_card.get("target_form") != "预期表":
+                continue
+            candidates.append(
+                {
+                    "source": "generated",
+                    "card_id": candidate_card.get("card_id"),
+                    "summary": str(candidate_card.get("primary_value") or ""),
+                    "text": _grouped_card_text(candidate_card),
+                }
+            )
+
+        best_score = 0.0
+        best: dict[str, Any] | None = None
+        for candidate in candidates:
+            score = _similarity(scene_text, candidate.get("text", ""))
+            if score > best_score:
+                best_score = score
+                best = candidate
+
+        if not best or best_score < 0.42:
+            return {}
+        base = {
+            "related_yuqi_source": best["source"],
+            "related_yuqi_summary": _compact_text(best.get("summary")),
+            "related_yuqi_reason": "根据场景内容与预期内容相似自动关联",
+            "related_yuqi_confidence": round(best_score, 3),
+        }
+        if best["source"] == "existing":
+            return {**base, "related_yuqi_id": best.get("id"), "related_yuqi_card_id": None}
+        return {**base, "related_yuqi_id": None, "related_yuqi_card_id": best.get("card_id")}
 
     cards: list[dict[str, Any]] = []
     for grouped_card in grouped.values():
@@ -839,6 +1020,8 @@ def _build_cards_by_string_match(
             "lookup_widget": str(grouped_card.get("lookup_widget") or ""),
             "change_items": change_items,
         }
+        if target_form == "场景表":
+            card.update(_best_related_yuqi(grouped_card))
         safe = check_operation_cards([card], form_cfg)[0]
         cards.append(safe)
     return cards

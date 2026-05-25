@@ -318,6 +318,9 @@ async function send(confirm) {
   if (sending.value) return
   if (!confirm && !input.value.trim()) return
   const text = confirm ? '确认执行' : input.value.trim()
+  // 用户打字「确认/是的/好的/可以」且有待确认操作时，自动走 confirm 流程
+  const confirmWords = /^(确认|是的|好的|可以|ok|yes|对|行|好|是|嗯|1)$/i
+  const actualConfirm = confirm || (confirmWords.test(text) && needsConfirm.value)
   sending.value = true
   try {
     messages.value.push({ role: 'user', text })
@@ -325,7 +328,7 @@ async function send(confirm) {
       message: text,
       company_id: customerStore.currentCustomer?.company_id || null,
       session_id: chatSessionId.value,
-      confirm,
+      confirm: actualConfirm,
     }, { timeout: 300000 })
     messages.value.push({ role: 'assistant', text: data.reply })
     chatSessionId.value = data.session_id || chatSessionId.value
