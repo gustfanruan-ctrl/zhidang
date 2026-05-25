@@ -1,4 +1,5 @@
 最后更新：2026-05-25 by Claude Code session
+当前主分支：**`feature/followup-records-pipeline`**（未合并到 master，包含所有最新修复）
 
 # 智档 (ZhiDang) 项目手册
 
