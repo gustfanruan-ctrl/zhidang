@@ -2357,51 +2357,64 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         api_key = runtime_cfg.get("api_key") or ""
         app_id = runtime_cfg.get("app_id") or ""
 
-        # 前端传入 company_id 时覆盖卡片 customer_id 并落盘到 DB + OPERATION_CARD_STORE
+        # ── 应用前端传入的所有覆写（company_id / card_overrides / field_updates）──
+        logger.info(f"[DEBUG] execute: company_id='{req.company_id}' card_overrides={list(req.card_overrides.keys())[:5]} field_updates={list(req.field_updates.keys())[:5]} approved={len(approved)}")
+
         if req.company_id:
             for card in approved:
                 card["customer_id"] = req.company_id
-            # 同步写入 OPERATION_CARD_STORE 中所有卡片
-            for card in cards:
-                card["customer_id"] = req.company_id
-            # 同步写入 DB
-            t = db.get(Transcript, req.transcript_id) or db.get(FollowupRecord, req.transcript_id)
-            if t and t.agent_b_result:
-                result = dict(t.agent_b_result.get("result", {}) or {})
-                result["operation_cards"] = cards
-                t.agent_b_result = {**t.agent_b_result, "result": result}
-                db.commit()
-            logger.info("[DEBUG] execute: overrode customer_id=%s on %d approved cards (all %d in store persisted to DB)",
-                       req.company_id, len(approved), len(cards))
 
-        # 合并前端传回的字段更新（如 status、is_first_value 等用户修改项）
-        if req.field_updates:
-            for card in approved:
-                cid = card.get("card_id")
-                updates = req.field_updates.get(cid, {})
-                if not updates:
-                    continue
-                change_items = card.get("change_items")
+        for card in approved:
+            cid = card.get("card_id")
+            # target_form override（用户把场景改成预期）→ 同步切 lookup_widget + entry_id
+            ov = req.card_overrides.get(cid, {})
+            if ov.get("target_form"):
+                card["target_form"] = ov["target_form"]
+                new_fc = forms_cfg.get(ov["target_form"], {})
+                card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
+            # field_updates
+            up = req.field_updates.get(cid, {})
+            if up:
+                change_items = card.get("change_items") or []
+                for item in change_items:
+                    fn = item.get("field_name")
+                    if fn in up:
+                        item["new_value"] = up[fn]
+                # 对 change_items 中不存在的字段，从 field_mapping 查 widget 后追加
+                form_cfg = forms_cfg.get(card.get("target_form", ""), {})
+                field_mapping = form_cfg.get("field_mapping") or {}
+                existing_fields = {it.get("field_name") for it in change_items}
+                for field_name, new_val in up.items():
+                    if field_name in existing_fields:
+                        continue
+                    mapped = field_mapping.get(field_name)
+                    if mapped and isinstance(mapped, dict):
+                        change_items.append({
+                            "field_name": field_name,
+                            "widget_name": str(mapped.get("widget", "")),
+                            "old_value": None,
+                            "new_value": new_val,
+                        })
                 if change_items:
-                    for item in change_items:
-                        fn = item.get("field_name")
-                        if fn in updates:
-                            item["new_value"] = updates[fn]
-                    # 如果 field_updates 中有字段在 change_items 中不存在，追加新的 change item
-                    form_cfg = forms_cfg.get(card.get("target_form", ""), {})
-                    field_mapping = form_cfg.get("field_mapping") or {}
-                    existing_fields = {it.get("field_name") for it in change_items}
-                    for field_name, new_val in updates.items():
-                        if field_name in existing_fields:
-                            continue
-                        mapped = field_mapping.get(field_name)
-                        if mapped and isinstance(mapped, dict):
-                            change_items.append({
-                                "field_name": field_name,
-                                "widget_name": str(mapped.get("widget", "")),
-                                "old_value": None,
-                                "new_value": new_val,
-                            })
+                    card["change_items"] = change_items
+
+        # ── 全部覆写落盘到 OPERATION_CARD_STORE + DB ──
+        for card in cards:
+            if req.company_id:
+                card["customer_id"] = req.company_id
+            cid = card.get("card_id")
+            ov = req.card_overrides.get(cid, {})
+            if ov.get("target_form"):
+                card["target_form"] = ov["target_form"]
+                new_fc = forms_cfg.get(ov["target_form"], {})
+                card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
+        t = db.get(Transcript, req.transcript_id) or db.get(FollowupRecord, req.transcript_id)
+        if t and t.agent_b_result:
+            result = dict(t.agent_b_result.get("result", {}) or {})
+            result["operation_cards"] = cards
+            t.agent_b_result = {**t.agent_b_result, "result": result}
+            db.commit()
+            logger.info("[DEBUG] execute: persisted %d cards to DB", len(cards))
         if not api_key or not app_id:
             results = [{"card_id": c.get("card_id"), "execute_status": "skipped", "error": "jiandaoyun_api_key_not_configured"} for c in approved]
             return {"success": True, "results": results}
@@ -3470,7 +3483,9 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     if not jiandaoyun_follower and _user_name(user) not in ("unknown", "admin", "demo"):
         jiandaoyun_follower = _user_name(user)
 
+    review_id = str(uuid4())
     jiandaoyun_data = {
+        "review_id": {"value": review_id},
         "com_name": {"value": jiandaoyun_com_name},
         "follow_type": {"value": data.get("follow_type", "")},
         "review_date": {"value": review_date},
@@ -3509,11 +3524,16 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     if genjin_tags:
         subform_rows = []
         for tag in genjin_tags:
-            subform_rows.append({
+            row = {
+                "genjin_uuid": {"value": str(uuid4())},
                 "genjin_level1": {"value": tag.get("level1", "")},
                 "genjin_level2": {"value": tag.get("level2", "")},
                 "genjin_level3": {"value": tag.get("level3", "")},
-            })
+            }
+            tid = tag.get("tag_id", "")
+            if tid:
+                row["genjin_id"] = {"value": {"id": tid}}
+            subform_rows.append(row)
         jiandaoyun_data["genjin"] = {"value": subform_rows}
 
     # 联系人子表单

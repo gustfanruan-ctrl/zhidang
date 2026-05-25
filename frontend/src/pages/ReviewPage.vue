@@ -551,17 +551,26 @@ function getLevel3Options(level1, level2) {
   const level2Item = level1Item.children.find(item => item.label === level2)
   return level2Item ? level2Item.children : []
 }
+function findTagId(level1, level2) {
+  const l1 = tagTree.value.find(item => item.level1 === level1)
+  if (!l1) return ''
+  const l2 = l1.children.find(item => item.label === level2)
+  return l2?.tag_id || ''
+}
 function updateTagLevel2(index) {
   reviewData.value.genjin_tags[index].level2 = ''
   reviewData.value.genjin_tags[index].level3 = ''
+  reviewData.value.genjin_tags[index].tag_id = ''
 }
 function updateTagLevel3(index) {
   reviewData.value.genjin_tags[index].level3 = ''
+  const tag = reviewData.value.genjin_tags[index]
+  tag.tag_id = findTagId(tag.level1, tag.level2)
 }
 function addTag() {
   if (!reviewData.value) return
   if (!reviewData.value.genjin_tags) reviewData.value.genjin_tags = []
-  reviewData.value.genjin_tags.push({ level1: '', level2: '', level3: '' })
+  reviewData.value.genjin_tags.push({ level1: '', level2: '', level3: '', tag_id: '' })
 }
 function removeTag(index) {
   reviewData.value.genjin_tags.splice(index, 1)
@@ -625,12 +634,12 @@ async function submitReview() {
       follow_type: reviewData.value.follow_type,
       review_date: reviewData.value.review_date,
       review_record: reviewData.value.review_record,
+      comid: customerStore.currentCustomer?.com_id || '',
       genjin_tags: reviewData.value.genjin_tags || [],
       contname: selectedContact.value?.cont_name || "",
       contid: selectedContact.value?.cont_id || "",
       selected_contact: selectedContact.value || null,
       selected_tasks: taskList.value.filter(t => selectedTaskIds.value.includes(t.task_id)),
-      contid: '',
       yuqi_id: reviewData.value.yuqi_id || '',
       yuqi_first_value: reviewData.value.yuqi_first_value || '',
       relevent_tag: reviewData.value.relevent_tag || []
