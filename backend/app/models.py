@@ -37,6 +37,7 @@ class User(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     onboarding_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     role: Mapped[str] = mapped_column(String(20), default="user", nullable=False)  # "superadmin" | "user"
+    followup_review_template: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
 
 
 class SystemConfig(Base, TimestampMixin):

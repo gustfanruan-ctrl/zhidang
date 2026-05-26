@@ -38,6 +38,12 @@ from .services.jiandaoyun_writer import JiandaoyunWriter
 from .services.openai_compatible_agent_client import OpenAICompatibleAgentClient
 from .services.operation_executor import execute_cards
 from .services.cas_auth import CasAuthError, cas_auth_service
+from .services.followup_review_template import (
+    build_followup_review_system_prompt,
+    load_followup_review_template,
+    render_followup_review_record,
+    save_followup_review_template,
+)
 from .services.power_map_service import _build_merge_context, _ctx_to_getinfo_response, _drop_session, _execute_harness_stream, _fetch_from_external, _get_power_map_config, _get_session, _new_session_id, _node_from_bi_dict, _store_session, chat_power_map, chat_power_map_v2, commit_power_map_session, confirm_power_map, discard_power_map_session, get_power_map, preview_power_map, relayout_power_map
 from .services import sandbox_infra
 from .services.sandbox_infra import (
@@ -1090,6 +1096,19 @@ def update_onboarding(payload: dict[str, Any], user: dict[str, Any] = Depends(re
     return {"onboarding_enabled": bool(enabled)}
 
 
+@app.get("/api/v1/me/followup-review-template")
+def get_followup_review_template(user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    return load_followup_review_template(db, user)
+
+
+@app.put("/api/v1/me/followup-review-template")
+def update_followup_review_template(payload: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    try:
+        return save_followup_review_template(db, user, payload or {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.get("/api/v1/admin/users")
 def admin_users(q: str = "", page: int = 1, limit: int = 20, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
     stmt = select(User)
@@ -1490,9 +1509,6 @@ async def transcript_upload(files: list[UploadFile] = File(...), company_name_hi
         ".srt": "text",
         ".vtt": "text",
         ".md": "text",
-        ".pdf": "text",
-        ".doc": "text",
-        ".docx": "text",
         ".jpeg": "image",
         ".jpg": "image",
         ".png": "image",
@@ -2096,38 +2112,51 @@ async def customer_changjing(company_id: str, limit: int = 100, db: Session = De
 
 
 @app.get("/api/v1/customers/{company_id}/contacts")
-async def customer_contacts(company_id: str, user: dict[str, Any] = Depends(require_auth)):
+async def customer_contacts(company_id: str, com_id: str = "", user: dict[str, Any] = Depends(require_auth)):
     """Proxy CRM contact list for the customer's com_id."""
     items = CUSTOMER_INDEX_CACHE.get("items", []) or []
     cust = next((c for c in items if c.get("company_id") == company_id), None)
-    com_id = cust.get("com_id", "") if cust else ""
-    if not com_id:
+    effective_com_id = (com_id or "").strip() or (cust.get("com_id", "") if cust else "")
+    if not effective_com_id:
         return {"contacts": [], "warning": "com_id not found in cache"}
-    url = f"https://crm.finereporthelp.com/WebReport/decision/url/pub/crm/data?id=18b1e023fb1b46008b7c16357f0e5c41&secret=123456&contname=&comid={com_id}"
+    url = "https://crm.finereporthelp.com/WebReport/decision/url/pub/crm/data"
+    params = {
+        "id": "18b1e023fb1b46008b7c16357f0e5c41",
+        "secret": "123456",
+        "contname": "",
+        "comid": effective_com_id,
+    }
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url)
+        resp = await client.get(url, params=params)
     try:
         data = resp.json()
-        return {"contacts": data.get("data", [])}
+        return {"contacts": data.get("data", []), "com_id": effective_com_id}
     except Exception:
         return {"contacts": [], "error": "CRM contact API failed"}
 
 
 @app.get("/api/v1/customers/{company_id}/tasks")
-async def customer_tasks(company_id: str, username: str = "", user: dict[str, Any] = Depends(require_auth)):
+async def customer_tasks(company_id: str, username: str = "", com_id: str = "", user: dict[str, Any] = Depends(require_auth)):
     """Proxy CRM task list for the customer's com_id."""
     items = CUSTOMER_INDEX_CACHE.get("items", []) or []
     cust = next((c for c in items if c.get("company_id") == company_id), None)
-    com_id = cust.get("com_id", "") if cust else ""
-    if not com_id:
+    effective_com_id = (com_id or "").strip() or (cust.get("com_id", "") if cust else "")
+    if not effective_com_id:
         return {"tasks": [], "warning": "com_id not found in cache"}
     effective_username = username or user.get("integrate_id") or user.get("username", "")
-    url = f"https://crm.finereporthelp.com/WebReport/decision/url/pub/crm/data?id=0aefe1a17d854ca18c2430c39fa0e3b2&secret=123456&com_id={com_id}&username={effective_username}"
+    url = "https://crm.finereporthelp.com/WebReport/decision/url/pub/crm/data"
+    params = {
+        "id": "0aefe1a17d854ca18c2430c39fa0e3b2",
+        "secret": "123456",
+        "com_id": effective_com_id,
+        "username": effective_username,
+    }
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url)
+        resp = await client.get(url, params=params)
     try:
         data = resp.json()
-        return {"tasks": data.get("data", [])}
+        tasks = data.get("data", [])
+        return {"tasks": tasks, "com_id": effective_com_id}
     except Exception:
         return {"tasks": [], "error": "CRM task API failed"}
 
@@ -3546,6 +3575,9 @@ async def generate_review(data: dict[str, Any], user: dict[str, Any] = Depends(r
     
     transcript_text = (data.get("transcript_text") or data.get("content") or "").strip()
     company_name = (data.get("company_name") or "").strip()
+    images = (data.get("images") or [])
+    if not transcript_text and images:
+        transcript_text = "请根据上传图片内容生成结构化跟进记录。"
     if not transcript_text or not company_name:
         raise HTTPException(status_code=400, detail="缺少 transcript_text 或 company_name")
     t0 = time.monotonic()
@@ -3573,24 +3605,29 @@ async def generate_review(data: dict[str, Any], user: dict[str, Any] = Depends(r
         tag_tree_data = []
 
     reviewer_name = _user_name(user)
-    system_prompt = f"""你是帆软内部的客户成功记录员。
-从会议转写中提取结构化跟进记录。
-输出纯 JSON，包含以下字段：
-        follow_type：从"线上跟进/线下跟进/内部沟通"选一个
-review_date：YYYY-MM-DD
-review_record：严格按以下格式输出：
-【跟进目的】一句话概括，10字以内
-【沟通详情】客观详细记录沟通内容，保留所有数字、版本号、规模等具体信息
-【附件/kms链接】暂无
-【参与人】我方：{reviewer_name}  客户方：xxx（职位/部门）
-genjin_tags：数组，每项 {{level1, level2, level3}}，从以下选项中选择，level3 可为空字符串：
-{json.dumps(tag_tree_data, ensure_ascii=False, indent=2)}
-contact_names：字符串，客户侧参与人
-if_tuisong：默认"否"
-请只输出纯 JSON，不要用 markdown 代码块包裹，不要添加任何额外文字。"""
+    template_bundle = load_followup_review_template(db, user)
+    template_sections = template_bundle.get("sections") or []
+    system_prompt = build_followup_review_system_prompt(reviewer_name, tag_tree_data, template_sections)
 
-    images = (data.get("images") or [])
-    user_prompt = f"会议转写内容：\n{transcript_text}\n\n客户名称：\n{company_name}\n\n请生成结构化的跟进记录。"
+    enabled_template_sections = [section for section in template_sections if section.get("enabled", True)]
+    template_hint_lines = []
+    for section in enabled_template_sections:
+        title = str(section.get("title") or "").strip()
+        instruction = str(section.get("instruction") or "").strip()
+        if title and instruction:
+            template_hint_lines.append(f"- {title}：{instruction}")
+    template_hint = "\n".join(template_hint_lines)
+
+    user_prompt = f"""会议转写内容：
+{transcript_text}
+
+客户名称：
+{company_name}
+
+正文模板：
+{template_hint}
+
+请按模板生成结构化跟进记录。"""
 
     # Build user message (multimodal if images provided)
     if images and isinstance(images, list) and len(images) > 0:
@@ -3626,7 +3663,14 @@ if_tuisong：默认"否"
                  status="ok", final_status="ok")
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        return json.loads(content)
+        raw_result = json.loads(content)
+        review_sections = raw_result.get("review_sections")
+        rendered_review_record = render_followup_review_record(template_sections, review_sections) if isinstance(review_sections, dict) else ""
+        if rendered_review_record:
+            raw_result["review_record"] = rendered_review_record
+        else:
+            raw_result["review_record"] = str(raw_result.get("review_record") or "").strip()
+        return raw_result
     except json.JSONDecodeError:
         e2e = (time.monotonic() - t0) * 1000
         emit("review_generate_done", trace_id=trace_id, e2e_ms=e2e, status="json_error", degraded=True)

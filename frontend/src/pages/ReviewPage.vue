@@ -5,6 +5,12 @@
       <h1 class="text-xl font-bold">跟进记录生成</h1>
       <p class="text-sm text-muted-foreground mt-1">上传会议内容，自动生成结构化跟进记录，审核后提交到简道云</p>
     </div>
+    <div class="flex justify-end">
+      <Button variant="outline" size="sm" class="h-8 text-xs" @click="templateEditorOpen = true">
+        <Settings2 class="h-3.5 w-3.5 mr-1.5" />
+        模板设置
+      </Button>
+    </div>
     <!-- Step indicator -->
     <div class="flex items-center justify-center gap-0 py-4">
       <template v-for="(step, idx) in steps" :key="step.num">
@@ -320,15 +326,21 @@
       'bg-emerald-600 text-white': messageType === 'success',
       'bg-destructive text-destructive-foreground': messageType === 'error',
     }">{{ message }}</div>
+    <FollowupReviewTemplateEditor
+      :open="templateEditorOpen"
+      @close="templateEditorOpen = false"
+      @saved="onTemplateSaved"
+    />
   </div>
 </template>
 <script setup>
 import { computed, onMounted, ref, reactive, watch } from 'vue'
-import { Upload, FileText, Image, X, Check, Plus, Send, Sparkles, Trash2, Loader2, ChevronDown } from '@lucide/vue'
+import { Upload, FileText, Image, X, Check, Plus, Send, Sparkles, Trash2, Loader2, ChevronDown, Settings2 } from '@lucide/vue'
 import { api } from '../api'
 import { useCustomerStore } from '../stores/customer'
 import { fetchTranscripts as fetchAllTranscripts } from '../api/operation'
 import { fetchFollowupRecords } from '../api/followup-records'
+import FollowupReviewTemplateEditor from '../components/FollowupReviewTemplateEditor.vue'
 import Card from '../components/ui/Card.vue'
 import CardHeader from '../components/ui/CardHeader.vue'
 import CardTitle from '../components/ui/CardTitle.vue'
@@ -377,6 +389,7 @@ const selectedSourceIds = ref(new Set())
 const loadingSource = ref(false)
 const sourcePanelOpen = ref(false)
 const appliedSources = ref([])
+const templateEditorOpen = ref(false)
 async function loadSourceList() {
   loadingSource.value = true
   try {
@@ -447,8 +460,9 @@ function formatSourceDate(d) {
 }
 const companyId = computed(() => customerStore.currentCustomer?.company_id || '')
 const companyName = computed(() => customerStore.currentCustomer?.company_name || '')
-const canGenerate = computed(() => transcriptText.value.trim() && companyName.value)
 const hasImages = computed(() => uploadedFiles.value.some(f => f.type === 'image'))
+const hasReviewInput = computed(() => transcriptText.value.trim() || hasImages.value)
+const canGenerate = computed(() => hasReviewInput.value && companyName.value)
 const canSubmit = computed(() => reviewData.value && reviewData.value.follow_type && reviewData.value.review_date && reviewData.value.review_record)
 // File methods
 function triggerFileInput() { fileInput.value?.click() }
@@ -510,14 +524,20 @@ function removeFile(idx) {
 async function loadContacts() {
   if (!companyId.value) { contactList.value = []; return }
   try {
-    const { data } = await api.get(`/api/v1/customers/${companyId.value}/contacts`)
+    const params = customerStore.currentCustomer?.com_id
+      ? { com_id: customerStore.currentCustomer.com_id }
+      : {}
+    const { data } = await api.get(`/api/v1/customers/${companyId.value}/contacts`, { params })
     contactList.value = data.contacts || []
   } catch { contactList.value = [] }
 }
 async function loadTasks() {
   if (!companyId.value) { taskList.value = []; return }
   try {
-    const { data } = await api.get(`/api/v1/customers/${companyId.value}/tasks?username=Gust`)
+    const params = customerStore.currentCustomer?.com_id
+      ? { com_id: customerStore.currentCustomer.com_id }
+      : {}
+    const { data } = await api.get(`/api/v1/customers/${companyId.value}/tasks`, { params })
     taskList.value = data.tasks || []
   } catch { taskList.value = [] }
 }
@@ -586,6 +606,10 @@ async function loadConfig() {
     console.error('自定义配置失败', error)
   }
 }
+function onTemplateSaved(payload) {
+  templateEditorOpen.value = false
+  showMessage(payload?.customized ? '模板已保存' : '已恢复默认模板', 'success')
+}
 // Generate
 async function generateReview() {
   if (!canGenerate.value) return
@@ -596,7 +620,7 @@ async function generateReview() {
     const response = await api.post('/api/v1/followup/generate', {
       input_type: hasImages.value ? 'screenshot' : 'text',
       images: uploadedFiles.value.filter(f => f.type === 'image').map(f => f.dataUrl),
-      content: transcriptText.value,
+      content: transcriptText.value || '请根据上传图片内容生成结构化跟进记录。',
       company_id: companyId.value,
       company_name: companyName.value
     })
@@ -671,7 +695,30 @@ watch(() => customerStore.currentCustomer?.company_id, (id, prev) => {
   loadContacts()
   loadTasks()
 })
+async function ensureCustomerContext() {
+  if (customerStore.currentCustomer?.company_id) return
+  customerStore.hydrateCurrentCustomer()
+  if (customerStore.currentCustomer?.company_id) return
+
+  const legacyCompanyId = localStorage.getItem('zhidang_company_id') || ''
+  if (!legacyCompanyId) return
+
+  try {
+    if (!customerStore.customers.length) {
+      await customerStore.fetchCustomers(false)
+    }
+    const selected = customerStore.customers.find((c) =>
+      c.company_id === legacyCompanyId || c.com_id === legacyCompanyId
+    )
+    if (selected) {
+      await customerStore.switchCustomer(selected, 'hydrate')
+    }
+  } catch {
+    // Keep the review page usable even if the customer list refresh fails.
+  }
+}
 onMounted(async () => {
+  await ensureCustomerContext()
   await loadContacts()
   await loadTasks()
   await loadTagTree()
