@@ -211,6 +211,33 @@
           <Textarea v-model="reviewData.review_record" rows="12" />
         </div>
         <div class="space-y-1.5">
+          <div class="flex items-center justify-between gap-2">
+            <Label>关联预期（可选）</Label>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-6 px-2 text-[10px]"
+              :disabled="yuqiLoading || !companyId"
+              @click="loadCustomerYuqiOptions(companyId)"
+            >
+              <Loader2 v-if="yuqiLoading" class="h-3 w-3 mr-1 animate-spin" />
+              刷新
+            </Button>
+          </div>
+          <SelectNative v-model="reviewData.yuqi_id" class="w-full">
+            <option value="">不关联</option>
+            <option
+              v-if="reviewData.yuqi_id && !hasReviewYuqiOption(reviewData.yuqi_id)"
+              :value="reviewData.yuqi_id"
+            >当前：{{ truncateLabel(selectedYuqiSummary || reviewData.yuqi_id) }}</option>
+            <option v-for="opt in reviewYuqiOptions" :key="opt.id" :value="opt.id">{{ opt.label }}</option>
+          </SelectNative>
+          <p v-if="selectedYuqiSummary" class="text-xs text-muted-foreground break-words">已关联：{{ selectedYuqiSummary }}</p>
+          <p v-else-if="yuqiLoading" class="text-xs text-muted-foreground">正在加载当前客户已有预期...</p>
+          <p v-else-if="yuqiWarning" class="text-xs text-amber-600">{{ yuqiWarning }}</p>
+          <p v-else-if="companyId && !reviewYuqiOptions.length" class="text-xs text-muted-foreground">当前客户暂无可关联预期</p>
+        </div>
+        <div class="space-y-1.5">
           <Label>客户方参与人</Label>
           <!-- Selected contact -->
           <div v-if="selectedContact" class="flex items-center justify-between bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
@@ -390,6 +417,9 @@ const loadingSource = ref(false)
 const sourcePanelOpen = ref(false)
 const appliedSources = ref([])
 const templateEditorOpen = ref(false)
+const yuqiLoading = ref(false)
+const yuqiWarning = ref('')
+const customerYuqiItems = ref([])
 async function loadSourceList() {
   loadingSource.value = true
   try {
@@ -464,6 +494,18 @@ const hasImages = computed(() => uploadedFiles.value.some(f => f.type === 'image
 const hasReviewInput = computed(() => transcriptText.value.trim() || hasImages.value)
 const canGenerate = computed(() => hasReviewInput.value && companyName.value)
 const canSubmit = computed(() => reviewData.value && reviewData.value.follow_type && reviewData.value.review_date && reviewData.value.review_record)
+const reviewYuqiOptions = computed(() => customerYuqiItems.value
+  .filter(row => row && row._id)
+  .map(row => ({
+    id: row._id,
+    label: truncateLabel(yuqiSummary(row) || row._id, 56),
+    summary: yuqiSummary(row),
+  })))
+const selectedYuqiSummary = computed(() => {
+  const selectedId = reviewData.value?.yuqi_id || ''
+  if (!selectedId) return ''
+  return reviewYuqiOptions.value.find(opt => opt.id === selectedId)?.summary || ''
+})
 // File methods
 function triggerFileInput() { fileInput.value?.click() }
 function onDragOver() { isDragOver.value = true }
@@ -521,6 +563,35 @@ function removeFile(idx) {
   currentStep.value = 1
 }
 // Tag methods
+function truncateLabel(text, limit = 32) {
+  const value = String(text || '').trim()
+  return value.length <= limit ? value : value.slice(0, limit) + '...'
+}
+function yuqiSummary(row) {
+  return String(row?.detail_brief || row?.['预期简述'] || row?.detail || row?._id || '').trim()
+}
+function hasReviewYuqiOption(id) {
+  return reviewYuqiOptions.value.some(opt => opt.id === id)
+}
+async function loadCustomerYuqiOptions(companyIdValue) {
+  const id = String(companyIdValue || '').trim()
+  if (!id || id === 'demo') {
+    customerYuqiItems.value = []
+    yuqiWarning.value = ''
+    return
+  }
+  yuqiLoading.value = true
+  try {
+    const resp = await api.get(`/api/v1/customers/${id}/yuqi`, { params: { limit: 100 } })
+    customerYuqiItems.value = resp.data?.items || []
+    yuqiWarning.value = resp.data?.warning || ''
+  } catch (e) {
+    customerYuqiItems.value = []
+    yuqiWarning.value = e?.response?.data?.detail || '已有预期加载失败'
+  } finally {
+    yuqiLoading.value = false
+  }
+}
 async function loadContacts() {
   if (!companyId.value) { contactList.value = []; return }
   try {
@@ -633,7 +704,9 @@ async function generateReview() {
       if_tuisong: raw.if_tuisong || '否',
       genjin_tags: raw.genjin_tags || [],
       company_name: raw.company_name || companyName.value,
+      yuqi_id: raw.yuqi_id || '',
     }
+    await loadCustomerYuqiOptions(companyId.value)
     currentStep.value = 3
     showMessage('跟进记录生成成功，请审核后提交', 'success')
   } catch (error) {
@@ -691,9 +764,13 @@ watch(() => customerStore.currentCustomer?.company_id, (id, prev) => {
   taskList.value = []
   selectedContactId.value = ''
   selectedTaskIds.value = []
+  customerYuqiItems.value = []
+  yuqiWarning.value = ''
+  if (reviewData.value) reviewData.value.yuqi_id = ''
   loadSourceList()
   loadContacts()
   loadTasks()
+  loadCustomerYuqiOptions(id)
 })
 async function ensureCustomerContext() {
   if (customerStore.currentCustomer?.company_id) return
@@ -724,5 +801,6 @@ onMounted(async () => {
   await loadTagTree()
   await loadConfig()
   await loadSourceList()
+  await loadCustomerYuqiOptions(companyId.value)
 })
 </script>
