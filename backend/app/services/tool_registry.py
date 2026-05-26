@@ -585,6 +585,37 @@ def _clean_optional_id(value: Any) -> str:
     return "" if text.lower() in {"", "null", "none", "无", "不关联"} else text
 
 
+def _normalize_llm_operation(decision: dict[str, Any]) -> tuple[str, str | None]:
+    """Normalize model operation names to the operation-card protocol.
+
+    Older prompts used tool-like names such as update_expectation/update_scenario.
+    The review card schema only accepts create/update/append_subform, with the
+    target form carried separately.
+    """
+    raw = str(
+        decision.get("operation")
+        or decision.get("operation_type")
+        or decision.get("type")
+        or decision.get("action")
+        or "skip"
+    ).strip()
+    normalized = _normalize_key(raw)
+    target_form: str | None = None
+
+    if any(token in normalized for token in ["expectation", "yuqi", "预期"]):
+        target_form = "预期表"
+    elif any(token in normalized for token in ["scenario", "changjing", "场景"]):
+        target_form = "场景表"
+
+    if any(token in normalized for token in ["append", "subform", "追加", "子表"]):
+        return "append_subform", target_form
+    if any(token in normalized for token in ["update", "modify", "edit", "change", "更新", "修改"]):
+        return "update", target_form
+    if any(token in normalized for token in ["create", "new", "add", "新增", "新建", "创建"]):
+        return "create", target_form
+    return "skip", target_form
+
+
 def _resolve_related_yuqi_from_decision(
     *,
     decision: dict[str, Any],
@@ -633,7 +664,8 @@ def _resolve_related_yuqi_from_decision(
     if related_group_key and related_group_key in grouped:
         target = grouped[related_group_key]
         target_decision = decisions_by_group_key.get(related_group_key) or {}
-        if target.get("target_form") == "预期表" and target_decision.get("operation") in {"create", "update"}:
+        target_operation, _ = _normalize_llm_operation(target_decision)
+        if target.get("target_form") == "预期表" and target_operation in {"create", "update"}:
             return {
                 "related_yuqi_id": None,
                 "related_yuqi_card_id": target.get("card_id"),
@@ -757,7 +789,16 @@ async def _call_llm_comparison(
 
 请逐条判断每条新数据与已有档案的关系（create / update / skip），按相同顺序返回 JSON 数组。"""
 
-    system_prompt = f"{user_prompt_override or default_system_prompt}\n\n{association_prompt}"
+    custom_prompt = (user_prompt_override or "").strip()
+    custom_prompt_section = ""
+    if custom_prompt and custom_prompt != default_system_prompt:
+        custom_prompt_section = (
+            "\n\n## 管理端补充比对规则（仅作业务判断参考）\n"
+            "如果本节与上面的 JSON 输出格式、operation 枚举或字段名冲突，必须以上面的硬性输出格式为准。\n"
+            f"{custom_prompt}"
+        )
+
+    system_prompt = f"{default_system_prompt}{custom_prompt_section}\n\n{association_prompt}"
 
     url = f"{base_url}/chat/completions"
     messages = [
@@ -801,7 +842,7 @@ async def _call_llm_comparison(
         decisions[i]["group_key"] = gk
 
     # 兜底：如果 LLM 全判 create 但明明有已有记录，回退到字符串匹配
-    all_create = all(d.get("operation") == "create" for d in decisions)
+    all_create = all(_normalize_llm_operation(d)[0] == "create" for d in decisions)
     has_existing = any(len(rows) > 0 for rows in existing_rows_by_form.values())
     has_related_yuqi = any(
         _clean_optional_id(
@@ -836,7 +877,7 @@ def _build_cards_from_llm_decisions(
 
     for decision in decisions:
         gk = decision.get("group_key")
-        operation = decision.get("operation", "skip")
+        operation, operation_target_form = _normalize_llm_operation(decision)
         if operation == "skip":
             continue
         grouped_card = grouped.get(gk)
@@ -844,6 +885,8 @@ def _build_cards_from_llm_decisions(
             continue
 
         target_form = str(grouped_card.get("target_form") or "")
+        if operation_target_form and operation_target_form != target_form:
+            target_form = operation_target_form
         form_cfg = grouped_card.get("form_cfg") or mapping.get(target_form, {})
         item_by_field = grouped_card.get("item_by_field") or {}
         primary_value = str(grouped_card.get("primary_value") or "")
@@ -853,12 +896,20 @@ def _build_cards_from_llm_decisions(
 
         # 找到匹配的已有记录
         matched_row = None
-        matched_id = decision.get("matched_record_id")
+        matched_id = (
+            decision.get("matched_record_id")
+            or decision.get("match_id")
+            or decision.get("record_id")
+            or decision.get("data_id")
+            or decision.get("target_record_id")
+        )
         if operation == "update" and matched_id:
             for row in existing_rows_by_form.get(target_form, []):
                 if str(row.get("_id", "")) == matched_id:
                     matched_row = row
                     break
+        if operation == "update" and not matched_row:
+            continue
 
         change_items: list[dict[str, Any]] = []
         for field_name, item in item_by_field.items():
