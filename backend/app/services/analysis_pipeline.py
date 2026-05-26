@@ -16,6 +16,18 @@ from ..models import FollowupRecord, Transcript, SystemConfig
 logger = logging.getLogger("zhidang.pipeline")
 
 
+def _agent_input_type(raw_input_type: str | None, source_type: str) -> str:
+    """Map persisted record types to AgentExtractionPayload's accepted input_type."""
+    value = (raw_input_type or "").strip()
+    if value in {"text", "image", "mixed"}:
+        return value
+    if value == "screenshot":
+        return "image"
+    if source_type == "followup":
+        return "text"
+    return "text"
+
+
 async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcript") -> None:
     """后台运行提取→比对全流程，结果写入 DB。source_type ∈ {"transcript","followup"}。"""
     # 延迟导入避免循环依赖（main 模块在 app 启动后才完整加载）
@@ -41,8 +53,9 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
 
         trace_id = new_trace("ext")
         char_count = len(transcript.raw_text or "")
+        agent_input_type = _agent_input_type(transcript.input_type, source_type)
         emit("pipeline_started", pipeline_type="extraction", source_type=source_type,
-             input_char_count=char_count, input_type=transcript.input_type or "text",
+             input_char_count=char_count, input_type=agent_input_type,
              trace_id=trace_id)
 
         # ── Phase 1: 提取 ──
@@ -53,7 +66,7 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
 
         TASK_PROGRESS[transcript_id] = {
             "mode": "llm",
-            "input_type": transcript.input_type,
+            "input_type": agent_input_type,
             "current_turn": 0,
             "max_turns": 8,
             "extraction_status": "processing",
@@ -65,7 +78,7 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
         try:
             payload = AgentExtractionPayload(
                 transcript_id=transcript_id,
-                input_type=transcript.input_type or "text",
+                input_type=agent_input_type,
                 content=transcript.raw_text,
                 images=[],
                 transcript={"id": transcript_id, "raw_text": transcript.raw_text},

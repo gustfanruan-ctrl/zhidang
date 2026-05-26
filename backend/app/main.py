@@ -364,7 +364,7 @@ def fetch_customers_for_user(db: Session, user: dict[str, Any]) -> list[dict[str
 
 
 def build_raw_transcript_payload(text: str, fallback_title: str = "未命名转写") -> dict[str, Any]:
-    clean_text = (text or "").strip()
+    clean_text = (text or "").replace("\x00", "").strip()
     first_line = clean_text.splitlines()[0].strip() if clean_text else ""
     title = first_line or fallback_title
     return {"title": title, "raw_text": clean_text, "segments": []}
