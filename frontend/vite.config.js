@@ -14,7 +14,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': 'http://backend:8000',
-      '/health': 'http://backend:8000'
+      '/health': 'http://backend:8000',
+      '/sandbox': 'http://backend:8000',
+      '/static/sandbox': 'http://backend:8000'
     }
   }
 })

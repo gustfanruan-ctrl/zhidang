@@ -33,6 +33,7 @@ from backend.app.models import FollowupRecord
 
 APP_ID = "5dcbcb63d6e30c000692464e"
 ENTRY_ID = "670a28334883adafb152a869"
+CN_TZ = timezone(timedelta(hours=8))
 
 # API key — auto-loaded from SystemConfig if available, else hardcoded fallback
 _API_KEY = None
@@ -52,17 +53,19 @@ def get_api_key() -> str:
     # Try from DB SystemConfig
     try:
         from backend.app.main import ensure_system_config  # noqa: E402
-        from backend.app.services.crypto_utils import decrypt_secret  # noqa: E402
+        from backend.app.crypto_utils import decrypt_secret  # noqa: E402
 
         db = SessionLocal()
-        cfg = ensure_system_config(db)
-        if cfg.jiandaoyun_api_key_encrypted:
-            _API_KEY = decrypt_secret(cfg.jiandaoyun_api_key_encrypted)
+        try:
+            cfg = ensure_system_config(db)
+            if cfg.jiandaoyun_api_key_encrypted:
+                _API_KEY = decrypt_secret(cfg.jiandaoyun_api_key_encrypted) or ""
+                if _API_KEY:
+                    return _API_KEY
+        finally:
             db.close()
-            return _API_KEY
-        db.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[WARN] Could not load JDY API key from SystemConfig: {exc}")
 
     # Fallback — user should set env or file
     _API_KEY = os.environ.get("JDY_API_KEY", "")
@@ -95,9 +98,19 @@ def parse_review_date(row: dict) -> str:
     """Extract review_date as ISO date string, handling 简道云 datetime format."""
     val = row.get("review_date")
     if isinstance(val, str) and val:
-        return val[:10]  # "2026-05-19T12:00:00.000Z" → "2026-05-19"
+        try:
+            dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+            return dt.astimezone(CN_TZ).date().isoformat()
+        except ValueError:
+            return val[:10]
     if isinstance(val, dict):
-        return str(val.get("name") or val.get("value") or "")[:10]
+        raw = str(val.get("name") or val.get("value") or "")
+        if raw:
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                return dt.astimezone(CN_TZ).date().isoformat()
+            except ValueError:
+                return raw[:10]
     return ""
 
 
@@ -123,6 +136,8 @@ async def fetch_with_filter(
     *,
     page_size: int = 100,
     max_pages: int = 200,
+    page_sleep_seconds: float = 1.5,
+    max_retries: int = 5,
 ) -> list[dict]:
     """Fetch records from 简道云 v5 API with date filter and data_id cursor."""
     filter_cond = build_date_filter(start_date, end_date)
@@ -146,15 +161,30 @@ async def fetch_with_filter(
             if data_id:
                 payload["data_id"] = data_id
 
-            resp = await client.post(
-                "https://api.jiandaoyun.com/api/v5/app/entry/data/list",
-                headers=headers,
-                json=payload,
-            )
+            resp = None
+            for attempt in range(max_retries + 1):
+                resp = await client.post(
+                    "https://api.jiandaoyun.com/api/v5/app/entry/data/list",
+                    headers=headers,
+                    json=payload,
+                )
+                if resp.status_code not in {429, 400}:
+                    break
+                try:
+                    err = resp.json()
+                except Exception:
+                    err = {}
+                if err.get("code") not in {8303, 8304} and resp.status_code != 429:
+                    break
+                if attempt >= max_retries:
+                    break
+                wait_seconds = min(90, 10 * (attempt + 1))
+                print(f"  [RATE_LIMIT] page {page + 1}, retry {attempt + 1}/{max_retries} after {wait_seconds}s")
+                await asyncio.sleep(wait_seconds)
 
             if resp.status_code != 200:
                 print(f"[ERROR] API HTTP {resp.status_code}: {resp.text[:300]}")
-                break
+                raise RuntimeError(f"Jiandaoyun fetch failed at page {page + 1}: HTTP {resp.status_code}")
 
             body = resp.json()
             batch = body.get("data", [])
@@ -172,7 +202,7 @@ async def fetch_with_filter(
 
             if len(batch) < page_size:
                 break
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(page_sleep_seconds)
 
     # Client-side filter as safety net (JDY v5 datetime filter is unreliable)
     if all_rows:
@@ -281,6 +311,7 @@ async def main():
     parser.add_argument("--start", help="Start date YYYY-MM-DD (overrides --days)")
     parser.add_argument("--end", help="End date YYYY-MM-DD")
     parser.add_argument("--today", action="store_true", help="Fetch today's records only")
+    parser.add_argument("--recent-days", type=int, help="Fetch a rolling window ending today")
     parser.add_argument("--export-only", action="store_true", help="Export JSON only, skip DB insert")
     parser.add_argument("--output", help="Output JSON file path")
     args = parser.parse_args()
@@ -291,15 +322,20 @@ async def main():
         sys.exit(1)
 
     # Determine date range
-    if args.today:
-        today = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+    if args.recent_days:
+        end = datetime.now(CN_TZ)
+        start = end - timedelta(days=max(1, args.recent_days) - 1)
+        start_date = start.strftime("%Y-%m-%d")
+        end_date = end.strftime("%Y-%m-%d")
+    elif args.today:
+        today = datetime.now(CN_TZ).strftime("%Y-%m-%d")
         start_date = today
         end_date = today
     elif args.start:
         start_date = args.start
         end_date = args.end or args.start
     else:
-        end = datetime.now(timezone.utc).astimezone()
+        end = datetime.now(CN_TZ)
         start = end - timedelta(days=args.days)
         start_date = start.strftime("%Y-%m-%d")
         end_date = end.strftime("%Y-%m-%d")
@@ -309,7 +345,7 @@ async def main():
         outpath = args.output
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        outpath = f"/data/followup_records_{timestamp}.json"
+        outpath = f"/tmp/followup_records_{timestamp}.json"
 
     print(f"[FETCH] Date range: {start_date} → {end_date or 'now'}")
     records = await fetch_with_filter(api_key, start_date, end_date)

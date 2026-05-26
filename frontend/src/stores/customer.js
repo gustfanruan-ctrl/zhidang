@@ -12,10 +12,19 @@ function cacheKey() {
   } catch { return CACHE_KEY_PREFIX + '::anon' }
 }
 
+function readStoredCustomer() {
+  try {
+    const raw = localStorage.getItem('zhidang_current_customer')
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
 export const useCustomerStore = defineStore('customer', {
   state: () => ({
     customers: [],
-    currentCustomer: null,
+    currentCustomer: readStoredCustomer(),
     cacheAt: null,
     lastMode: '',
     lastWarning: '',
@@ -76,13 +85,7 @@ export const useCustomerStore = defineStore('customer', {
       }).catch(() => {})
     },
     hydrateCurrentCustomer() {
-      try {
-        const raw = localStorage.getItem('zhidang_current_customer')
-        if (!raw) return
-        this.currentCustomer = JSON.parse(raw)
-      } catch {
-        this.currentCustomer = null
-      }
+      this.currentCustomer = readStoredCustomer()
     },
     clearContext() {
       this.currentCustomer = null

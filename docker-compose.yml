@@ -37,6 +37,7 @@ services:
     volumes:
       - cache_data:/app/backend/app/output
       - ./backend/static/sandbox:/app/backend/static/sandbox
+      - /opt/data:/opt/data
     depends_on:
       postgres:
         condition: service_healthy

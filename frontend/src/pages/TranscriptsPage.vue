@@ -48,7 +48,7 @@
           <div v-if="selectedFiles.length === 0" class="space-y-2">
             <Upload class="h-10 w-10 mx-auto text-muted-foreground/40" />
             <p class="text-sm font-medium text-muted-foreground">点击或拖拽文件到此处</p>
-            <p class="text-xs text-muted-foreground/60">支持 .txt .srt .vtt .md .pdf .doc .docx .jpg .png .webp，最多 10 个文件</p>
+            <p class="text-xs text-muted-foreground/60">支持 .txt .srt .vtt .md .jpg .png .webp，最多 10 个文件</p>
           </div>
           <div v-else class="text-left space-y-2">
             <div v-for="(f, i) in selectedFiles" :key="i" class="flex items-center gap-3 py-2 px-3 rounded-lg bg-muted/50 border border-border/50">
@@ -68,8 +68,18 @@
           class="hidden"
           multiple
           @change="handleFileSelect"
-          accept=".txt,.srt,.vtt,.md,.pdf,.doc,.docx,.jpg,.jpeg,.png,.webp"
+          accept=".txt,.srt,.vtt,.md,.jpg,.jpeg,.png,.webp"
         >
+
+        <div class="mt-4 space-y-2">
+          <Label class="text-sm text-muted-foreground">手写/粘贴转写内容</Label>
+          <Textarea
+            v-model="manualText"
+            rows="5"
+            class="text-sm"
+            placeholder="可直接粘贴会议转写、客户沟通纪要或零散素材"
+          />
+        </div>
 
         <div v-if="customerStore.currentCustomer" class="mt-4 flex items-center gap-2">
           <Label class="text-sm text-muted-foreground">当前客户：</Label>
@@ -105,7 +115,7 @@
               @click="batchAnalyzeSelected"
             >
               <Loader2 v-if="batchAnalyzing" class="h-3 w-3 mr-1 animate-spin" />
-              分析所选 ({{ selectedIds.size }})
+              合并分析所选 ({{ selectedIds.size }})
             </Button>
             <Badge v-if="selectedIds.size > 0" variant="default">已选 {{ selectedIds.size }} 条</Badge>
             <Badge variant="secondary">{{ transcripts.length }} 条记录</Badge>
@@ -313,7 +323,11 @@
                    :class="{ 'border-emerald-300 bg-emerald-50/50': item.approved, 'border-red-200 bg-red-50/40 opacity-70': item.rejected, 'border-border/60': !item.approved && !item.rejected }">
                 <div class="flex justify-between items-start mb-3 flex-wrap gap-2">
                   <div class="flex items-center gap-1.5 flex-wrap">
-                    <SelectNative v-model="item.status" class="h-7 px-2 py-0 text-xs w-auto">
+                    <SelectNative
+                      :model-value="item.status"
+                      class="h-7 px-2 py-0 text-xs w-auto"
+                      @update:model-value="(v) => updateExpectationField(item.operationId, 'status', v)"
+                    >
                       <option value="未启动">未启动</option>
                       <option value="进行中">进行中</option>
                       <option value="已达成">已达成</option>
@@ -346,17 +360,30 @@
                 <div class="text-sm">
                   <div v-if="isEditing('expectation', index)" class="mb-2">
                     <Label class="text-xs">标题</Label>
-                    <Input v-model="item.summary" class="text-sm mt-1" />
+                    <Input
+                      :model-value="item.summary"
+                      class="text-sm mt-1"
+                      @update:model-value="(v) => updateExpectationField(item.operationId, 'summary', v)"
+                    />
                   </div>
                   <p v-else class="font-semibold mb-1.5 break-words">{{ item.summary || '未命名预期' }}</p>
                   <div v-if="isEditing('expectation', index)" class="mb-2">
                     <Label class="text-xs">描述</Label>
-                    <Textarea v-model="item.description" rows="2" class="text-sm mt-1" />
+                    <Textarea
+                      :model-value="item.description"
+                      rows="2"
+                      class="text-sm mt-1"
+                      @update:model-value="(v) => updateExpectationField(item.operationId, 'description', v)"
+                    />
                   </div>
                   <p v-else class="text-muted-foreground mb-2 break-words">{{ item.description || '暂无描述' }}</p>
                   <div class="flex items-center gap-2 mb-1">
                     <span class="text-xs text-muted-foreground">是否第一价值：</span>
-                    <SelectNative v-model="item.is_first_value" class="h-7 px-2 py-0 text-xs w-auto">
+                    <SelectNative
+                      :model-value="item.is_first_value"
+                      class="h-7 px-2 py-0 text-xs w-auto"
+                      @update:model-value="(v) => updateExpectationField(item.operationId, 'is_first_value', v)"
+                    >
                       <option value="是">是</option>
                       <option value="否">否</option>
                     </SelectNative>
@@ -409,12 +436,21 @@
                 <div class="text-sm">
                   <div v-if="isEditing('scenario', index)" class="mb-2">
                     <Label class="text-xs">标题</Label>
-                    <Input v-model="item.title" class="text-sm mt-1" />
+                    <Input
+                      :model-value="item.title"
+                      class="text-sm mt-1"
+                      @update:model-value="(v) => updateScenarioField(item.operationId, 'title', v)"
+                    />
                   </div>
                   <p v-else class="font-semibold mb-1.5 break-words">{{ item.title || '未命名场景' }}</p>
                   <div v-if="isEditing('scenario', index)" class="mb-2">
                     <Label class="text-xs">描述</Label>
-                    <Textarea v-model="item.description" rows="2" class="text-sm mt-1" />
+                    <Textarea
+                      :model-value="item.description"
+                      rows="2"
+                      class="text-sm mt-1"
+                      @update:model-value="(v) => updateScenarioField(item.operationId, 'description', v)"
+                    />
                   </div>
                   <p v-else class="text-muted-foreground mb-2 break-words">{{ item.description || '暂无描述' }}</p>
                   <div class="mb-2 space-y-1.5">
@@ -565,25 +601,35 @@ const isSuperadmin = computed(() => {
 function toggleSourceMode(mode) {
   if (sourceMode.value === mode) return
   sourceMode.value = mode
-  selectedIds.value = new Set()
   selectedId.value = null
   selectedTranscript.value = null
   loadTranscripts()
 }
 
+function selectionKey(id, mode = sourceMode.value) {
+  return `${mode}:${id}`
+}
+
+function parseSelectionKey(key) {
+  const [mode, ...rest] = String(key || '').split(':')
+  return { mode, id: rest.join(':') }
+}
+
 function toggleRowSelected(id) {
   const next = new Set(selectedIds.value)
-  if (next.has(id)) next.delete(id); else next.add(id)
+  const key = selectionKey(id)
+  if (next.has(key)) next.delete(key); else next.add(key)
   selectedIds.value = next
 }
 
-function isRowSelected(id) { return selectedIds.value.has(id) }
+function isRowSelected(id) { return selectedIds.value.has(selectionKey(id)) }
 
 function onToggleSelectAll(e) {
   const checked = e.target.checked
   const next = new Set(selectedIds.value)
   for (const t of pagedTranscripts.value) {
-    if (checked) next.add(t.id); else next.delete(t.id)
+    const key = selectionKey(t.id)
+    if (checked) next.add(key); else next.delete(key)
   }
   selectedIds.value = next
 }
@@ -606,13 +652,14 @@ async function refreshFollowupFromJDY() {
 const fileInput = ref(null)
 const dragover = ref(false)
 const selectedFiles = ref([])
+const manualText = ref('')
 
 const uploading = ref(false)
 const analyzingIds = ref(new Set())
 const submitting = ref(false)
 const cardMarking = ref(new Set())
 
-const canUpload = computed(() => selectedFiles.value.length > 0 && !!customerStore.currentCustomer && !uploading.value)
+const canUpload = computed(() => (selectedFiles.value.length > 0 || manualText.value.trim()) && !!customerStore.currentCustomer && !uploading.value)
 
 function triggerFileSelect() { fileInput.value.click() }
 
@@ -628,7 +675,7 @@ function handleDrop(event) {
 }
 
 function addFiles(files) {
-  const allowed = ['.txt', '.srt', '.vtt', '.md', '.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.webp']
+  const allowed = ['.txt', '.srt', '.vtt', '.md', '.jpg', '.jpeg', '.png', '.webp']
   for (const f of files) {
     const suffix = '.' + (f.name.split('.').pop() || '').toLowerCase()
     if (!allowed.includes(suffix)) {
@@ -656,9 +703,18 @@ async function uploadAndAnalyze() {
   try {
     const companyName = customerStore.currentCustomer?.company_name || ''
     const companyId = customerStore.currentCustomer?.company_id || ''
-    const result = await uploadTranscript(selectedFiles.value, companyName, companyId)
+    const files = [...selectedFiles.value]
+    if (manualText.value.trim()) {
+      files.push(new File([manualText.value.trim()], `手写转写-${new Date().toISOString().slice(0, 10)}.txt`, { type: 'text/plain' }))
+    }
+    if (files.length > 10) {
+      showMessage('单次最多上传 10 份内容', 'error')
+      return
+    }
+    const result = await uploadTranscript(files, companyName, companyId)
     selectedFiles.value = []
-    showMessage(`上传成功，${result.file_count} 个文件已合并`, 'success')
+    manualText.value = ''
+    showMessage(`创建成功，${result.file_count} 份内容已合并`, 'success')
     await triggerAnalysis(result.transcript_id)
     await loadTranscripts()
   } catch (e) {
@@ -704,34 +760,88 @@ const batchAnalyzing = ref(false)
 
 async function batchAnalyzeSelected() {
   if (batchAnalyzing.value || selectedIds.value.size === 0) return
-  const ids = [...selectedIds.value]
-  const eligible = transcripts.value.filter(t => ids.includes(t.id) && (t.status === 'parsed' || t.status === 'error'))
-  if (eligible.length === 0) {
-    showMessage('所选记录均不可分析（仅"待分析"或"失败"状态可触发）', 'error')
+  if (!customerStore.currentCustomer) {
+    showMessage('请先在侧边栏选择一个客户', 'error')
     return
   }
-  if (eligible.length < ids.length) {
-    showMessage(`已跳过 ${ids.length - eligible.length} 条不可分析的记录`, 'info')
-  }
+
   batchAnalyzing.value = true
-  let ok = 0, fail = 0
-  for (const t of eligible) {
-    try {
-      if (sourceMode.value === 'followup') {
-        await startFollowupAnalysis(t.id)
-      } else {
-        await startTranscriptAnalysis(t.id)
+  try {
+    const parts = []
+    for (const key of selectedIds.value) {
+      const { mode, id } = parseSelectionKey(key)
+      if (!id) continue
+      const detail = mode === 'followup'
+        ? await fetchFollowupRecordDetail(id)
+        : await fetchTranscriptDetail(id)
+      const label = mode === 'followup' ? '跟进记录' : '会议转写'
+      const title = detail.title || detail.company_name || id
+      const raw = (detail.raw_text || '').trim()
+      if (raw) {
+        parts.push(`--- ${label}: ${title} ---\n${raw}`)
       }
-      ok += 1
-    } catch (e) {
-      fail += 1
-      console.warn('分析触发失败', t.id, e)
     }
+    if (!parts.length) {
+      showMessage('所选记录内容为空，无法合并分析', 'error')
+      return
+    }
+    const companyName = customerStore.currentCustomer?.company_name || ''
+    const companyId = customerStore.currentCustomer?.company_id || ''
+    const mergedText = parts.join('\n\n')
+    const mergedFile = new File([mergedText], `合并分析-${new Date().toISOString().slice(0, 10)}.txt`, { type: 'text/plain' })
+    const result = await uploadTranscript([mergedFile], companyName, companyId)
+    showMessage(`已合并 ${parts.length} 条记录并启动分析`, 'success')
+    selectedIds.value = new Set()
+    sourceMode.value = 'transcript'
+    await triggerAnalysis(result.transcript_id)
+    await loadTranscripts()
+  } catch (e) {
+    console.warn('合并分析失败', e)
+    showMessage(e?.response?.data?.detail || '合并分析失败', 'error')
+  } finally {
+    batchAnalyzing.value = false
   }
-  batchAnalyzing.value = false
-  showMessage(`已触发 ${ok} 条分析${fail ? `，失败 ${fail}` : ''}`, ok > 0 ? 'success' : 'error')
-  selectedIds.value = new Set()
-  await loadTranscripts()
+}
+
+async function analyzeExistingRecord(t) {
+  if (!t || analyzingIds.value.has(t.id)) return
+  analyzingIds.value.add(t.id)
+  try {
+    if (sourceMode.value === 'followup') {
+      await startFollowupAnalysis(t.id)
+    } else {
+      await startTranscriptAnalysis(t.id)
+    }
+    showMessage('分析已启动，可关闭页面稍后查看', 'success')
+    await loadTranscripts()
+  } catch (e) {
+    showMessage(e?.response?.data?.detail || '启动分析失败', 'error')
+  } finally {
+    analyzingIds.value.delete(t.id)
+  }
+}
+
+async function analyzeUploadedTranscript(transcriptId) {
+  if (analyzingIds.value.has(transcriptId)) return
+  analyzingIds.value.add(transcriptId)
+  try {
+    await startTranscriptAnalysis(transcriptId)
+    showMessage('分析已启动，可关闭页面稍后查看', 'success')
+    await loadTranscripts()
+  } catch (e) {
+    showMessage(e?.response?.data?.detail || '启动分析失败', 'error')
+  } finally {
+    analyzingIds.value.delete(transcriptId)
+  }
+}
+
+async function triggerAnalysis(transcriptId) {
+  const row = transcripts.value.find(t => t.id === transcriptId)
+  if (row) {
+    await analyzeExistingRecord(row)
+  } else {
+    await analyzeUploadedTranscript(transcriptId)
+  }
 }
 
 function startPollIfNeeded() {
@@ -741,24 +851,6 @@ function startPollIfNeeded() {
   } else if (!hasProcessing && pollTimer) {
     clearInterval(pollTimer)
     pollTimer = null
-  }
-}
-
-async function triggerAnalysis(transcriptId) {
-  if (analyzingIds.value.has(transcriptId)) return
-  analyzingIds.value.add(transcriptId)
-  try {
-    if (sourceMode.value === 'followup') {
-      await startFollowupAnalysis(transcriptId)
-    } else {
-      await startTranscriptAnalysis(transcriptId)
-    }
-    showMessage('分析已启动，可关闭页面稍后查看', 'success')
-    await loadTranscripts()
-  } catch (e) {
-    showMessage(e?.response?.data?.detail || '启动分析失败', 'error')
-  } finally {
-    analyzingIds.value.delete(transcriptId)
   }
 }
 
@@ -945,6 +1037,62 @@ function updateScenarioRelatedYuqi(index, value) {
     card.related_yuqi_id = ''
     card.related_yuqi_card_id = value.slice('card:'.length)
     card.related_yuqi_source = 'generated'
+  }
+}
+
+function findSelectedCard(cardId) {
+  return selectedCards.value.find(c => c.card_id === cardId)
+}
+
+function upsertChangeItem(card, fieldName, widgetName, value) {
+  if (!card) return
+  const items = [...(card.change_items || [])]
+  let item = items.find(i => i.field_name === fieldName || i.widget_name === widgetName)
+  if (!item) {
+    item = { field_name: fieldName, widget_name: widgetName, old_value: null, new_value: '' }
+    items.push(item)
+  }
+  item.field_name = fieldName
+  item.widget_name = widgetName
+  item.new_value = value ?? ''
+  card.change_items = items
+}
+
+function splitScenarioDescription(value) {
+  const text = String(value ?? '').trim()
+  const marker = ' — '
+  if (!text.includes(marker)) {
+    return { question: text, answer: '' }
+  }
+  const [question, ...rest] = text.split(marker)
+  return { question: question.trim(), answer: rest.join(marker).trim() }
+}
+
+function updateExpectationField(cardId, field, value) {
+  const card = findSelectedCard(cardId)
+  if (!card) return
+  const valueText = String(value ?? '')
+  if (field === 'summary') {
+    upsertChangeItem(card, '预期简述', 'detail_brief', valueText)
+  } else if (field === 'description') {
+    upsertChangeItem(card, '预期详情', 'detail', valueText)
+  } else if (field === 'status') {
+    upsertChangeItem(card, '预期状态', 'yuqi_status', valueText)
+  } else if (field === 'is_first_value') {
+    upsertChangeItem(card, '是否第一价值实现预期', 'is_first_value', valueText)
+  }
+}
+
+function updateScenarioField(cardId, field, value) {
+  const card = findSelectedCard(cardId)
+  if (!card) return
+  const valueText = String(value ?? '')
+  if (field === 'title') {
+    upsertChangeItem(card, '场景标题', 'title', valueText)
+  } else if (field === 'description') {
+    const { question, answer } = splitScenarioDescription(valueText)
+    upsertChangeItem(card, '解决什么问题', 'solve_what_ques', question)
+    upsertChangeItem(card, '怎样解决', 'solve_what_ans', answer)
   }
 }
 
@@ -1144,8 +1292,15 @@ async function submitCards() {
   for (const item of allApproved) {
     const up = {}
     if (item._targetForm === '预期表') {
+      up['预期简述'] = item.summary || ''
+      up['预期详情'] = item.description || ''
       if (item.status) up['预期状态'] = item.status
       if (item.is_first_value) up['是否第一价值实现预期'] = item.is_first_value
+    } else if (item._targetForm === '场景表') {
+      const { question, answer } = splitScenarioDescription(item.description || '')
+      up['场景标题'] = item.title || ''
+      up['解决什么问题'] = question
+      up['怎样解决'] = answer
     }
     if (Object.keys(up).length) fieldUpdates[item.operationId] = up
     // 始终带 target_form，后端用它覆盖 OPERATION_CARD_STORE 中的旧值
