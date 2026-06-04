@@ -13,3 +13,72 @@ backend/scripts/output/
 browser_data/
 
 freellmapi/
+
+# Task specification scratch files
+cc-*.txt
+cc_*.txt
+task_*.txt
+
+# Temporary scripts at root
+algo_test*.py
+build-remote*.py
+change-port.py
+dbi*.py
+debug_*.py
+deploy*.py
+evidence_*.py
+fetch_*.py
+final-deploy*.py
+find_*.py
+fix-*.py
+gen_*.py
+live_test.py
+open-ports.py
+quick_run_*.py
+search_*.py
+setup-*.py
+start-*.py
+ta4.py
+test_algo*.py
+test_hsb.py
+test_p0_case7.py
+test_relayout.py
+upload-*.py
+verify_*.py
+
+# Data dumps
+*_data.json
+csm_users.json
+meiyijia_data.json
+
+# Output and backup
+backend/app/main.py.bak.*
+backend/app/output/
+backend/e2e_output/
+backend/output/
+
+# Docs and temp dirs
+docs/
+project_scripts_docs/
+/PROJECT_OVERVIEW.md
+backend/PHASE3_REPORT.md
+cas-auth-doc.txt
+opus-power-map-plan.md
+production_assessment.md
+
+# Efficiency reviews — only keep .gitkeep, ignore generated reviews
+backend/efficiency_reviews/**/*.json
+!backend/efficiency_reviews/.gitkeep
+
+# Other temp
+data/
+test.har/
+frontend/nul
+后端/
+
+# Temp scripts in subdirs
+scripts/load_*.py
+fix_*.txt
+
+# IDE internal
+.claude/

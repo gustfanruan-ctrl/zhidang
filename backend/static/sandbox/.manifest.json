@@ -1,0 +1,82 @@
+{
+  "css/fineui.min.css": {
+    "sha256": "80ce7262e2975bf6f99a9f907e1c58e9afab4f2c60048535769c6080417145dd",
+    "size": 217533
+  },
+  "css/icon_font.css": {
+    "sha256": "1a8526362c52ca363a2bed110518f6dbe4f06f697a41c6696bcfeb280c303070",
+    "size": 1669
+  },
+  "css/iconfont.ttf": {
+    "sha256": "18859c0d9ea39eaf45330a87e5184bac46f29d3730d0c80b1c75534cce1a3992",
+    "size": 3876
+  },
+  "css/iconfont.woff": {
+    "sha256": "3126ba8c523e6f98873919b7e308d149562491dc0e422a8cd28b0000a98b24c6",
+    "size": 2180
+  },
+  "css/iconfont.woff2": {
+    "sha256": "85e21eaf406c22e6033c2921ad7ee8961796685e8d55284ea8ae92e87a8c31d3",
+    "size": 1700
+  },
+  "css/materials.min.css": {
+    "sha256": "c4dd646ab385e0195ca60f268982eba3f8c4a7d2685ed2629d13df922f22b559",
+    "size": 25603
+  },
+  "js/clipboard_index.min.js": {
+    "sha256": "134a134082fd42619ef1adcf97a8b4e5c4883ed2026f77e1619d2aefeb91670e",
+    "size": 5284
+  },
+  "js/export_index.min.js": {
+    "sha256": "691adbf9b73233f538291b4c206b940057563dea35f7aaa7a68fe5b0ed4815e6",
+    "size": 5475
+  },
+  "js/fineui.min.js": {
+    "sha256": "ff3310b144b08ed8ec9fadb7a34e140f8a6466c99250ffb9fd063497eb5b1a09",
+    "size": 2214970
+  },
+  "js/history_index.min.js": {
+    "sha256": "212fbd0cab2b5625ca8967114edf0896e6b581ef1b2c0f49330dc62bdd20bc9d",
+    "size": 11662
+  },
+  "js/html2canvas.min.js": {
+    "sha256": "774f624e3f3c92fed9b4ae0b633c24dc57cf5edc9bddfde0e07a6c41ccb1ccc9",
+    "size": 202983
+  },
+  "js/jquery.min.js": {
+    "sha256": "89a15e9c40bc6b14809f236ee8cd3ed1ea42393c1f6ca55c7855cd779b3f922e",
+    "size": 93100
+  },
+  "js/keyboard_index.min.js": {
+    "sha256": "ab5b1115f13667a423b086dac7e71f04be11b19a49c66734f719f1c6481ff520",
+    "size": 9818
+  },
+  "js/materials.min.js": {
+    "sha256": "ab04df7e0d820c57801fdc3bd4bf67b80f33a0ec3584398784919c761636a06c",
+    "size": 755538
+  },
+  "js/selection_index.min.js": {
+    "sha256": "97d24714fd62c1a23dab5f568f34917aa7ddf56cca54d954a85975ec2ec8739a",
+    "size": 26941
+  },
+  "js/snapline_index.min.js": {
+    "sha256": "f011e09ab7a7bd1f22a6a87b122fdd03bd09ccc2e0bb8d0f1099d6bcf8e9f501",
+    "size": 12868
+  },
+  "js/stencil_index.min.js": {
+    "sha256": "8c216fba89a2f9bda8b95ff12a9cec64099f037361e81c0da43e2c39c235b4f2",
+    "size": 38661
+  },
+  "js/transform.min.js": {
+    "sha256": "bceb1a51871459f432482e1b0ff8936ff89a40d5de36e9503bdbbf1941d54620",
+    "size": 15760
+  },
+  "js/x6_index.min.js": {
+    "sha256": "d4eb351c1428df6b1eec5d36a3af28e5113fba46cb6f471df8ce1fadc2fcc4c4",
+    "size": 482202
+  },
+  "powerMap_v3.13.html": {
+    "sha256": "8184114544b2d1276c680bdd5101416890324fac5dbfe6551f46fe6b23669918",
+    "size": 424096
+  }
+}

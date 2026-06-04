@@ -1,103 +1,218 @@
 <template>
-  <div class="grid">
-    <section class="card">
-      <div class="head">
-        <h2>📊 客户档案概览</h2>
-        <button class="btn" :disabled="!customerStore.currentCustomer" @click="loadAll">加载档案</button>
-      </div>
-      <div v-if="!customerStore.currentCustomer" class="empty">请先在顶部选择客户</div>
-      <div v-else-if="!profile" class="empty">未加载档案</div>
-      <div v-else>
-        <h3>{{ profile.comname_01 || profile.com_name || profile.company_name || '未命名客户' }}</h3>
-        <div class="tabs">
-          <button class="btn mini" :class="{ active: activeTab === 'basic' }" @click="activeTab = 'basic'">基本信息</button>
-          <button class="btn mini" :class="{ active: activeTab === 'yuqi' }" @click="activeTab = 'yuqi'">预期</button>
-          <button class="btn mini" :class="{ active: activeTab === 'changjing' }" @click="activeTab = 'changjing'">场景</button>
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[calc(100vh-8rem)]">
+    <!-- Left panel: Customer Profile -->
+    <Card class="flex flex-col overflow-hidden">
+      <CardHeader class="pb-3 border-b border-border/50">
+        <div class="flex items-center justify-between">
+          <CardTitle class="text-base">客户档案概览</CardTitle>
+          <Button variant="outline" size="sm" :disabled="!customerStore.currentCustomer || loadingProfile" @click="loadAll">
+            <Loader2 v-if="loadingProfile" class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+            {{ loadingProfile ? '加载中...' : '加载档案' }}
+          </Button>
         </div>
-        <div v-if="activeTab === 'basic'" class="columns one">
-          <div class="profile-hero-card">
-            <div class="profile-title">【{{ profile.com_name || profile.comname_01 || '未命名客户' }}】客户档案</div>
-            <div class="profile-meta-grid">
-              <div class="meta-item"><span>客户层级</span><strong>{{ formatValue(profile.level) }}</strong></div>
-              <div class="meta-item"><span>TOP客群分类</span><strong>{{ formatValue(profile.top_type) }}</strong></div>
-              <div class="meta-item"><span>维保客群分类</span><strong>{{ formatValue(profile.maintenance_type) }}</strong></div>
-              <div class="meta-item"><span>年费客群分类</span><strong>{{ formatValue(profile.annual_type) }}</strong></div>
-              <div class="meta-item"><span>公司类型</span><strong>{{ formatValue(profile.com_type) }}</strong></div>
-              <div class="meta-item"><span>客户成功</span><strong>{{ formatUserName(profile.success) }}</strong></div>
-              <div class="meta-item"><span>责任销售</span><strong>{{ formatUserName(profile.com_salesman) }}</strong></div>
-              <div class="meta-item"><span>责任PM</span><strong>{{ formatUserName(profile.com_pm) }}</strong></div>
-            </div>
-          </div>
-          <div class="detail-kv-card">
-            <div class="detail-title">更多字段</div>
-            <div v-for="(value, key) in readableProfile" :key="key" class="line basic-kv">
-              <strong>{{ key }}</strong>
-              <pre class="value-pre">{{ formatValue(value) }}</pre>
-            </div>
-          </div>
+      </CardHeader>
+
+      <CardContent v-if="!customerStore.currentCustomer" class="flex-1 flex items-center justify-center">
+        <div class="text-center space-y-2">
+          <User class="h-10 w-10 mx-auto text-muted-foreground/40" />
+          <p class="text-sm text-muted-foreground">请先在侧边栏选择客户</p>
         </div>
-        <div v-else-if="activeTab === 'yuqi'" class="columns one">
-          <div class="line"><strong>数量</strong><span>{{ yuqiCards.length }}</span></div>
-          <div class="card-grid">
-            <article v-for="(item, idx) in yuqiCards" :key="idx" class="biz-card">
-              <div class="biz-card-title">{{ item.title }}</div>
-              <div class="biz-card-section">
-                <div class="biz-label">预期描述</div>
-                <div class="biz-content">{{ item.detail }}</div>
+      </CardContent>
+      <CardContent v-else-if="!profile" class="flex-1 flex items-center justify-center">
+        <div class="text-center space-y-2">
+          <FileText class="h-10 w-10 mx-auto text-muted-foreground/40" />
+          <p class="text-sm text-muted-foreground">未加载档案，请点击"加载档案"</p>
+        </div>
+      </CardContent>
+      <CardContent v-else class="flex-1 flex flex-col min-h-0 p-0">
+        <!-- Customer name -->
+        <div class="px-5 pt-4 pb-3">
+          <h3 class="text-lg font-semibold">{{ profile.comname_01 || profile.com_name || profile.company_name || '未命名客户' }}</h3>
+        </div>
+
+        <!-- Tab navigation -->
+        <div class="px-5 pb-3 flex gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            class="rounded-md text-xs h-8"
+            :class="activeTab === 'basic' ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground'"
+            @click="activeTab = 'basic'"
+          >基本信息</Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="rounded-md text-xs h-8"
+            :class="activeTab === 'yuqi' ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground'"
+            @click="activeTab = 'yuqi'"
+          >预期</Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="rounded-md text-xs h-8"
+            :class="activeTab === 'changjing' ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground'"
+            @click="activeTab = 'changjing'"
+          >场景</Button>
+        </div>
+
+        <div class="flex-1 overflow-y-auto px-5 pb-4">
+          <!-- Basic tab -->
+          <div v-if="activeTab === 'basic'" class="space-y-4">
+            <div class="grid grid-cols-2 gap-3">
+              <div v-for="item in profileMetaGrid" :key="item.label" class="rounded-lg border border-border/60 bg-muted/30 p-3">
+                <div class="text-[11px] text-muted-foreground mb-0.5">{{ item.label }}</div>
+                <div class="text-sm font-medium">{{ item.value }}</div>
               </div>
-              <div class="biz-card-meta">
-                <span class="tag status">{{ item.status }}</span>
+            </div>
+            <Separator />
+            <div>
+              <h4 class="text-sm font-semibold mb-3">更多字段</h4>
+              <div class="space-y-2">
+                <div v-for="(value, key) in readableProfile" :key="key" class="flex gap-3 py-1.5 border-b border-border/40 last:border-0">
+                  <span class="text-xs font-medium text-muted-foreground shrink-0 w-[140px]">{{ key }}</span>
+                  <pre class="text-xs whitespace-pre-wrap break-all font-sans m-0 text-foreground/80">{{ formatValue(value) }}</pre>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Yuqi tab -->
+          <div v-else-if="activeTab === 'yuqi'" class="space-y-3">
+            <div class="flex items-center justify-between text-sm">
+              <span class="font-medium">共 <Badge variant="secondary" class="ml-1">{{ yuqiCards.length }}</Badge> 条</span>
+            </div>
+            <div v-if="!yuqiCards.length" class="text-center py-8 text-sm text-muted-foreground">暂无预期数据</div>
+            <Card v-for="(item, idx) in yuqiCards" :key="idx" class="p-4 bg-muted/20 border-border/50">
+              <div class="flex items-start justify-between gap-2 mb-2">
+                <p class="text-sm font-semibold break-words flex-1">{{ item.title }}</p>
+                <Badge variant="outline" class="text-[10px] shrink-0 bg-amber-50 text-amber-700 border-amber-200">{{ item.status }}</Badge>
+              </div>
+              <p class="text-xs text-muted-foreground whitespace-pre-wrap break-words mb-3">{{ item.detail }}</p>
+              <div class="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
                 <span>预计启动：{{ item.startTime }}</span>
                 <span>提交人：{{ item.creator }}</span>
-                <span>提交时间：{{ item.createTime }}</span>
+                <span>{{ item.createTime }}</span>
               </div>
-            </article>
+            </Card>
           </div>
-        </div>
-        <div v-else class="columns one">
-          <div class="line"><strong>数量</strong><span>{{ changjingCards.length }}</span></div>
-          <div class="card-grid">
-            <article v-for="(item, idx) in changjingCards" :key="idx" class="biz-card">
-              <div class="biz-card-title">{{ item.title }}</div>
-              <div class="biz-card-section">
-                <div class="biz-label">业务诉求/痛点</div>
-                <div class="biz-content">{{ item.problem }}</div>
-              </div>
-              <div class="biz-card-section">
-                <div class="biz-label">核心指标/解决方案</div>
-                <div class="biz-content">{{ item.solution }}</div>
-              </div>
-              <div class="biz-card-meta">
-                <span>提交人：{{ item.creator }}</span>
-                <span>提交时间：{{ item.createTime }}</span>
-              </div>
-            </article>
-          </div>
-        </div>
-      </div>
-    </section>
 
-    <section class="card">
-      <h2>🤖 自然语言维护</h2>
-      <div class="chat-log">
-        <div v-for="(item, idx) in messages" :key="idx" class="msg">
-          <b>{{ item.role === 'user' ? '🧑 我' : '🤖 助手' }}：</b>{{ item.text }}
+          <!-- Changjing tab -->
+          <div v-else class="space-y-3">
+            <div class="flex items-center justify-between text-sm">
+              <span class="font-medium">共 <Badge variant="secondary" class="ml-1">{{ changjingCards.length }}</Badge> 条</span>
+            </div>
+            <div v-if="!changjingCards.length" class="text-center py-8 text-sm text-muted-foreground">暂无场景数据</div>
+            <Card v-for="(item, idx) in changjingCards" :key="idx" class="p-4 bg-muted/20 border-border/50">
+              <p class="text-sm font-semibold break-words mb-2">{{ item.title }}</p>
+              <div class="mb-2">
+                <div class="text-[10px] text-muted-foreground mb-0.5">业务诉求/痛点</div>
+                <p class="text-xs whitespace-pre-wrap break-words">{{ item.problem }}</p>
+              </div>
+              <div class="mb-2">
+                <div class="text-[10px] text-muted-foreground mb-0.5">核心指标/解决方案</div>
+                <p class="text-xs whitespace-pre-wrap break-words">{{ item.solution }}</p>
+              </div>
+              <div class="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+                <span>提交人：{{ item.creator }}</span>
+                <span>{{ item.createTime }}</span>
+              </div>
+            </Card>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+
+    <!-- Right panel: Chat -->
+    <Card class="flex flex-col overflow-hidden">
+      <CardHeader class="pb-3 border-b border-border/50">
+        <CardTitle class="text-base">智能助手</CardTitle>
+      </CardHeader>
+
+      <!-- Messages area -->
+      <div class="flex-1 overflow-y-auto p-4 space-y-4" ref="chatLogEl">
+        <div v-if="!messages.length && customerStore.currentCustomer" class="flex items-center justify-center h-full">
+          <div class="text-center space-y-2">
+            <MessageSquare class="h-10 w-10 mx-auto text-muted-foreground/40" />
+            <p class="text-sm text-muted-foreground">输入指令开始对话</p>
+            <p class="text-xs text-muted-foreground/60">支持查询、新增、修改、删除操作</p>
+          </div>
+        </div>
+        <div v-if="!customerStore.currentCustomer" class="flex items-center justify-center h-full">
+          <div class="text-center space-y-2">
+            <User class="h-10 w-10 mx-auto text-muted-foreground/40" />
+            <p class="text-sm text-muted-foreground">请先在侧边栏选择客户</p>
+          </div>
+        </div>
+
+        <div v-for="(item, idx) in messages" :key="idx" class="flex" :class="item.role === 'user' ? 'justify-end' : 'justify-start'">
+          <div
+            :class="item.role === 'user'
+              ? 'bg-primary text-primary-foreground rounded-2xl rounded-br-md px-4 py-2.5 max-w-[80%]'
+              : 'bg-muted rounded-2xl rounded-bl-md px-4 py-2.5 max-w-[80%]'"
+          >
+            <div class="text-[11px] font-semibold mb-1 opacity-70">{{ item.role === 'user' ? '我' : '助手' }}</div>
+            <div class="text-sm whitespace-pre-wrap break-words">{{ item.text }}</div>
+          </div>
+        </div>
+
+        <!-- Confirmation banner -->
+        <div v-if="needsConfirm" class="flex justify-center">
+          <Alert class="max-w-[85%] border-amber-200 bg-amber-50 text-amber-800">
+            <AlertTriangle class="h-4 w-4" />
+            <AlertTitle class="text-sm">待确认操作</AlertTitle>
+            <AlertDescription class="text-xs">以上修改将应用到客户档案，确认后请点击"确认执行"</AlertDescription>
+          </Alert>
         </div>
       </div>
-      <div class="row">
-        <input v-model="input" class="input" placeholder="输入查询/新增/修改/删除指令" @keyup.enter="send(false)" />
-        <button class="btn" @click="send(false)">发送</button>
-        <button class="btn ok" :disabled="!needsConfirm" @click="send(true)">确认执行</button>
+
+      <!-- Input area -->
+      <div class="border-t border-border/50 p-4">
+        <div class="flex gap-2">
+          <Input
+            v-model="input"
+            class="flex-1"
+            placeholder="输入查询/新增/修改/删除指令"
+            :disabled="sending"
+            @keyup.enter="send(false)"
+          />
+          <Button :disabled="sending || !input.trim()" size="sm" @click="send(false)">
+            <Send v-if="!sending" class="h-4 w-4" />
+            <Loader2 v-else class="h-4 w-4 animate-spin" />
+          </Button>
+          <Button
+            variant="default"
+            size="sm"
+            :disabled="!needsConfirm || sending"
+            class="bg-emerald-600 hover:bg-emerald-700 text-white"
+            @click="send(true)"
+          >
+            <Check v-if="!sending" class="h-4 w-4 mr-1" />
+            <Loader2 v-else class="h-4 w-4 mr-1 animate-spin" />
+            确认执行
+          </Button>
+        </div>
       </div>
-    </section>
+    </Card>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
+import { Loader2, User, FileText, MessageSquare, Send, Check, AlertTriangle } from '@lucide/vue'
 import { api } from '../api'
 import { getChangjingList, getCustomerProfile, getYuqiList } from '../api/customer'
 import { useCustomerStore } from '../stores/customer'
+import Card from '../components/ui/Card.vue'
+import CardHeader from '../components/ui/CardHeader.vue'
+import CardTitle from '../components/ui/CardTitle.vue'
+import CardContent from '../components/ui/CardContent.vue'
+import Button from '../components/ui/Button.vue'
+import Input from '../components/ui/Input.vue'
+import Badge from '../components/ui/Badge.vue'
+import Separator from '../components/ui/Separator.vue'
+import Alert from '../components/ui/Alert.vue'
+import AlertTitle from '../components/ui/AlertTitle.vue'
+import AlertDescription from '../components/ui/AlertDescription.vue'
 
 const customerStore = useCustomerStore()
 const profile = ref(null)
@@ -106,11 +221,28 @@ const changjingList = ref([])
 const activeTab = ref('basic')
 const input = ref('')
 const messages = ref([])
+const chatLogEl = ref(null)
 function safeUUID() {
   try { return crypto.randomUUID() } catch { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random()*16|0; return (c==='x'?r:r&0x3|0x8).toString(16) }) }
 }
 const chatSessionId = ref(safeUUID())
 const needsConfirm = ref(false)
+const loadingProfile = ref(false)
+const sending = ref(false)
+
+const profileMetaGrid = computed(() => {
+  const p = profile.value || {}
+  return [
+    { label: '客户层级', value: formatValue(p.level) },
+    { label: 'TOP客群分类', value: formatValue(p.top_type) },
+    { label: '维保客群分类', value: formatValue(p.maintenance_type) },
+    { label: '年费客群分类', value: formatValue(p.annual_type) },
+    { label: '公司类型', value: formatValue(p.com_type) },
+    { label: '客户成功', value: formatUserName(p.success) },
+    { label: '责任销售', value: formatUserName(p.com_salesman) },
+    { label: '责任PM', value: formatUserName(p.com_pm) },
+  ]
+})
 
 function formatValue(value) {
   if (value === null || value === undefined || value === '') return '-'
@@ -167,31 +299,45 @@ async function loadProfile() {
 }
 
 async function loadAll() {
-  if (!customerStore.currentCustomer) return
-  await loadProfile()
-  const [yuqi, changjing] = await Promise.all([
-    getYuqiList(customerStore.currentCustomer.company_id),
-    getChangjingList(customerStore.currentCustomer.company_id),
-  ])
-  yuqiList.value = yuqi?.items || []
-  changjingList.value = changjing?.items || []
+  if (!customerStore.currentCustomer || loadingProfile.value) return
+  loadingProfile.value = true
+  try {
+    await loadProfile()
+    const [yuqi, changjing] = await Promise.all([
+      getYuqiList(customerStore.currentCustomer.company_id),
+      getChangjingList(customerStore.currentCustomer.company_id),
+    ])
+    yuqiList.value = yuqi?.items || []
+    changjingList.value = changjing?.items || []
+  } finally {
+    loadingProfile.value = false
+  }
 }
 
 async function send(confirm) {
+  if (sending.value) return
   if (!confirm && !input.value.trim()) return
   const text = confirm ? '确认执行' : input.value.trim()
-  messages.value.push({ role: 'user', text })
-  const { data } = await api.post('/api/v1/chat', {
-    message: text,
-    company_id: customerStore.currentCustomer?.company_id || null,
-    session_id: chatSessionId.value,
-    confirm,
-  }, { timeout: 300000 })
-  messages.value.push({ role: 'assistant', text: data.reply })
-  chatSessionId.value = data.session_id || chatSessionId.value
-  needsConfirm.value = !!data.needs_confirmation
-  if (data.refresh_profile) await loadAll()
-  if (!confirm) input.value = ''
+  // 用户打字「确认/是的/好的/可以」且有待确认操作时，自动走 confirm 流程
+  const confirmWords = /^(确认|是的|好的|可以|ok|yes|对|行|好|是|嗯|1)$/i
+  const actualConfirm = confirm || (confirmWords.test(text) && needsConfirm.value)
+  sending.value = true
+  try {
+    messages.value.push({ role: 'user', text })
+    const { data } = await api.post('/api/v1/chat', {
+      message: text,
+      company_id: customerStore.currentCustomer?.company_id || null,
+      session_id: chatSessionId.value,
+      confirm: actualConfirm,
+    }, { timeout: 300000 })
+    messages.value.push({ role: 'assistant', text: data.reply })
+    chatSessionId.value = data.session_id || chatSessionId.value
+    needsConfirm.value = !!data.needs_confirmation
+    if (data.refresh_profile) await loadAll()
+    if (!confirm) input.value = ''
+  } finally {
+    sending.value = false
+  }
 }
 
 watch(() => customerStore.resetVersion, () => {
@@ -209,104 +355,3 @@ onMounted(async () => {
   customerStore.hydrateCurrentCustomer()
 })
 </script>
-
-<style scoped>
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:18px;box-shadow:var(--shadow)}
-.card{display:flex;flex-direction:column;min-height:calc(100vh - 190px)}
-.head{display:flex;justify-content:space-between;align-items:center}
-.empty{color:var(--muted);padding:8px 0}
-.columns{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.columns.one{grid-template-columns:1fr}
-.tabs{display:flex;gap:8px;margin:10px 0}
-.mini{padding:6px 10px;font-size:12px}
-.mini.active{background:var(--primary);color:#fff}
-.line{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid var(--line);padding:6px 0}
-.line.block{display:grid;gap:4px}
-.line.basic-kv{display:grid;grid-template-columns:220px 1fr;align-items:start}
-.value-pre{
-  margin:0;
-  white-space:pre-wrap;
-  word-break:break-word;
-  font-family:inherit;
-  font-size:13px;
-  line-height:1.5;
-}
-.profile-hero-card{
-  border:1px solid var(--line);
-  border-radius:14px;
-  padding:14px;
-  background:var(--surface-soft);
-}
-.profile-title{
-  font-weight:700;
-  margin-bottom:10px;
-}
-.profile-meta-grid{
-  display:grid;
-  grid-template-columns:repeat(4,minmax(0,1fr));
-  gap:10px;
-}
-.meta-item{
-  border:1px solid var(--line);
-  border-radius:10px;
-  padding:8px 10px;
-  background:var(--surface);
-  display:grid;
-  gap:4px;
-}
-.meta-item span{font-size:12px;color:var(--muted)}
-.detail-kv-card{
-  border:1px solid var(--line);
-  border-radius:14px;
-  padding:12px;
-  background:var(--surface);
-}
-.detail-title{
-  font-weight:700;
-  margin-bottom:8px;
-}
-.card-grid{
-  display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:12px;
-}
-.biz-card{
-  border:1px solid var(--line);
-  border-radius:14px;
-  padding:12px;
-  background:var(--surface-soft);
-  display:grid;
-  gap:10px;
-}
-.biz-card-title{
-  font-size:18px;
-  font-weight:700;
-}
-.biz-card-section{display:grid;gap:6px}
-.biz-label{font-size:13px;color:var(--muted)}
-.biz-content{font-size:15px;line-height:1.6;white-space:pre-wrap}
-.biz-card-meta{
-  display:flex;
-  flex-wrap:wrap;
-  gap:8px 12px;
-  font-size:12px;
-  color:var(--muted);
-}
-.tag.status{
-  background:#fef3c7;
-  color:#b45309;
-  border-radius:999px;
-  padding:2px 8px;
-}
-.chat-log{flex:1;min-height:340px;overflow:auto;border:1px solid var(--line);border-radius:12px;padding:10px;margin-bottom:10px;background:var(--surface-soft)}
-.row{display:flex;gap:8px}
-.input{flex:1;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--text)}
-.btn{padding:10px 14px;border:0;border-radius:12px;background:var(--surface-soft);color:var(--text);cursor:pointer}
-.ok{background:var(--ok);color:#fff}
-@media (max-width: 1100px){
-  .grid{grid-template-columns:1fr}
-  .card-grid{grid-template-columns:1fr}
-  .profile-meta-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
-}
-</style>

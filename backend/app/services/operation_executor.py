@@ -18,6 +18,29 @@ def _wrap_value(value: Any) -> dict[str, Any]:
     return {"value": value}
 
 
+def _extract_response_data_id(resp: dict[str, Any]) -> str:
+    for key in ("data_id", "_id"):
+        value = resp.get(key)
+        if value:
+            return str(value)
+    data = resp.get("data")
+    if isinstance(data, dict):
+        for key in ("data_id", "_id"):
+            value = data.get(key)
+            if value:
+                return str(value)
+    return ""
+
+
+def _scene_customer_name_widget(form_cfg: dict[str, Any]) -> str:
+    configured = form_cfg.get("customer_name_widget") or form_cfg.get("customer_name_helper")
+    if isinstance(configured, dict):
+        return str(configured.get("widget") or "")
+    if isinstance(configured, str):
+        return configured
+    return "_widget_1743993204408"
+
+
 async def execute_cards(
     *,
     db: Session,
@@ -27,7 +50,16 @@ async def execute_cards(
     mapping_forms: dict[str, Any],
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    for idx, card in enumerate(cards):
+    indexed_cards = list(enumerate(cards))
+    indexed_cards.sort(key=lambda pair: (0 if str(pair[1].get("target_form") or "") == "预期表" else 1, pair[0]))
+    cards_by_id = {str(card.get("card_id") or ""): card for card in cards if card.get("card_id")}
+    resolved_data_ids = {
+        str(card.get("card_id") or ""): str(card.get("data_id") or "")
+        for card in cards
+        if card.get("card_id") and card.get("data_id")
+    }
+
+    for idx, card in indexed_cards:
         card_id = str(card.get("card_id") or uuid4())
         target_form = str(card.get("target_form") or "未知")
         op_type = str(card.get("operation_type") or "update")
@@ -88,6 +120,13 @@ async def execute_cards(
                 # For new yuqi/changjing records, auto-link to customer main record.
                 if lookup_widget and customer_id and target_form in {"预期表", "场景表"}:
                     payload[lookup_widget] = _wrap_value(customer_id)
+                    if target_form == "预期表":
+                        customer_com_id = str(card.get("customer_com_id") or "").strip()
+                        customer_com_name = str(card.get("customer_com_name") or card.get("customer_name") or "").strip()
+                        if customer_com_id:
+                            payload.setdefault("com_id", _wrap_value(customer_com_id))
+                        if customer_com_name:
+                            payload.setdefault("com_name", _wrap_value(customer_com_name))
                 elif target_form in {"预期表", "场景表"} and lookup_widget and not customer_id:
                     execute_status = "failed"
                     resp = {"success": False, "detail": "missing customer_id for lookup relation"}
@@ -109,6 +148,48 @@ async def execute_cards(
                     db.commit()
                     results.append({"card_id": card_id, "execute_status": execute_status, "error": resp.get("detail")})
                     continue
+
+            if target_form == "场景表":
+                customer_com_id = str(card.get("customer_com_id") or "").strip()
+                customer_com_name = str(card.get("customer_com_name") or card.get("customer_name") or "").strip()
+                if customer_com_id:
+                    payload.setdefault("com_id", _wrap_value(customer_com_id))
+                name_widget = _scene_customer_name_widget(form_cfg)
+                if customer_com_name and name_widget:
+                    payload.setdefault(name_widget, _wrap_value(customer_com_name))
+
+                related_yuqi_id = str(card.get("related_yuqi_id") or "").strip()
+                related_card_id = str(card.get("related_yuqi_card_id") or "").strip()
+                if related_card_id:
+                    related_yuqi_id = resolved_data_ids.get(related_card_id) or str((cards_by_id.get(related_card_id) or {}).get("data_id") or "").strip()
+                    if not related_yuqi_id:
+                        execute_status = "failed"
+                        resp = {"success": False, "detail": f"related expectation card not executed: {related_card_id}"}
+                        db.add(
+                            OperationCardLog(
+                                transcript_id=transcript_id,
+                                card_index=idx,
+                                target_form=target_form,
+                                operation_type=op_type,
+                                widget_name=",".join(str(item.get("widget_name") or "") for item in change_items if item.get("widget_name")),
+                                old_value=str([{ "field_name": item.get("field_name"), "old_value": item.get("old_value")} for item in change_items]),
+                                new_value=str([{ "field_name": item.get("field_name"), "new_value": item.get("new_value")} for item in change_items]),
+                                safety_status=safety_status,
+                                execute_status=execute_status,
+                                jiandaoyun_response=resp,
+                                executed_at=now_utc(),
+                            )
+                        )
+                        db.commit()
+                        results.append({"card_id": card_id, "execute_status": execute_status, "error": resp.get("detail")})
+                        continue
+                    card["related_yuqi_id"] = related_yuqi_id
+
+                lookup_yuqi_widget = str((form_cfg.get("lookup_yuqi") or {}).get("widget") or "_widget_1751435602563")
+                if related_yuqi_id and lookup_yuqi_widget:
+                    payload.setdefault(lookup_yuqi_widget, _wrap_value(related_yuqi_id))
+
+            if op_type == "create":
                 resp = await writer.create_record(entry_id, payload)
             elif op_type == "append_subform":
                 subform_rows = card.get("new_rows", [])
@@ -116,6 +197,11 @@ async def execute_cards(
             else:
                 resp = await writer.update_record(entry_id, data_id, payload)
             execute_status = "success" if resp.get("success") else "failed"
+            if execute_status == "success":
+                resolved_id = _extract_response_data_id(resp) or data_id
+                if resolved_id:
+                    resolved_data_ids[card_id] = resolved_id
+                    card["data_id"] = resolved_id
 
         db.add(
             OperationCardLog(

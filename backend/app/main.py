@@ -1,30 +1,33 @@
-# CR-FINAL-FIX: 修复后端关键流程的鉴权、错误提示、健康检查和安全写入路径。
+﻿# CR-FINAL-FIX: 修复后端关键流程的鉴权、错误提示、健康检查和安全写入路径。
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import time
 import logging
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .auth import create_jwt, get_current_user, require_superadmin
+from .auth import create_jwt, get_current_user, get_current_user_for_sse, require_superadmin
 from .config import settings
 from .crypto_utils import decrypt_secret, encrypt_secret
 from .database import Base, engine, get_db
-from .models import AnalyticsEvent, ConfigChangeLog, OperationLog, Superadmin, SystemConfig, Transcript
+from .models import AnalyticsEvent, ConfigChangeLog, FollowupRecord, OperationLog, Superadmin, SystemConfig, Transcript, User
 from .progress import build_progress
-from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, PowerMapChatPayload, PowerMapConfirmPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptAnalyzeResponse, TranscriptUploadResponse
+from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, PowerMapChatPayload, PowerMapConfirmPayload, PowerMapRelayoutPayload, PowerMapPreviewPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptAnalyzeResponse, TranscriptUploadResponse
 from .schemas.operation import OperationExecuteRequest, ReviewAction
 from .schemas.agent_output import validate_comparison_output, validate_extraction_output
 from .services.agent_runner import AgentPhase, AgentRunner
@@ -35,10 +38,26 @@ from .services.jiandaoyun_writer import JiandaoyunWriter
 from .services.openai_compatible_agent_client import OpenAICompatibleAgentClient
 from .services.operation_executor import execute_cards
 from .services.cas_auth import CasAuthError, cas_auth_service
-from .services.power_map_service import chat_power_map, confirm_power_map, get_power_map
+from .services.followup_review_template import (
+    build_followup_review_system_prompt,
+    load_followup_review_template,
+    render_followup_review_record,
+    save_followup_review_template,
+)
+from .services.followup_yuqi import apply_followup_yuqi_fields, extract_followup_yuqi_id
+from .services.power_map_service import _build_merge_context, _ctx_to_getinfo_response, _drop_session, _execute_harness_stream, _fetch_from_external, _get_power_map_config, _get_session, _new_session_id, _node_from_bi_dict, _split_bi_auth, _store_session, chat_power_map, chat_power_map_v2, commit_power_map_session, confirm_power_map, discard_power_map_session, get_power_map, preview_power_map, relayout_power_map
+from .services import sandbox_infra
+from .services.sandbox_infra import (
+    SANDBOX_DIR,
+    ctx_to_full_getinfo_response,
+    empty_getinfo_response,
+    render_sandbox_html,
+    verify_manifest,
+)
 from .services.prompts import CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
 from .services.chat_executor import OP_LABELS, build_jiandaoyun_payload, build_preview_text, get_entry_id, log_operation
 from .services.tool_registry import build_chat_executors, get_chat_tools, get_executors, get_tools
+from .services.tracing import new_trace, emit, emit_llm
 from .sso import build_sso_token, verify_sso_token
 from .validators import validate_operations
 from .writeflow import merge_and_write
@@ -191,6 +210,14 @@ if FRONTEND_DIST.exists():
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
+# Sandbox static assets (BI mirror): served at /static/sandbox/*, populated by
+# sandbox_infra.download_bi_resources. Mounted unconditionally so 404s give a
+# clear error instead of falling through to the SPA fallback.
+BACKEND_STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
+BACKEND_STATIC_DIR.mkdir(parents=True, exist_ok=True)
+SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(BACKEND_STATIC_DIR)), name="backend-static")
+
 PENDING_CHAT_ACTIONS: dict[str, dict[str, Any]] = {}
 CUSTOMERS_CACHE_TTL_SECONDS = 600
 CUSTOMERS_CACHE: dict[str, Any] = {"at": None, "items": []}
@@ -280,6 +307,24 @@ def _allowed_transcript_stmt(user: dict[str, Any]):
     stmt = select(Transcript)
     if user.get("source") == "sso":
         stmt = stmt.where(Transcript.sso_user_id == user.get("user_id"))
+    elif user.get("source") == "user":
+        display_name = user.get("display_name")
+        username = user.get("username")
+        if display_name and username:
+            stmt = stmt.where(or_(Transcript.sso_user_name == display_name, Transcript.sso_user_id == username))
+    return stmt
+
+
+def _allowed_followup_stmt(user: dict[str, Any]):
+    stmt = select(FollowupRecord)
+    if user.get("source") == "sso":
+        user_name = user.get("user_name") or user.get("username")
+        if user_name:
+            stmt = stmt.where(FollowupRecord.sso_user_name == user_name)
+    elif user.get("source") == "user":
+        display_name = user.get("display_name")
+        if display_name:
+            stmt = stmt.where(FollowupRecord.sso_user_name == display_name)
     return stmt
 
 
@@ -326,10 +371,112 @@ def fetch_customers_for_user(db: Session, user: dict[str, Any]) -> list[dict[str
 
 
 def build_raw_transcript_payload(text: str, fallback_title: str = "未命名转写") -> dict[str, Any]:
-    clean_text = (text or "").strip()
+    clean_text = (text or "").replace("\x00", "").strip()
     first_line = clean_text.splitlines()[0].strip() if clean_text else ""
     title = first_line or fallback_title
     return {"title": title, "raw_text": clean_text, "segments": []}
+
+
+def _image_media_type_from_suffix(suffix: str) -> str:
+    normalized = (suffix or "").strip().lower()
+    if normalized in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if normalized == ".png":
+        return "image/png"
+    if normalized == ".webp":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _build_image_input_item(raw_bytes: bytes, suffix: str) -> dict[str, str]:
+    return {
+        "type": "base64",
+        "media_type": _image_media_type_from_suffix(suffix),
+        "data": base64.b64encode(raw_bytes).decode("ascii"),
+    }
+
+
+def _persisted_image_segment(filename: str, image_item: dict[str, str]) -> dict[str, Any]:
+    return {"_kind": "image_input", "name": filename, **image_item}
+
+
+def _extract_image_inputs_from_segments(segments: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for item in list(segments or []):
+        if not isinstance(item, dict) or item.get("_kind") != "image_input":
+            continue
+        media_type = str(item.get("media_type") or "").strip()
+        data = str(item.get("data") or "").strip()
+        if not media_type or not data:
+            continue
+        out.append({"type": "base64", "media_type": media_type, "data": data})
+    return out
+
+
+def _fallback_mock_to_facts(mock_data: dict[str, Any], source_type: str) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    normalized_source = source_type if source_type in {"text", "image"} else "text"
+    base_conf = float(mock_data.get("confidence") or 0.85)
+    for item in list(mock_data.get("expectations") or []):
+        quote = str(item.get("source_quote") or item.get("summary") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if summary:
+            facts.append({
+                "field_name": "detail_brief",
+                "value": summary,
+                "confidence": float(item.get("confidence") or base_conf),
+                "source_quote": quote or summary,
+                "source_type": normalized_source,
+                "category": "requirements",
+                "target_form": "预期表",
+            })
+        if description:
+            facts.append({
+                "field_name": "detail",
+                "value": description,
+                "confidence": float(item.get("confidence") or base_conf),
+                "source_quote": quote or description,
+                "source_type": normalized_source,
+                "category": "requirements",
+                "target_form": "预期表",
+            })
+    for item in list(mock_data.get("scenarios") or []):
+        quote = str(item.get("source_quote") or item.get("summary") or item.get("title") or "").strip()
+        title = str(item.get("title") or item.get("summary") or "").strip()
+        question = str(item.get("pain_point") or item.get("summary") or "").strip()
+        answer = str(item.get("core_metric_solution") or item.get("description") or "").strip()
+        if title:
+            facts.append({
+                "field_name": "title",
+                "value": title,
+                "confidence": float(item.get("confidence") or base_conf),
+                "source_quote": quote or title,
+                "source_type": normalized_source,
+                "category": "requirements",
+                "target_form": "场景表",
+            })
+        if question:
+            facts.append({
+                "field_name": "solve_what_ques",
+                "value": question,
+                "confidence": float(item.get("confidence") or base_conf),
+                "source_quote": quote or question,
+                "source_type": normalized_source,
+                "category": "requirements",
+                "target_form": "场景表",
+            })
+        if answer:
+            facts.append({
+                "field_name": "solve_what_ans",
+                "value": answer,
+                "confidence": float(item.get("confidence") or base_conf),
+                "source_quote": quote or answer,
+                "source_type": normalized_source,
+                "category": "requirements",
+                "target_form": "场景表",
+            })
+    return facts
 
 
 def ensure_system_config(db: Session) -> SystemConfig:
@@ -399,6 +546,200 @@ def _extract_csm_name(success_val: Any) -> str:
     return str(success_val or "")
 
 
+GENJIN_TAG_META: dict[tuple[str, str, str], dict[str, str]] = {
+    ("使用推进", "常态化跟进", ""): {
+        "tag_id": "698408b3bd0e7d9d756beb16",
+        "genjin_uuid": "94439254-506b-4f3e-b105-a2909ca105d6",
+    },
+    ("使用推进", "预期跟进", ""): {
+        "tag_id": "698408bb69e90652ec54e51b",
+        "genjin_uuid": "470ca6f2-68f6-4d97-b3df-b946955977d3",
+    },
+    ("使用推进", "系统部署/环境确认", ""): {
+        "tag_id": "698408ca3b437f8b5333848f",
+        "genjin_uuid": "4462a21e-d8b9-4e4f-ad4a-de1ddca81511",
+    },
+    ("使用推进", "价值汇报/高层触达", ""): {
+        "tag_id": "69844504985868a0350db6bf",
+        "genjin_uuid": "4cd95e77-e31a-453a-a05c-1e2d56e56502",
+    },
+    ("使用推进", "价值宣导/方案讲解", ""): {
+        "tag_id": "6984450c594ce3a9a61c7317",
+        "genjin_uuid": "7c04b440-3db3-4229-a9c0-484c069d7f97",
+    },
+    ("数字人才服务", "线上课程", "意愿触达"): {
+        "tag_id": "6984451f7a2383052f8f5a88",
+        "genjin_uuid": "a5e27459-74c0-4d2a-b922-4e624e9700e9",
+    },
+    ("数字人才服务", "线上课程", "过程执行"): {
+        "tag_id": "6984452870249b47d399e8b2",
+        "genjin_uuid": "3c35d7d0-9d34-4930-ad29-306907449f5f",
+    },
+    ("数字人才服务", "线下培训", "意愿触达"): {
+        "tag_id": "69844534f8b4ec3e66c5006a",
+        "genjin_uuid": "a0d1d60a-cd7b-4650-bc2e-decddbcacc0d",
+    },
+    ("数字人才服务", "线下培训", "过程执行"): {
+        "tag_id": "6984453bc3c2eedc86d70f5c",
+        "genjin_uuid": "782adc3b-c13c-4ab9-b8de-db92c1bbb44c",
+    },
+    ("数字人才服务", "业务沙盘", "意愿触达"): {
+        "tag_id": "69844542072acdec04f74ebd",
+        "genjin_uuid": "7c00f22f-f5cd-4455-a60f-fbecd17f10f5",
+    },
+    ("数字人才服务", "业务沙盘", "过程执行"): {
+        "tag_id": "69844548ff891587d82a0acc",
+        "genjin_uuid": "80474cc0-b848-4efa-be5e-322df73b3b52",
+    },
+    ("数字人才服务", "翻转课堂", "意愿触达"): {
+        "tag_id": "69844552592ec3aad5d09e55",
+        "genjin_uuid": "d596b555-3431-4bb0-9faa-ada8ee3b9b07",
+    },
+    ("数字人才服务", "翻转课堂", "过程执行"): {
+        "tag_id": "6984455b20de93ef23b50ce8",
+        "genjin_uuid": "ee245baf-1290-42f2-ab8e-d8b67b8c12c9",
+    },
+    ("数字人才服务", "人才大赛", "意愿触达"): {
+        "tag_id": "6984456495872ace5fcc67a4",
+        "genjin_uuid": "d9912827-481c-4293-be63-247038c58244",
+    },
+    ("数字人才服务", "人才大赛", "过程执行"): {
+        "tag_id": "69844569b573eed671b83681",
+        "genjin_uuid": "7a282de7-3de4-426f-8c12-09d6bddc518d",
+    },
+    ("续费增购", "服务ARR推动", ""): {
+        "tag_id": "698445840911e7166adf1358",
+        "genjin_uuid": "5a671370-29cc-4a00-bd18-05c956b9c4c6",
+    },
+    ("续费增购", "年费续费推动", ""): {
+        "tag_id": "6984458a03687e30e5017325",
+        "genjin_uuid": "8fa03331-73ae-4ef3-9747-8ce36fc6696e",
+    },
+    ("续费增购", "增购推动", ""): {
+        "tag_id": "6984458e04e3cf8186b7107d",
+        "genjin_uuid": "b14e4ea2-a4e2-4e7d-94cc-860695a9e151",
+    },
+    ("续费增购", "签单辅助", ""): {
+        "tag_id": "69844592c9dbdc85a9fd173c",
+        "genjin_uuid": "e6df92c5-5f20-40c4-8e03-74c2ff39335b",
+    },
+}
+
+
+def _genjin_tag_label(level1: str, level2: str, level3: str) -> str:
+    parts = [part for part in [level1, level2, level3] if part]
+    return "-".join(parts)
+
+
+def _resolve_genjin_tag_meta(tag: dict[str, Any]) -> dict[str, str]:
+    level1 = str(tag.get("level1") or "").strip()
+    level2 = str(tag.get("level2") or "").strip()
+    level3 = str(tag.get("level3") or "").strip()
+    meta = dict(GENJIN_TAG_META.get((level1, level2, level3), {}))
+    if not meta and level3:
+        meta = dict(GENJIN_TAG_META.get((level1, level2, ""), {}))
+    tag_id = str(meta.get("tag_id") or tag.get("tag_id") or "").strip()
+    genjin_uuid = str(meta.get("genjin_uuid") or tag.get("genjin_uuid") or "").strip()
+    return {
+        "tag_id": tag_id,
+        "genjin_uuid": genjin_uuid,
+        "label": _genjin_tag_label(level1, level2, level3),
+    }
+
+
+def _customer_write_context_from_item(item: dict[str, Any] | None) -> dict[str, str]:
+    if not item:
+        return {}
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    com_id = str(item.get("com_id") or raw.get("com_id") or "").strip()
+    com_name = str(
+        item.get("com_name")
+        or raw.get("com_name")
+        or item.get("company_name")
+        or raw.get("comname_01")
+        or raw.get("企业名称")
+        or raw.get("客户名称")
+        or raw.get("公司名称")
+        or ""
+    ).strip()
+    return {"customer_com_id": com_id, "customer_com_name": com_name}
+
+
+async def _resolve_customer_write_context(company_id: str, runtime_cfg: dict[str, Any]) -> dict[str, str]:
+    company_id = str(company_id or "").strip()
+    if not company_id:
+        return {}
+    for item in CUSTOMER_INDEX_CACHE.get("items", []) or []:
+        if str(item.get("company_id") or "") == company_id:
+            return _customer_write_context_from_item(item)
+    shared = _load_shared_cache()
+    for item in (shared or {}).get("items", []) or []:
+        if str(item.get("company_id") or "") == company_id:
+            return _customer_write_context_from_item(item)
+
+    mapping = runtime_cfg.get("mapping", {}) or {}
+    main_form = ((mapping.get("forms") or {}).get("客户主表") or {})
+    app_id = str(runtime_cfg.get("app_id") or "").strip()
+    api_key = str(runtime_cfg.get("api_key") or "").strip()
+    entry_id = str(main_form.get("entry_id") or runtime_cfg.get("main_entry_id") or "").strip()
+    if not api_key or not app_id or not entry_id:
+        return {}
+    try:
+        client = JiandaoyunClient(api_key=api_key)
+        profile = await client.query_single_data(app_id=app_id, entry_id=entry_id, data_id=company_id)
+    except Exception as exc:
+        logger.warning("resolve customer write context failed for %s: %s", company_id, exc)
+        return {}
+    row = profile.get("data") or {}
+    return _customer_write_context_from_item(
+        {
+            "company_id": row.get("_id") or company_id,
+            "company_name": row.get("comname_01") or row.get("com_name") or "",
+            "com_name": row.get("com_name") or "",
+            "com_id": row.get("com_id") or "",
+            "raw": row,
+        }
+    )
+
+
+def _apply_customer_write_context(card: dict[str, Any], company_id: str, context: dict[str, str]) -> None:
+    card["customer_id"] = company_id
+    if context.get("customer_com_id"):
+        card["customer_com_id"] = context["customer_com_id"]
+    if context.get("customer_com_name"):
+        card["customer_com_name"] = context["customer_com_name"]
+
+
+RELATED_YUQI_OVERRIDE_FIELDS = {
+    "related_yuqi_id",
+    "related_yuqi_card_id",
+    "related_yuqi_source",
+    "related_yuqi_summary",
+    "related_yuqi_reason",
+    "related_yuqi_confidence",
+}
+
+
+def _apply_operation_card_override(card: dict[str, Any], override: dict[str, Any], forms_cfg: dict[str, Any]) -> None:
+    if not override:
+        return
+    target_form = str(override.get("target_form") or "").strip()
+    if target_form:
+        card["target_form"] = target_form
+        new_fc = forms_cfg.get(target_form, {})
+        card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
+
+    for key in RELATED_YUQI_OVERRIDE_FIELDS:
+        if key not in override:
+            continue
+        value = override.get(key)
+        card[key] = None if value is None else str(value).strip()
+
+    if card.get("target_form") != "场景表":
+        for key in RELATED_YUQI_OVERRIDE_FIELDS:
+            card.pop(key, None)
+
+
 async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str, Any]:
     mapping = runtime_cfg.get("mapping", {})
     main_form = ((mapping or {}).get("forms") or {}).get("客户主表", {})
@@ -413,7 +754,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
         return CUSTOMER_INDEX_CACHE
 
     display_fields = list(main_form.get("display_fields", []) or [])
-    for required_field in ["comname_01", "com_name", "com_type", "revenue_level", "if_access", "follow_form", "success"]:
+    for required_field in ["comname_01", "com_name", "com_type", "revenue_level", "if_access", "follow_form", "success", "com_id"]:
         if required_field not in display_fields:
             display_fields.append(required_field)
     
@@ -502,6 +843,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
             "if_access": row.get("if_access"),
             "follow_form": row.get("follow_form"),
             "csm": _extract_csm_name(row.get("success")),
+            "com_id": row.get("com_id", ""),
             "raw": row,
         }
         for row in all_rows
@@ -584,6 +926,11 @@ def on_startup() -> None:
     _reload_cards_on_startup()
     # 清理卡在 in-progress 状态超过 1 小时的转写
     _reset_stale_transcripts()
+    # Sandbox bundle integrity check (warn-only — missing/changed files don't block startup).
+    try:
+        verify_manifest()
+    except Exception:
+        logger.exception("startup: sandbox manifest verification crashed (continuing)")
     logger.info("startup complete")
 
 
@@ -665,12 +1012,32 @@ def system_status(db: Session = Depends(get_db)):
 
 @app.post("/api/v1/auth/login")
 def login(payload: LoginPayload, db: Session = Depends(get_db)):
+    import bcrypt
+
     normalized_username = payload.username.strip()
+
+    user_row = db.scalar(select(User).where(User.username == normalized_username))
+    if user_row and user_row.is_active:
+        try:
+            ok = bcrypt.checkpw(payload.password.encode(), user_row.password_hash.encode())
+        except ValueError:
+            ok = False
+        if ok:
+            role = getattr(user_row, "role", "") or "user"
+            token = create_jwt({
+                "source": role,
+                "username": user_row.username,
+                "display_name": user_row.display_name,
+                "integrate_id": user_row.integrate_id,
+            })
+            return {"token": token, "display_name": user_row.display_name, "source": role}
+
     admin = db.scalar(select(Superadmin).where(Superadmin.username == normalized_username))
-    if not admin or admin.password_hash != hashlib.sha256(payload.password.encode()).hexdigest():
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
-    token = create_jwt({"source": "superadmin", "username": admin.username})
-    return {"token": token, "display_name": admin.display_name}
+    if admin and admin.password_hash == hashlib.sha256(payload.password.encode()).hexdigest():
+        token = create_jwt({"source": "superadmin", "username": admin.username})
+        return {"token": token, "display_name": admin.display_name, "source": "superadmin"}
+
+    raise HTTPException(status_code=401, detail="用户名或密码错误")
 
 
 @app.post("/api/v1/sso/generate")
@@ -711,10 +1078,7 @@ async def sso_cas_callback(st: str = "", sid: str = "", service: str = "", reque
         raise HTTPException(status_code=400, detail="缺少 CAS service ticket (st)")
 
     effective_service = service or CAS_REFERRER_URL
-    # PGT 回调暂不启用（CAS 测试环境对 http URL 验证不通过，
-    # 后续需要 HTTPS 代理回调时再修复）
-    # pgt_url = str(request.url_for("sso_cas_pgt_callback")) if request else ""
-    pgt_url = ""
+    pgt_url = str(request.url_for("sso_cas_pgt_callback")) if request else ""
 
     try:
         cas_user = await cas_auth_service.validate_st(st, effective_service, pgt_url=pgt_url)
@@ -751,7 +1115,7 @@ CAS_REFERRER_URL = "https://47-98-102-197.sslip.io/"
 async def sso_cas_login():
     """CAS SSO 入口 —— 重定向到帆软通行证登录页"""
     cas_login_url = (
-        "https://passport.fanruan.com/login/signin"
+        "https://fanruanclub.com/login/signin"
         "?app=zhidang"
         "&protocol=cas"
         f"&referrer={CAS_REFERRER_URL}"
@@ -759,9 +1123,147 @@ async def sso_cas_login():
     return RedirectResponse(url=cas_login_url)
 
 
+@app.get("/api/v1/sso/bi-callback")
+async def sso_bi_callback(ticket: str = "", service: str = "", request: Request = None):
+    """BI 登录链路回调：CAS验证 → 创建JWT → 经BI设cookie → 回到智档"""
+    if not ticket:
+        raise HTTPException(status_code=400, detail="缺少 CAS ticket")
+
+    effective_service = service or f"{CAS_REFERRER_URL}api/v1/sso/bi-callback"
+
+    pgt_url = str(request.url_for("sso_cas_pgt_callback")) if request else ""
+
+    try:
+        cas_user = await cas_auth_service.validate_st(ticket, effective_service, pgt_url=pgt_url)
+    except CasAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.exception("CAS validate_st failed in bi-callback")
+        raise HTTPException(status_code=500, detail=f"CAS 验证异常: {exc}")
+
+    attrs = cas_user.get("attributes", {}) or {}
+    if isinstance(attrs, dict):
+        username_list = attrs.get("username", [])
+        effective_username = str(username_list[0]) if username_list else str(cas_user.get("username", ""))
+    else:
+        effective_username = str(cas_user.get("username", ""))
+
+    jwt_token = create_jwt({"user_name": effective_username, "user_id": effective_username, "source": "sso"})
+
+    # 通过 BI 的 CAS 登录链路，让浏览器获得 fine_auth_token cookie
+    bi_login_url = f"https://crm.finereporthelp.com/WebReport/decision/cas/login?service={CAS_REFERRER_URL}login?token={jwt_token}"
+    return RedirectResponse(url=bi_login_url)
+
+
 @app.get("/api/v1/me")
 def me(user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
-    return user
+    username = user.get('username', '')
+    user_row = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
+    onboarding = user_row.onboarding_enabled if user_row else True
+    return {**user, 'onboarding_enabled': onboarding}
+
+
+@app.post("/api/v1/auth/change-password")
+def change_password(payload: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    import bcrypt
+    old_pw = (payload.get("old_password") or "").strip()
+    new_pw = (payload.get("new_password") or "").strip()
+    if not old_pw or not new_pw:
+        raise HTTPException(status_code=400, detail="请输入旧密码和新密码")
+    if len(new_pw) < 6:
+        raise HTTPException(status_code=400, detail="新密码至少6位")
+    username = user.get("username", "")
+    user_row = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
+    if not user_row:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    try:
+        ok = bcrypt.checkpw(old_pw.encode(), user_row.password_hash.encode())
+    except ValueError:
+        ok = False
+    if not ok:
+        raise HTTPException(status_code=403, detail="旧密码错误")
+    user_row.password_hash = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+    db.commit()
+    return {"success": True}
+
+
+@app.patch("/api/v1/me/onboarding")
+def update_onboarding(payload: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    enabled = payload.get("enabled", True)
+    username = user.get("username", "")
+    user_row = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
+    if user_row:
+        user_row.onboarding_enabled = bool(enabled)
+        db.commit()
+    return {"onboarding_enabled": bool(enabled)}
+
+
+@app.get("/api/v1/me/followup-review-template")
+def get_followup_review_template(user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    return load_followup_review_template(db, user)
+
+
+@app.put("/api/v1/me/followup-review-template")
+def update_followup_review_template(payload: dict[str, Any], user: dict[str, Any] = Depends(require_auth), db: Session = Depends(get_db)):
+    try:
+        return save_followup_review_template(db, user, payload or {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/v1/admin/users")
+def admin_users(q: str = "", page: int = 1, limit: int = 20, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
+    stmt = select(User)
+    if q:
+        stmt = stmt.where(User.username.ilike(f"%{q}%") | User.display_name.ilike(f"%{q}%"))
+    total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar()
+    rows = db.scalars(stmt.order_by(User.username).offset((page - 1) * limit).limit(limit)).all()
+    return {"users": [{"id": u.id, "username": u.username, "display_name": u.display_name, "integrate_id": u.integrate_id, "role": u.role, "is_active": u.is_active, "onboarding_enabled": u.onboarding_enabled, "created_at": u.created_at.isoformat() if u.created_at else None} for u in rows], "total": total}
+
+
+@app.post("/api/v1/admin/users")
+def admin_user_create(payload: dict[str, Any], user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
+    import bcrypt
+    username = (payload.get("username") or "").strip()
+    password = (payload.get("password") or "").strip()
+    if not username or not password: raise HTTPException(status_code=400, detail="用户名和密码必填")
+    if len(password) < 6: raise HTTPException(status_code=400, detail="密码至少6位")
+    if db.scalars(select(User).where(User.username == username)).first(): raise HTTPException(status_code=400, detail="用户名已存在")
+    u = User(id=str(uuid4()), username=username, password_hash=bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(), display_name=payload.get("display_name", "") or None, integrate_id=payload.get("integrate_id", "") or None, role=payload.get("role", "user") or "user")
+    db.add(u); db.commit(); db.refresh(u)
+    return {"id": u.id, "username": u.username, "display_name": u.display_name, "role": u.role}
+
+
+@app.put("/api/v1/admin/users/{user_id}")
+def admin_user_update(user_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
+    u = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+    if not u: raise HTTPException(status_code=404, detail="用户不存在")
+    if "display_name" in payload: u.display_name = payload["display_name"] or None
+    if "integrate_id" in payload: u.integrate_id = payload["integrate_id"] or None
+    if "role" in payload: u.role = payload["role"] or "user"
+    db.commit()
+    return {"success": True}
+
+
+@app.patch("/api/v1/admin/users/{user_id}")
+def admin_user_patch(user_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
+    u = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+    if not u: raise HTTPException(status_code=404, detail="用户不存在")
+    if "is_active" in payload: u.is_active = bool(payload["is_active"])
+    db.commit()
+    return {"success": True}
+
+
+@app.post("/api/v1/admin/users/{user_id}/reset-password")
+def admin_user_reset_pw(user_id: str, payload: dict[str, Any] | None = None, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
+    import bcrypt
+    u = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+    if not u: raise HTTPException(status_code=404, detail="用户不存在")
+    new_pw = (payload or {}).get("new_password", "").strip() if payload else ""
+    if not new_pw: new_pw = str(uuid4())[:8]
+    u.password_hash = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+    db.commit()
+    return {"success": True, "new_password": new_pw}
 
 
 @app.get("/api/v1/admin/config")
@@ -787,23 +1289,31 @@ def get_admin_config(user: dict[str, Any] = Depends(require_superadmin), db: Ses
         "power_map_get_path": cfg.power_map_get_path or "",
         "power_map_update_path": cfg.power_map_update_path or "",
         "power_map_auth_token_configured": bool(cfg.power_map_auth_token_encrypted),
+        "power_map_login_mobile": cfg.power_map_login_mobile or "",
+        "power_map_login_password_configured": bool(cfg.power_map_login_password_encrypted),
     }
 
 
 @app.put("/api/v1/admin/config")
 def save_admin_config(payload: ConfigPayload, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
     cfg = ensure_system_config(db)
-    before = {k: getattr(cfg, k) for k in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days", "power_map_base_url", "power_map_get_path", "power_map_update_path"]}
+    before = {k: getattr(cfg, k) for k in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days", "power_map_base_url", "power_map_get_path", "power_map_update_path", "power_map_login_mobile"]}
     if payload.jiandaoyun_api_key:
         cfg.jiandaoyun_api_key_encrypted = encrypt_secret(payload.jiandaoyun_api_key)
     if payload.dingtalk_app_secret:
         cfg.dingtalk_app_secret_encrypted = encrypt_secret(payload.dingtalk_app_secret)
     if payload.power_map_auth_token:
         cfg.power_map_auth_token_encrypted = encrypt_secret(payload.power_map_auth_token)
+    if payload.power_map_login_password:
+        cfg.power_map_login_password_encrypted = encrypt_secret(payload.power_map_login_password)
     for key in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days", "power_map_base_url", "power_map_get_path", "power_map_update_path"]:
         value = getattr(payload, key)
         if value is not None:
             setattr(cfg, key, value)
+    if payload.power_map_login_mobile is not None:
+        cfg.power_map_login_mobile = payload.power_map_login_mobile
+    if payload.power_map_login_mobile is not None:
+        cfg.power_map_login_mobile = payload.power_map_login_mobile
     mapping = dict((cfg.field_mappings or {}).get("jiandaoyun", {}) or {})
     forms = dict(mapping.get("forms") or {})
     main_form = dict(forms.get("客户主表") or {})
@@ -1103,15 +1613,12 @@ def spa_fallback_preview(full_path: str):
 
 
 @app.post("/api/v1/transcript/upload")
-async def transcript_upload(files: list[UploadFile] = File(...), company_name_hint: str = Form(default=""), db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+async def transcript_upload(files: list[UploadFile] = File(...), company_name_hint: str = Form(default=""), company_id: str = Form(default=""), db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     allowed_types = {
         ".txt": "text",
         ".srt": "text",
         ".vtt": "text",
         ".md": "text",
-        ".pdf": "text",
-        ".doc": "text",
-        ".docx": "text",
         ".jpeg": "image",
         ".jpg": "image",
         ".png": "image",
@@ -1127,6 +1634,7 @@ async def transcript_upload(files: list[UploadFile] = File(...), company_name_hi
     has_image = False
     file_names: list[str] = []
     total_char_count = 0
+    persisted_image_segments: list[dict[str, Any]] = []
 
     for f in files:
         suffix = Path(f.filename or "").suffix.lower()
@@ -1149,6 +1657,12 @@ async def transcript_upload(files: list[UploadFile] = File(...), company_name_hi
                 merged_title = f.filename
         else:
             has_image = True
+            persisted_image_segments.append(
+                _persisted_image_segment(
+                    f.filename or "unknown-image",
+                    _build_image_input_item(raw_bytes, suffix),
+                )
+            )
             merged_text_parts.append(f"--- 文件: {f.filename} (图片) ---")
 
     if has_image and merged_text_parts and any("(图片)" not in p for p in merged_text_parts):
@@ -1169,12 +1683,12 @@ async def transcript_upload(files: list[UploadFile] = File(...), company_name_hi
         source_id=", ".join(file_names),
         title=parsed["title"],
         raw_text=parsed["raw_text"],
-        segments=parsed["segments"],
+        segments=[*(parsed["segments"] or []), *persisted_image_segments],
         input_type=input_type,
         status="parsed",
         company_name=normalized_company or None,
-        company_id=hash_company_id(normalized_company) if normalized_company else None,
-        sso_user_name=user.get("user_name") or user.get("username"),
+        company_id=company_id.strip() or (hash_company_id(normalized_company) if normalized_company else None),
+        sso_user_name=user.get("display_name") or user.get("user_name") or user.get("username"),
         sso_user_id=user.get("user_id") if user.get("source") == "sso" else None,
     )
     db.add(transcript)
@@ -1198,9 +1712,9 @@ def transcript_dingtalk_fetch(payload: DingtalkFetchPayload, db: Session = Depen
         segments=parsed["segments"],
         input_type="text",
         status="parsed",
-        company_name=None,
-        company_id=None,
-        sso_user_name=user.get("user_name") or user.get("username"),
+        company_name=payload.get("company_name") or None,
+        company_id=payload.get("company_id") or None,
+        sso_user_name=user.get("display_name") or user.get("user_name") or user.get("username"),
         sso_user_id=user.get("user_id") if user.get("source") == "sso" else None,
     )
     db.add(transcript)
@@ -1230,8 +1744,7 @@ def list_transcripts(db: Session = Depends(get_db), user: dict[str, Any] = Depen
                 "status": t.status,
                 "company_name": t.company_name,
                 "company_name_hint": t.company_name,
-                "raw_text": t.raw_text,
-                "segments": t.segments,
+                "raw_text_preview": (t.raw_text or "")[:200],
                 "input_type": t.input_type,
                 "created_at": t.created_at.isoformat() if t.created_at else None,
                 "extraction_summary": _extraction_summary(t.agent_a_result),
@@ -1274,21 +1787,125 @@ def get_transcript(transcript_id: str, db: Session = Depends(get_db), user: dict
     }
 
 
+@app.get("/api/v1/followup-records")
+def list_followup_records(
+    company_id: str | None = None,
+    limit: int = 500,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    followup_field_mappings = ensure_system_config(db).field_mappings
+    stmt = _allowed_followup_stmt(user).order_by(FollowupRecord.created_at.desc())
+    if company_id:
+        stmt = stmt.where(FollowupRecord.company_id == company_id)
+    stmt = stmt.limit(max(1, min(limit, 1000)))
+    items = db.scalars(stmt).all()
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "source": r.source,
+                "source_id": r.source_id,
+                "title": r.title,
+                "status": r.status,
+                "company_id": r.company_id,
+                "company_name": r.company_name,
+                "company_name_hint": r.company_name,
+                "raw_text": r.raw_text,
+                "input_type": r.input_type,
+                "review_date": r.review_date,
+                "follow_type": r.follow_type,
+                "sso_user_name": r.sso_user_name,
+                "yuqi_id": extract_followup_yuqi_id(r.raw_record, field_mappings=followup_field_mappings),
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "extraction_summary": _extraction_summary(r.agent_a_result),
+                "card_count": len((r.agent_b_result or {}).get("result", {}).get("operation_cards", [])) if r.agent_b_result else 0,
+            }
+            for r in items
+        ]
+    }
+
+
+@app.get("/api/v1/followup-records/{record_id}")
+def get_followup_record(record_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    stmt = _allowed_followup_stmt(user).where(FollowupRecord.id == record_id)
+    r = db.scalar(stmt)
+    if not r:
+        raise HTTPException(status_code=404, detail="跟进记录不存在")
+    followup_field_mappings = ensure_system_config(db).field_mappings
+    return {
+        "id": r.id,
+        "source": r.source,
+        "source_id": r.source_id,
+        "title": r.title,
+        "status": r.status,
+        "company_id": r.company_id,
+        "company_name": r.company_name,
+        "company_name_hint": r.company_name,
+        "raw_text": r.raw_text,
+        "input_type": r.input_type,
+        "review_date": r.review_date,
+        "follow_type": r.follow_type,
+        "sso_user_name": r.sso_user_name,
+        "yuqi_id": extract_followup_yuqi_id(r.raw_record, field_mappings=followup_field_mappings),
+        "agent_a_result": r.agent_a_result,
+        "agent_b_result": r.agent_b_result,
+        "raw_record": r.raw_record,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    }
+
+
+@app.post("/api/v1/followup-records/fetch")
+async def fetch_followup_records(
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_superadmin),
+):
+    from .services.followup_scraper import fetch_and_store
+
+    cfg = ensure_system_config(db)
+    api_key = decrypt_secret(cfg.jiandaoyun_api_key_encrypted) if cfg.jiandaoyun_api_key_encrypted else ""
+    if not api_key:
+        raise HTTPException(status_code=400, detail="简道云 API Key 未配置")
+    try:
+        result = await fetch_and_store(db, api_key=api_key)
+    except JiandaoyunClientError as exc:
+        raise HTTPException(status_code=502, detail=f"简道云接口失败: {exc}")
+    return result
+
+
 @app.post("/api/v1/transcripts/{transcript_id}/analyze")
-async def start_transcript_analysis(transcript_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
-    stmt = _allowed_transcript_stmt(user).where(Transcript.id == transcript_id)
-    transcript = db.scalar(stmt)
-    if not transcript:
-        raise HTTPException(status_code=404, detail="转写不存在")
-    if transcript.status not in ("parsed", "error"):
-        raise HTTPException(status_code=409, detail=f"转写状态为 {transcript.status}，无法启动分析")
-    if not transcript.raw_text:
-        raise HTTPException(status_code=400, detail="转写内容为空")
+async def start_transcript_analysis(
+    transcript_id: str,
+    source_type: str = "transcript",
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    if source_type == "followup":
+        stmt = _allowed_followup_stmt(user).where(FollowupRecord.id == transcript_id)
+        record = db.scalar(stmt)
+        if not record:
+            raise HTTPException(status_code=404, detail="跟进记录不存在")
+    else:
+        stmt = _allowed_transcript_stmt(user).where(Transcript.id == transcript_id)
+        record = db.scalar(stmt)
+        if not record:
+            raise HTTPException(status_code=404, detail="转写不存在")
+
+    if record.status not in ("parsed", "error"):
+        raise HTTPException(status_code=409, detail=f"状态为 {record.status}，无法启动分析")
+    if not record.raw_text:
+        raise HTTPException(status_code=400, detail="内容为空")
 
     from .services.analysis_pipeline import run_analysis_pipeline
-    asyncio.create_task(run_analysis_pipeline(transcript_id))
+    asyncio.create_task(run_analysis_pipeline(transcript_id, source_type=source_type))
 
-    emit_event(db, "analysis.started", {"user_name": user.get("username", "demo"), "user_id": user.get("username", "demo"), "source": user.get("source", "superadmin")}, {"transcript_id": transcript_id, "company_id_hash": transcript.company_id or "demo", "session_id": str(uuid4())}, {"status": "analyzing"})
+    emit_event(
+        db,
+        "analysis.started",
+        {"user_name": user.get("username", "demo"), "user_id": user.get("username", "demo"), "source": user.get("source", "superadmin")},
+        {"transcript_id": transcript_id, "company_id_hash": record.company_id or "demo", "session_id": str(uuid4())},
+        {"status": "analyzing", "source_type": source_type},
+    )
     return TranscriptAnalyzeResponse(transcript_id=transcript_id, status="analyzing", message="分析已启动，可关闭页面稍后查看")
 
 
@@ -1373,6 +1990,7 @@ async def customers_list(
                     "comname_01": row.get("comname_01"),
                     "com_name": row.get("com_name"),
                     "csm": _extract_csm_name(row.get("success")),
+                    "com_id": row.get("com_id", ""),
                     "raw": row,
                 }
                 for row in (one_page.get("data", []) or [])
@@ -1394,6 +2012,7 @@ async def customers_list(
                     "comname_01": item.get("company_name"),
                     "com_name": item.get("company_name"),
                     "csm": "",
+                    "com_id": "",
                     "raw": item,
                 }
                 for item in local_customers
@@ -1402,11 +2021,15 @@ async def customers_list(
             if warning is None:
                 warning = "简道云客户索引拉取失败，已回退本地转写客户列表"
 
-    # 多租户：SSO 用户只显示自己负责的客户
+    # 多租户：SSO / user 用户只显示自己负责的客户
     if user.get("source") == "sso":
         user_name = user.get("user_name", "")
         if user_name:
             cached_items = [c for c in cached_items if c.get("csm") == user_name]
+    elif user.get("source") == "user":
+        display_name = user.get("display_name", "")
+        if display_name:
+            cached_items = [c for c in cached_items if c.get("csm") == display_name]
 
     keyword_norm = keyword.strip().lower()
     if keyword_norm:
@@ -1468,6 +2091,10 @@ async def company_search(query: CompanySearchQuery = Depends(), db: Session = De
         user_name = user.get("user_name", "")
         if user_name:
             customers = [c for c in customers if c.get("csm") == user_name]
+    elif user.get("source") == "user":
+        display_name = user.get("display_name", "")
+        if display_name:
+            customers = [c for c in customers if c.get("csm") == display_name]
     if keyword:
         customers = [item for item in customers if keyword in item["company_name"].lower()]
     return {"items": customers[:50], "status": "cache" if CUSTOMER_INDEX_CACHE.get("items") else "mock"}
@@ -1490,6 +2117,10 @@ async def search_customers(
         user_name = user.get("user_name", "")
         if user_name:
             cached_items = [c for c in cached_items if c.get("csm") == user_name]
+    elif user.get("source") == "user":
+        display_name = user.get("display_name", "")
+        if display_name:
+            cached_items = [c for c in cached_items if c.get("csm") == display_name]
 
     if not cached_items:
         # 缓存为空时回退到 customers_list 的逻辑刷新一次
@@ -1601,6 +2232,56 @@ async def customer_changjing(company_id: str, limit: int = 100, db: Session = De
     return {"mode": "jiandaoyun", "items": data.get("data", [])}
 
 
+@app.get("/api/v1/customers/{company_id}/contacts")
+async def customer_contacts(company_id: str, com_id: str = "", user: dict[str, Any] = Depends(require_auth)):
+    """Proxy CRM contact list for the customer's com_id."""
+    items = CUSTOMER_INDEX_CACHE.get("items", []) or []
+    cust = next((c for c in items if c.get("company_id") == company_id), None)
+    effective_com_id = (com_id or "").strip() or (cust.get("com_id", "") if cust else "")
+    if not effective_com_id:
+        return {"contacts": [], "warning": "com_id not found in cache"}
+    url = "https://crm.finereporthelp.com/WebReport/decision/url/pub/crm/data"
+    params = {
+        "id": "18b1e023fb1b46008b7c16357f0e5c41",
+        "secret": "123456",
+        "contname": "",
+        "comid": effective_com_id,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, params=params)
+    try:
+        data = resp.json()
+        return {"contacts": data.get("data", []), "com_id": effective_com_id}
+    except Exception:
+        return {"contacts": [], "error": "CRM contact API failed"}
+
+
+@app.get("/api/v1/customers/{company_id}/tasks")
+async def customer_tasks(company_id: str, username: str = "", com_id: str = "", user: dict[str, Any] = Depends(require_auth)):
+    """Proxy CRM task list for the customer's com_id."""
+    items = CUSTOMER_INDEX_CACHE.get("items", []) or []
+    cust = next((c for c in items if c.get("company_id") == company_id), None)
+    effective_com_id = (com_id or "").strip() or (cust.get("com_id", "") if cust else "")
+    if not effective_com_id:
+        return {"tasks": [], "warning": "com_id not found in cache"}
+    effective_username = username or user.get("integrate_id") or user.get("username", "")
+    url = "https://crm.finereporthelp.com/WebReport/decision/url/pub/crm/data"
+    params = {
+        "id": "0aefe1a17d854ca18c2430c39fa0e3b2",
+        "secret": "123456",
+        "com_id": effective_com_id,
+        "username": effective_username,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, params=params)
+    try:
+        data = resp.json()
+        tasks = data.get("data", [])
+        return {"tasks": tasks, "com_id": effective_com_id}
+    except Exception:
+        return {"tasks": [], "error": "CRM task API failed"}
+
+
 @app.post("/api/v1/customers/switch")
 def customer_switch(payload: CustomerSwitchPayload, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     emit_event(
@@ -1646,12 +2327,17 @@ def _build_agent_llm_client(llm_cfg: dict[str, str]) -> Any:
 
 def _fallback_extraction(transcript_id: str, transcript: dict[str, Any], reason: str) -> dict[str, Any]:
     mock_data = agent_a_mock(transcript)
+    facts = _fallback_mock_to_facts(mock_data, str(transcript.get("input_type") or "text"))
     return {
         "task_id": f"ext-{transcript_id}",
         "status": "completed",
         "mode": "fallback",
         "fallback_reason": reason,
-        "result": mock_data,
+        "result": {
+            "facts": facts,
+            "total_extracted": len(facts),
+            "legacy_result": mock_data,
+        },
     }
 
 
@@ -1987,6 +2673,15 @@ def operations_review(payload: ReviewAction, db: Session = Depends(get_db), user
                 card["review_reason"] = payload.reason
             updated = True
             break
+    # 同步写入 DB，防止重启丢失审批状态
+    if updated:
+        t = db.get(Transcript, payload.transcript_id)
+        if t and t.agent_b_result:
+            # 深拷贝避免引用问题
+            result = dict(t.agent_b_result.get("result", {}) or {})
+            result["operation_cards"] = cards
+            t.agent_b_result = {**t.agent_b_result, "result": result}
+            db.commit()
     emit_event(
         db,
         "review.action",
@@ -2011,45 +2706,85 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         api_key = runtime_cfg.get("api_key") or ""
         app_id = runtime_cfg.get("app_id") or ""
 
-        # 合并前端传回的字段更新（如 status、is_first_value 等用户修改项）
-        if req.field_updates:
+        # ── 应用前端传入的所有覆写（company_id / card_overrides / field_updates）──
+        logger.info(f"[DEBUG] execute: company_id='{req.company_id}' card_overrides={list(req.card_overrides.keys())[:5]} field_updates={list(req.field_updates.keys())[:5]} approved={len(approved)}")
+
+        customer_write_context: dict[str, str] = {}
+        if req.company_id:
+            customer_write_context = await _resolve_customer_write_context(req.company_id, runtime_cfg)
             for card in approved:
-                cid = card.get("card_id")
-                updates = req.field_updates.get(cid, {})
-                if not updates:
-                    continue
-                change_items = card.get("change_items")
+                _apply_customer_write_context(card, req.company_id, customer_write_context)
+
+        for card in approved:
+            cid = card.get("card_id")
+            _apply_operation_card_override(card, req.card_overrides.get(cid, {}), forms_cfg)
+            # field_updates
+            up = req.field_updates.get(cid, {})
+            if up:
+                change_items = card.get("change_items") or []
+                for item in change_items:
+                    fn = item.get("field_name")
+                    if fn in up:
+                        item["new_value"] = up[fn]
+                # 对 change_items 中不存在的字段，从 field_mapping 查 widget 后追加
+                form_cfg = forms_cfg.get(card.get("target_form", ""), {})
+                field_mapping = form_cfg.get("field_mapping") or {}
+                existing_fields = {it.get("field_name") for it in change_items}
+                for field_name, new_val in up.items():
+                    if field_name in existing_fields:
+                        continue
+                    mapped = field_mapping.get(field_name)
+                    if mapped and isinstance(mapped, dict):
+                        change_items.append({
+                            "field_name": field_name,
+                            "widget_name": str(mapped.get("widget", "")),
+                            "old_value": None,
+                            "new_value": new_val,
+                        })
                 if change_items:
-                    for item in change_items:
-                        fn = item.get("field_name")
-                        if fn in updates:
-                            item["new_value"] = updates[fn]
-                    # 如果 field_updates 中有字段在 change_items 中不存在，追加新的 change item
-                    form_cfg = forms_cfg.get(card.get("target_form", ""), {})
-                    field_mapping = form_cfg.get("field_mapping") or {}
-                    existing_fields = {it.get("field_name") for it in change_items}
-                    for field_name, new_val in updates.items():
-                        if field_name in existing_fields:
-                            continue
-                        mapped = field_mapping.get(field_name)
-                        if mapped and isinstance(mapped, dict):
-                            change_items.append({
-                                "field_name": field_name,
-                                "widget_name": str(mapped.get("widget", "")),
-                                "old_value": None,
-                                "new_value": new_val,
-                            })
+                    card["change_items"] = change_items
+
+        # ── 全部覆写落盘到 OPERATION_CARD_STORE + DB ──
+        for card in cards:
+            if req.company_id:
+                _apply_customer_write_context(card, req.company_id, customer_write_context)
+            cid = card.get("card_id")
+            _apply_operation_card_override(card, req.card_overrides.get(cid, {}), forms_cfg)
+        t = db.get(Transcript, req.transcript_id) or db.get(FollowupRecord, req.transcript_id)
+        if t and t.agent_b_result:
+            result = dict(t.agent_b_result.get("result", {}) or {})
+            result["operation_cards"] = cards
+            t.agent_b_result = {**t.agent_b_result, "result": result}
+            db.commit()
+            logger.info("[DEBUG] execute: persisted %d cards to DB", len(cards))
         if not api_key or not app_id:
             results = [{"card_id": c.get("card_id"), "execute_status": "skipped", "error": "jiandaoyun_api_key_not_configured"} for c in approved]
             return {"success": True, "results": results}
-        writer = JiandaoyunWriter(api_key=api_key, app_id=app_id)
+        data_creator = user.get("integrate_id") or user.get("username", "")
+        writer = JiandaoyunWriter(api_key=api_key, app_id=app_id, data_creator=data_creator)
         results = await execute_cards(db=db, transcript_id=req.transcript_id, cards=approved, writer=writer, mapping_forms=forms_cfg)
+        # 更新转写状态为已审核
+        from .models import Transcript as _T, FollowupRecord as _F
+        record = db.get(_T, req.transcript_id) or db.get(_F, req.transcript_id)
+        if record:
+            record.status = 'reviewed'
+            db.commit()
+        # 同步更新 OPERATION_CARD_STORE 中的卡片状态
+        store_cards = OPERATION_CARD_STORE.get(req.transcript_id, [])
+        for c in store_cards:
+            if c.get("review_status") == "approved":
+                c["execute_status"] = "executed"
         # Write back execution statuses.
         by_id = {r["card_id"]: r for r in results}
         for card in cards:
             cid = card.get("card_id")
             if cid in by_id:
                 card["execute_status"] = by_id[cid]["execute_status"]
+        if record and record.agent_b_result:
+            result_payload = dict(record.agent_b_result.get("result", {}) or {})
+            result_payload["operation_cards"] = cards
+            record.agent_b_result = {**record.agent_b_result, "result": result_payload}
+            db.commit()
         return {"success": True, "results": results}
 
     # Legacy flow compatibility.
@@ -2096,7 +2831,8 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         target_form = str(tool_input.get("target_form") or "")
         form_config = mapping_forms.get(target_form, {}) or {}
         entry_id = get_entry_id(target_form, mapping_forms)
-        writer = JiandaoyunWriter(api_key=api_key, app_id=app_id)
+        data_creator = user.get("integrate_id") or user.get("username", "")
+        writer = JiandaoyunWriter(api_key=api_key, app_id=app_id, data_creator=data_creator)
         try:
             if tool_name == "create_customer_record":
                 result = await writer.create_record(entry_id=entry_id, data=build_jiandaoyun_payload(tool_input, form_config))
@@ -2257,13 +2993,52 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
 # ── 权利地图 API ──────────────────────────────────────
 
 @app.get("/api/v1/power-map/{company_id}")
-async def power_map_get(company_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+async def power_map_get(company_id: str, version: str | None = None, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     try:
-        map_data = await get_power_map(db, company_id, current_user=user)
+        map_data = await get_power_map(db, company_id, current_user=user, version=version)
         return {"company_id": company_id, "map_data": map_data}
     except Exception as exc:
         logger.exception("power map get failed")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/power-map/{company_id}/bi-com-id")
+async def power_map_bi_com_id(company_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    """返回 BI 系统的 com_id，前端用于构造 iframe URL"""
+    cfg = db.get(SystemConfig, 1)
+    if not cfg:
+        raise HTTPException(status_code=500, detail="系统未初始化")
+
+    prj_id = company_id
+    try:
+        api_key = decrypt_secret(cfg.jiandaoyun_api_key_encrypted) if cfg.jiandaoyun_api_key_encrypted else ""
+        app_id = (cfg.jiandaoyun_app_id or "").strip()
+        field_mappings = dict((cfg.field_mappings or {}).get("jiandaoyun", {}) or {})
+        forms = dict(field_mappings.get("forms") or {})
+        main_form = dict(forms.get("客户主表") or {})
+        main_entry_id = (cfg.main_entry_id or str(main_form.get("entry_id", ""))).strip()
+        if api_key and app_id and main_entry_id:
+            client = JiandaoyunClient(api_key=api_key)
+            profile_data = await client.query_single_data(app_id=app_id, entry_id=main_entry_id, data_id=company_id)
+            profile = profile_data.get("data") if isinstance(profile_data, dict) else profile_data
+            if isinstance(profile, dict):
+                com_id = profile.get("com_id") or ""
+                if com_id:
+                    prj_id = com_id
+    except Exception:
+        pass
+
+    api_cfg = _get_power_map_config(cfg)
+    # powerMap_v3.13.html is served from /WebReport/power_map/, not /WebReport/decision/
+    # Extract origin from base_url to construct the correct path
+    from urllib.parse import urlparse
+    origin = f"{urlparse(api_cfg['base_url']).scheme}://{urlparse(api_cfg['base_url']).netloc}"
+    return {
+        "company_id": company_id,
+        "bi_com_id": prj_id,
+        "bi_base_url": api_cfg["base_url"],
+        "bi_iframe_url": f"{origin}/WebReport/power_map/powerMap_v3.13.html?com_id={prj_id}",
+    }
 
 
 @app.post("/api/v1/power-map/{company_id}/chat")
@@ -2274,7 +3049,7 @@ async def power_map_chat(company_id: str, payload: PowerMapChatPayload, db: Sess
     if payload.confirm:
         return {"reply": "请使用 /confirm 端点确认执行修改。", "session_id": session_id, "needs_confirmation": False}
 
-    result = await chat_power_map(db, company_id, msg, current_user=user)
+    result = await chat_power_map(db, company_id, msg, current_user=user, version=payload.version)
     result["session_id"] = session_id
     return result
 
@@ -2282,11 +3057,507 @@ async def power_map_chat(company_id: str, payload: PowerMapChatPayload, db: Sess
 @app.post("/api/v1/power-map/{company_id}/confirm")
 async def power_map_confirm(company_id: str, payload: PowerMapConfirmPayload, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     try:
-        result = await confirm_power_map(db, company_id, payload.proposed_changes, current_user=user)
+        result = await confirm_power_map(db, company_id, payload.proposed_changes, current_user=user, version=payload.version)
         return result
     except Exception as exc:
         logger.exception("power map confirm failed")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/v1/power-map/{company_id}/relayout")
+async def power_map_relayout(company_id: str, payload: PowerMapRelayoutPayload, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    try:
+        result = await relayout_power_map(db, company_id, mode=payload.mode, dept_id=payload.dept_id, current_user=user, version=payload.version)
+        return result
+    except Exception as exc:
+        logger.exception("power map relayout failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/v1/power-map/{company_id}/preview")
+async def power_map_preview(company_id: str, payload: PowerMapPreviewPayload, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+    try:
+        result = await preview_power_map(db, company_id, payload.proposed_changes, current_user=user, version=payload.version)
+        return result
+    except Exception as exc:
+        logger.exception("power map preview failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/power-map/{company_id}/harness-stream")
+async def power_map_harness_stream(
+    company_id: str,
+    prj_id: str = Query(...),
+    session_id: str = Query("", description="In-memory session to resume; empty creates a new one."),
+    version: str | None = Query(None, description="Version UUID for multi-version support"),
+    user: dict[str, Any] = Depends(get_current_user_for_sse),
+    db: Session = Depends(get_db),
+):
+    """SSE stream of harness (vision LLM) execution: thinking, tool calls, results."""
+    cfg = db.get(SystemConfig, 1)
+    if not cfg:
+        raise HTTPException(status_code=500, detail="系统未初始化")
+
+    async def event_generator():
+        try:
+            async for event in _execute_harness_stream(
+                company_id, prj_id, cfg,
+                current_user=user, session_id=session_id, version=version,
+            ):
+                yield f"event: {event.type}\ndata: {json.dumps(event.data, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            logger.exception("power map harness-stream failed")
+            err_payload = {"skipped": True, "error": f"unexpected: {exc}"}
+            yield f"event: done\ndata: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/v1/power-map/{company_id}/chat_v2")
+async def power_map_chat_v2(
+    company_id: str,
+    payload: PowerMapChatPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user_for_sse),
+):
+    """SSE streaming chat v2: vision LLM tool loop against the local sandbox renderer."""
+    # Reject resumed sessions — every chat starts fresh
+    if payload.session_id:
+        raise HTTPException(status_code=400, detail="session_id is no longer accepted; every chat starts a new session")
+
+    cfg = db.get(SystemConfig, 1)
+    if not cfg:
+        raise HTTPException(status_code=500, detail="系统未初始化")
+
+    bi_credentials = {
+        "cookies": {k: v for k, v in request.cookies.items()},
+        "bearer_token": request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or None,
+    }
+    logger.info(
+        "[DEBUG-J] 1.ENTRY company_id=%s user_msg=%s credential_present=%s ver=%s",
+        company_id, payload.message[:200], bool(bi_credentials.get("cookies") or bi_credentials.get("bearer_token")), payload.version,
+    )
+
+    async def event_generator():
+        try:
+            async for event in chat_power_map_v2(
+                db=db,
+                company_id=company_id,
+                message=payload.message,
+                current_user=user,
+                version=payload.version,
+                bi_credentials=bi_credentials,
+                # session_id removed — every chat starts fresh
+            ):
+                yield f"event: {event.type}\ndata: {json.dumps(event.data, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            logger.exception("power map chat_v2 failed")
+            yield f"event: done\ndata: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/v1/power-map/debug/dump_ctx")
+async def debug_dump_ctx(session_id: str):
+    """Debug endpoint: dump a session's ctx (nodes + edges) for e2e geometry checks."""
+    from .services.power_map_service import _get_session as _gs
+    ctx = _gs(session_id)
+    if ctx is None:
+        raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
+    nodes = []
+    for n in ctx.all_nodes:
+        if isinstance(n, dict):
+            nodes.append({"id": n.get("id", ""), "name": n.get("name", ""),
+                          "node_type": n.get("node_type", ""), "parent_id": n.get("parent_id", ""),
+                          "x": n.get("x", 0), "y": n.get("y", 0),
+                          "w": n.get("w", 0), "h": n.get("h", 0)})
+        else:
+            nodes.append({"id": getattr(n, "id", ""), "name": getattr(n, "name", ""),
+                          "node_type": getattr(n, "node_type", ""), "parent_id": getattr(n, "parent_id", ""),
+                          "x": getattr(n, "x", 0), "y": getattr(n, "y", 0),
+                          "w": getattr(n, "w", 0), "h": getattr(n, "h", 0)})
+    edges = []
+    for e in ctx.edges:
+        if isinstance(e, dict):
+            edges.append({"id": e.get("id", ""), "source_id": e.get("source_id", ""),
+                          "target_id": e.get("target_id", ""), "edge_type": e.get("edge_type", "")})
+        else:
+            edges.append({"id": getattr(e, "id", ""), "source_id": getattr(e, "source_id", ""),
+                          "target_id": getattr(e, "target_id", ""), "edge_type": getattr(e, "edge_type", "")})
+    return {"session_id": session_id, "nodes": nodes, "edges": edges}
+
+
+@app.post("/api/v1/power-map/{company_id}/commit")
+async def power_map_commit(
+    company_id: str,
+    payload: dict[str, Any],
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    session_id = str(payload.get("session_id", "")).strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    return await commit_power_map_session(session_id, db)
+
+
+@app.post("/api/v1/power-map/{company_id}/discard")
+async def power_map_discard(
+    company_id: str,
+    payload: dict[str, Any],
+    user: dict[str, Any] = Depends(require_auth),
+):
+    session_id = str(payload.get("session_id", "")).strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    return discard_power_map_session(session_id)
+
+
+_BI_HOST = "https://crm.finereporthelp.com"
+_BI_SANDBOX_HTML_URL = f"{_BI_HOST}/WebReport/power_map/powerMap_v3.13.html"
+_SANDBOX_ASSET_RE = re.compile(
+    r"""(src|href|url)(\s*[=\(]\s*["']?)(https://crm\.finereporthelp\.com/)""",
+    re.IGNORECASE,
+)
+_SANDBOX_REL_ASSET_RE = re.compile(
+    r"""(src|href|url)(\s*[=\(]\s*["'])(css/|js/|img/|fonts/|plugins/)""",
+    re.IGNORECASE,
+)
+_BI_HTML_BASE = f"{_BI_HOST}/WebReport/power_map/"
+_SANDBOX_GETINFO_OLD = (
+    "success: function(result){\n"
+    "                    var obj = eval('(' + result + ')');\n"
+    "                    switchVersion(ver_type,obj,self);"
+)
+_SANDBOX_GETINFO_NEW = (
+    "success: function(result){\n"
+    "                    var obj = window.__GRAPH_DATA__ || eval('(' + result + ')');\n"
+    "                    switchVersion(ver_type,obj,self);"
+)
+
+
+@app.get("/api/power_map/sandbox")
+async def power_map_sandbox(
+    prj_id: str = Query(...),
+    session_id: str = Query(""),
+    version: str = Query(""),
+    db: Session = Depends(get_db),
+):
+    """Serve a patched BI power-map HTML page that uses in-memory graph data.
+
+    If session_id matches a live harness session, the in-memory ctx is injected
+    as window.__GRAPH_DATA__ so the page renders the LLM's working state
+    without hitting BI's getInfo endpoint. Otherwise the page falls back to
+    BI's live data via the original AJAX path.
+    """
+    cfg = db.get(SystemConfig, 1)
+    if not cfg:
+        raise HTTPException(status_code=500, detail="系统未初始化")
+
+    api_cfg = _get_power_map_config(cfg)
+    headers: dict[str, str] = {}
+    cookies: dict[str, str] | None = None
+    try:
+        bi_auth = await cas_auth_service.get_bi_session({
+            "user_id": "power_map_sandbox",
+            "username": "power_map_sandbox",
+            "bi_service": api_cfg["base_url"],
+            "login_mobile": getattr(cfg, "power_map_login_mobile", "") or "",
+            "login_password": decrypt_secret(getattr(cfg, "power_map_login_password_encrypted", None) or "") or "",
+        })
+        headers, cookies = _split_bi_auth(bi_auth)
+    except Exception:
+        auth_token = decrypt_secret(cfg.power_map_auth_token_encrypted) if cfg.power_map_auth_token_encrypted else ""
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+
+    try:
+        html = render_sandbox_html("power_map_sandbox")
+    except FileNotFoundError as exc:
+        logger.exception("sandbox: local HTML missing")
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    html = html.replace(_SANDBOX_GETINFO_OLD, _SANDBOX_GETINFO_NEW)
+
+    graph_payload: dict[str, Any] | None = None
+    if session_id:
+        ctx = _get_session(session_id)
+        if ctx is not None:
+            try:
+                graph_payload = _ctx_to_getinfo_response(ctx)
+            except Exception:
+                logger.exception("sandbox: failed to build ctx getInfo payload")
+                graph_payload = None
+
+    if graph_payload is None:
+        try:
+            get_url = api_cfg["base_url"].rstrip("/") + api_cfg["get_path"]
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(
+                    get_url,
+                    headers=headers,
+                    cookies=cookies,
+                    params={"prj_type": "company", "prj_id": prj_id},
+                )
+                resp.raise_for_status()
+                graph_payload = resp.json()
+                if isinstance(graph_payload, dict) and version:
+                    version_items = list(graph_payload.get("version_info") or [])
+                    selected = next(
+                        (
+                            v for v in version_items
+                            if isinstance(v, dict) and str(v.get("value") or "") == version
+                        ),
+                        None,
+                    )
+                    version_resp = await client.get(
+                        get_url,
+                        headers=headers,
+                        cookies=cookies,
+                        params={"prj_type": "opp", "ver_info": version, "prj_id": prj_id},
+                    )
+                    version_resp.raise_for_status()
+                    version_payload = version_resp.json()
+                    if isinstance(version_payload, dict):
+                        merged = dict(graph_payload)
+                        merged.update(version_payload)
+                        if selected:
+                            merged["version_info"] = [selected]
+                            merged["version_info_copy"] = [dict(selected)]
+                            merged["new_version"] = str(selected.get("value") or version)
+                        graph_payload = merged
+        except Exception:
+            logger.exception("sandbox: fallback getInfo fetch failed")
+            graph_payload = None
+
+    if graph_payload is not None:
+        injected = (
+            "<script>window.__GRAPH_DATA__ = "
+            + json.dumps(graph_payload, ensure_ascii=False)
+            + ";</script>"
+        )
+        if "</head>" in html:
+            html = html.replace("</head>", injected + "</head>", 1)
+        else:
+            html = injected + html
+
+    return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
+
+
+@app.get("/api/power_map/sandbox-proxy")
+async def power_map_sandbox_proxy(
+    url: str = Query(...),
+):
+    """Proxy BI static assets so the sandbox page can load CSS/JS/images without CORS.
+
+    Only URLs under crm.finereporthelp.com are proxied; everything else returns
+    403. The response is streamed back with the original Content-Type.
+    """
+    if not url.startswith(_BI_HOST + "/"):
+        raise HTTPException(status_code=403, detail="只允许代理 BI 资源")
+
+    # BI 的静态资源是高并发小文件请求，这里不再走 DB 读取配置，
+    # 避免一个 iframe 拉起十几个代理请求时把 SQLAlchemy 连接池打满。
+    headers: dict[str, str] = {}
+    cookies: dict[str, str] | None = None
+    cached = getattr(cas_auth_service, "_cookie_cache", {}).get("power_map_sandbox")
+    if cached and cached.get("expires_at", 0) > time.time():
+        cookies = dict(cached.get("cookies") or {})
+
+    max_bytes = 5 * 1024 * 1024
+
+    async def stream_body():
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            async with client.stream("GET", url, headers=headers, cookies=cookies) as upstream:
+                if upstream.status_code >= 400:
+                    raise HTTPException(status_code=upstream.status_code, detail="BI 资源响应错误")
+                cl = upstream.headers.get("content-length")
+                if cl and cl.isdigit() and int(cl) > max_bytes:
+                    raise HTTPException(status_code=413, detail="BI 资源过大")
+                total = 0
+                async for chunk in upstream.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise HTTPException(status_code=413, detail="BI 资源过大")
+                    yield chunk
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as probe:
+            head = await probe.head(url, headers=headers, cookies=cookies)
+            content_type = head.headers.get("content-type", "application/octet-stream")
+    except Exception:
+        content_type = "application/octet-stream"
+
+    return StreamingResponse(stream_body(), media_type=content_type)
+
+
+# ═══════════════════════════════════════════════════════════
+#  Phase A — local sandbox: patched HTML serving + mock BI endpoints
+# ═══════════════════════════════════════════════════════════
+
+
+@app.get("/sandbox/render")
+def sandbox_render(session_id: str = Query(...)):
+    """Serve the patched BI HTML with {PLACEHOLDER} replaced by session_id.
+
+    JS/CSS assets load relative to ``<base href="/static/sandbox/">`` and are
+    served by the StaticFiles mount on ``/static``.
+    """
+    try:
+        html = render_sandbox_html(session_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
+
+
+@app.post("/sandbox/download")
+async def sandbox_download(db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_superadmin)):
+    """One-shot deployment endpoint: pull the BI bundle into SANDBOX_DIR.
+
+    Requires the configured BI Bearer token. Idempotent (overwrites in place).
+    """
+    cfg = db.get(SystemConfig, 1)
+    if not cfg:
+        raise HTTPException(status_code=500, detail="系统未初始化")
+    auth_token = decrypt_secret(cfg.power_map_auth_token_encrypted) if cfg.power_map_auth_token_encrypted else ""
+    try:
+        manifest = await sandbox_infra.download_bi_resources(auth_token or None)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"BI 资源下载失败: {exc}")
+    return {"ok": True, "files": len(manifest), "manifest_path": str(sandbox_infra.MANIFEST_PATH)}
+
+
+def _resolve_sandbox_session(request: Request) -> str:
+    """Pull session id from X-Sandbox-Session header, falling back to ?session_id."""
+    sid = request.headers.get("X-Sandbox-Session") or ""
+    if not sid:
+        sid = request.query_params.get("session_id", "")
+    return sid.strip()
+
+
+def _sandbox_text_response(payload: Any) -> Response:
+    """Return JSON-encoded payload as text/plain.
+
+    BI's powerMap_v3.13.html uses eval('(' + result + ')') on AJAX responses.
+    jQuery auto-parses application/json into JS objects before success(), which
+    breaks the eval. Returning text/plain keeps the body as a raw JSON string.
+    """
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False),
+        media_type="text/plain; charset=utf-8",
+    )
+
+
+@app.get("/WebReport/decision/url/power_map/getInfo")
+def mock_bi_get_info(request: Request):
+    """Return the in-memory ctx for X-Sandbox-Session, in full BI getInfo shape.
+
+    Falls back to an empty payload + error marker when the session is missing
+    or has expired — never proxies to upstream.
+    """
+    session_id = _resolve_sandbox_session(request)
+    if not session_id:
+        return _sandbox_text_response(empty_getinfo_response("missing_session"))
+    ctx = _get_session(session_id)
+    if ctx is None:
+        return _sandbox_text_response(empty_getinfo_response("session_not_found"))
+    try:
+        payload = ctx_to_full_getinfo_response(ctx)
+    except Exception:
+        logger.exception("sandbox: getInfo serialization failed for %s", session_id)
+        return _sandbox_text_response(empty_getinfo_response("serialization_error"))
+    return _sandbox_text_response(payload)
+
+
+@app.post("/WebReport/decision/url/power_map/upInfo")
+async def mock_bi_up_info(request: Request):
+    """Sink — never writes ctx or forwards to BI."""
+    return _sandbox_text_response({"ok": True})
+
+
+@app.get("/WebReport/decision/url/power_map/update_expect")
+def mock_bi_update_expect():
+    return _sandbox_text_response({"ok": True})
+
+
+@app.get("/WebReport/decision/url/power_map/update_scene")
+def mock_bi_update_scene():
+    return _sandbox_text_response({"ok": True})
+
+
+@app.get("/WebReport/decision/url/power_map/judge_phone")
+def mock_bi_judge_phone():
+    return _sandbox_text_response({"exists": False})
+
+
+@app.post("/WebReport/decision/url/power_map/upFile")
+async def mock_bi_up_file():
+    return _sandbox_text_response({"ok": True})
+
+
+@app.get("/WebReport/decision/url/power_map/get_archive_jdy_id")
+def mock_bi_get_archive_jdy_id():
+    return _sandbox_text_response({"jdy_id": ""})
+
+
+@app.get("/WebReport/decision/url/power_map/position_tree_combo")
+def mock_bi_position_tree_combo():
+    return _sandbox_text_response([])
+
+
+# 1×1 transparent PNG — used by X6 graph.drawBackground when picname is empty
+# or the upstream watermark image is unavailable. Prevents browser 404 noise.
+_TRANSPARENT_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
+
+@app.get("/static/sandbox/watermark/{name:path}")
+def mock_sandbox_watermark(name: str):
+    return Response(content=_TRANSPARENT_PNG, media_type="image/png")
+
+
+@app.post("/test/seed_session")
+async def test_seed_session(payload: dict[str, Any], db: Session = Depends(get_db)):
+    """Temp verification helper: build a session from a live BI prj_id.
+
+    Body: ``{"session_id": "test123", "prj_id": "<uuid>"}``. Returns counts
+    so the caller can sanity-check the seed before curl'ing /getInfo.
+    """
+    session_id = str(payload.get("session_id") or "").strip() or _new_session_id()
+    prj_id = str(payload.get("prj_id") or "").strip()
+    if not prj_id:
+        raise HTTPException(status_code=400, detail="prj_id required")
+    cfg = db.get(SystemConfig, 1)
+    if not cfg:
+        raise HTTPException(status_code=500, detail="系统未初始化")
+    try:
+        current = await _fetch_from_external(cfg, prj_id, current_user=None)
+    except Exception as exc:
+        logger.exception("seed_session: BI fetch failed")
+        raise HTTPException(status_code=502, detail=f"BI fetch failed: {exc}")
+    nodes_raw = current.get("nodes", []) or []
+    edges_raw = current.get("edges", []) or []
+    nodes = [_node_from_bi_dict(n) for n in nodes_raw]
+    ctx = _build_merge_context(nodes, edges_raw, version_id="")
+    _store_session(session_id, ctx)
+    return {
+        "session_id": session_id,
+        "prj_id": prj_id,
+        "nodes": len(nodes),
+        "edges": len(edges_raw),
+    }
 
 
 @app.get("/api/v1/analytics/business/overview")
@@ -2458,8 +3729,16 @@ async def generate_review(data: dict[str, Any], user: dict[str, Any] = Depends(r
     
     transcript_text = (data.get("transcript_text") or data.get("content") or "").strip()
     company_name = (data.get("company_name") or "").strip()
+    images = (data.get("images") or [])
+    if not transcript_text and images:
+        transcript_text = "请根据上传图片内容生成结构化跟进记录。"
     if not transcript_text or not company_name:
         raise HTTPException(status_code=400, detail="缺少 transcript_text 或 company_name")
+    t0 = time.monotonic()
+    trace_id = new_trace("rvw")
+    image_count = len(data.get("images") or [])
+    emit("review_generate_start", trace_id=trace_id, char_count=len(transcript_text),
+         image_count=image_count, company_name=company_name[:40])
 
     cfg = db.scalars(select(SystemConfig)).first()
     if not cfg:
@@ -2480,41 +3759,83 @@ async def generate_review(data: dict[str, Any], user: dict[str, Any] = Depends(r
         tag_tree_data = []
 
     reviewer_name = _user_name(user)
-    system_prompt = f"""你是帆软内部的客户成功记录员。
-从会议转写中提取结构化跟进记录。
-输出纯 JSON，包含以下字段：
-        follow_type：从"线上跟进/线下跟进/内部沟通"选一个
-review_date：YYYY-MM-DD
-review_record：严格按以下格式输出：
-【跟进目的】一句话概括，10字以内
-【沟通详情】客观详细记录沟通内容，保留所有数字、版本号、规模等具体信息
-【附件/kms链接】暂无
-【参与人】我方：{reviewer_name}  客户方：xxx（职位/部门）
-genjin_tags：数组，每项 {{level1, level2, level3}}，从以下选项中选择，level3 可为空字符串：
-{json.dumps(tag_tree_data, ensure_ascii=False, indent=2)}
-contact_names：字符串，客户侧参与人
-if_tuisong：默认"否"
-请只输出纯 JSON，不要用 markdown 代码块包裹，不要添加任何额外文字。"""
+    template_bundle = load_followup_review_template(db, user)
+    template_sections = template_bundle.get("sections") or []
+    system_prompt = build_followup_review_system_prompt(reviewer_name, tag_tree_data, template_sections)
 
-    user_prompt = f"会议转写内容：\n{transcript_text}\n\n客户名称：\n{company_name}\n\n请生成结构化的跟进记录。"
+    enabled_template_sections = [section for section in template_sections if section.get("enabled", True)]
+    template_hint_lines = []
+    for section in enabled_template_sections:
+        title = str(section.get("title") or "").strip()
+        instruction = str(section.get("instruction") or "").strip()
+        if title and instruction:
+            template_hint_lines.append(f"- {title}：{instruction}")
+    template_hint = "\n".join(template_hint_lines)
+
+    user_prompt = f"""会议转写内容：
+{transcript_text}
+
+客户名称：
+{company_name}
+
+正文模板：
+{template_hint}
+
+请按模板生成结构化跟进记录。"""
+
+    # Build user message (multimodal if images provided)
+    if images and isinstance(images, list) and len(images) > 0:
+        user_content = [{"type": "text", "text": user_prompt}]
+        for img in images:
+            if isinstance(img, str) and img.startswith("data:image"):
+                user_content.append({"type": "image_url", "image_url": {"url": img}})
+        user_message = {"role": "user", "content": user_content}
+    else:
+        user_message = {"role": "user", "content": user_prompt}
 
     try:
+        emit_llm(event="review_llm_attempt_start", model=model, attempt_no=1)
+        t_llm = time.monotonic()
         async with httpx.AsyncClient(timeout=3600) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], "stream": False},
+                json={"model": model, "messages": [{"role": "system", "content": system_prompt}, user_message], "stream": False},
             )
+        t_elapsed = (time.monotonic() - t_llm) * 1000
         if resp.status_code != 200:
-            return {"error": f"LLM 返回 HTTP {resp.status_code}"}
+            emit_llm(event="review_llm_error", model=model, attempt_no=1,
+                     total_ms=t_elapsed, error_type="http_error", error_msg=str(resp.status_code),
+                     will_retry=False, final_status="error", degraded=True)
+            raise HTTPException(status_code=502, detail=f"LLM 返回 HTTP {resp.status_code}")
         content = resp.json()["choices"][0]["message"]["content"].strip()
+        usage = resp.json().get("usage", {})
+        inp_tok = usage.get("prompt_tokens", 0)
+        out_tok = usage.get("completion_tokens", 0)
+        emit_llm(event="review_llm_done", model=model, attempt_no=1,
+                 input_tokens=inp_tok, output_tokens=out_tok, total_ms=t_elapsed,
+                 status="ok", final_status="ok")
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        return json.loads(content)
+        raw_result = json.loads(content)
+        review_sections = raw_result.get("review_sections")
+        rendered_review_record = render_followup_review_record(template_sections, review_sections) if isinstance(review_sections, dict) else ""
+        if rendered_review_record:
+            raw_result["review_record"] = rendered_review_record
+        else:
+            raw_result["review_record"] = str(raw_result.get("review_record") or "").strip()
+        return raw_result
     except json.JSONDecodeError:
-        return {"error": "LLM 返回内容不是有效 JSON"}
+        e2e = (time.monotonic() - t0) * 1000
+        emit("review_generate_done", trace_id=trace_id, e2e_ms=e2e, status="json_error", degraded=True)
+        raise HTTPException(status_code=502, detail="LLM 返回内容不是有效 JSON")
+    except HTTPException:
+        raise
     except Exception as exc:
-        return {"error": f"调用 LLM 失败: {exc}"}
+        e2e = (time.monotonic() - t0) * 1000
+        emit("review_generate_done", trace_id=trace_id, e2e_ms=e2e,
+             status="error", error_type=type(exc).__name__, error_msg=str(exc)[:200], degraded=True)
+        raise HTTPException(status_code=502, detail=f"调用 LLM 失败: {exc}")
 
 
 @app.post("/api/v1/review/submit")
@@ -2549,32 +3870,14 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     from datetime import date
     review_date = data.get("review_date", "") or date.today().isoformat()
 
-    jiandaoyun_follower = None
-    candidate_name = data.get("follower") or _user_name(user)
-    if user.get("source") == "superadmin":
-        pass  # 超管不在简道云人员字段中
-    elif candidate_name and candidate_name != "unknown":
-        # 按"英文名-中文名"规则提取 username，再查完整用户对象
-        jdy_username = candidate_name.split("-", 1)[0].strip()
-        try:
-            import httpx
-            headers = {"Authorization": f"Bearer {jiandaoyun_api_key}", "Content-Type": "application/json"}
-            async with httpx.AsyncClient(timeout=3600.0) as hc:
-                resp = await hc.post(
-                    "https://api.jiandaoyun.com/api/v5/corp/user/get",
-                    headers=headers, json={"username": jdy_username}
-                )
-                if resp.status_code == 200:
-                    body = resp.json()
-                    print("[DEBUG] corp/user/get response: %s" % json.dumps(body, ensure_ascii=False)[:300])
-                    jdy_user = body.get("user")
-                    if jdy_user:
-                        # 简道云成员单选字段只需传 username 字符串
-                        jiandaoyun_follower = jdy_user["username"]
-        except Exception:
-            pass
+    # 跟进人：优先取用户 integrate_id（简道云 username），旧 Superadmin 表管理员无 integrate_id 则跳过
+    jiandaoyun_follower = user.get("integrate_id") or ""
+    if not jiandaoyun_follower and _user_name(user) not in ("unknown", "admin", "demo"):
+        jiandaoyun_follower = _user_name(user)
 
+    review_id = str(uuid4())
     jiandaoyun_data = {
+        "review_id": {"value": review_id},
         "com_name": {"value": jiandaoyun_com_name},
         "follow_type": {"value": data.get("follow_type", "")},
         "review_date": {"value": review_date},
@@ -2583,6 +3886,9 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     }
     if jiandaoyun_follower:
         jiandaoyun_data["follower"] = {"value": jiandaoyun_follower}
+    en_name_val = user.get("integrate_id") or user.get("username", "")
+    if en_name_val:
+        jiandaoyun_data["en_name"] = {"value": en_name_val}
     company_id = data.get("company_id")
     if data.get("comid"):
         jiandaoyun_data["comid"] = {"value": data["comid"]}
@@ -2598,9 +3904,11 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     yuqi_first_value = data.get("yuqi_first_value", "")
     if yuqi_first_value:
         jiandaoyun_data["_widget_1757578251950"] = {"value": yuqi_first_value}
-    yuqi_id = data.get("yuqi_id", "")
-    if yuqi_id:
-        jiandaoyun_data["review_yuqi_id"] = {"value": yuqi_id}
+    apply_followup_yuqi_fields(
+        jiandaoyun_data,
+        field_mappings=field_mappings,
+        yuqi_id=data.get("yuqi_id", ""),
+    )
     # 跟进标签（关联触发式标签）
     relevent_tags = data.get("relevent_tag", [])
     if relevent_tags:
@@ -2610,18 +3918,75 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     if genjin_tags:
         subform_rows = []
         for tag in genjin_tags:
-            subform_rows.append({
+            tag_meta = _resolve_genjin_tag_meta(tag)
+            row = {
+                "genjin_uuid": {"value": tag_meta.get("genjin_uuid") or str(uuid4())},
                 "genjin_level1": {"value": tag.get("level1", "")},
                 "genjin_level2": {"value": tag.get("level2", "")},
                 "genjin_level3": {"value": tag.get("level3", "")},
-            })
+            }
+            if tag_meta.get("label"):
+                row["_widget_1773986788645"] = {"value": tag_meta["label"]}
+            tid = tag_meta.get("tag_id", "")
+            if tid:
+                row["genjin_id"] = {"value": {"id": tid}}
+            subform_rows.append(row)
         jiandaoyun_data["genjin"] = {"value": subform_rows}
 
-    writer = JiandaoyunWriter(api_key=jiandaoyun_api_key, app_id=jiandaoyun_app_id)
-    result = await writer.create_record(entry_id, jiandaoyun_data)
-    if not result.get("success"):
-        raise HTTPException(status_code=500, detail=result.get("detail", "写入简道云失败"))
-    return {"message": "跟进记录已成功提交到简道云", "data": result.get("data")}
+    # 联系人子表单
+    selected_contact = data.get("selected_contact") or {}
+    if selected_contact.get("cont_id"):
+        jiandaoyun_data["contid"] = {"value": selected_contact["cont_id"]}
+        jiandaoyun_data["contname"] = {"value": selected_contact.get("cont_name", "")}
+        jiandaoyun_data["contact"] = {"value": [{
+            "son_contact_choose": {"value": "是"},
+            "son_contact_name": {"value": selected_contact.get("cont_name", "")},
+            "son_contact_id": {"value": selected_contact["cont_id"]},
+            "son_contact_choose_name": {"value": selected_contact["cont_id"]},
+            "son_contact_choose_id": {"value": selected_contact.get("cont_name", "")},
+        }]}
+
+    # 出差子表单
+    selected_tasks = data.get("selected_tasks") or []
+    if selected_tasks:
+        task_rows = []
+        task_ids = []
+        for t in selected_tasks:
+            tid = t.get("task_id", "")
+            task_ids.append(tid)
+            task_rows.append({
+                "son_task_choose": {"value": "是"},
+                "son_task_id": {"value": tid},
+                "son_task_date": {"value": t.get("task_predate", "")},
+                "son_task_action": {"value": t.get("task_action", "")},
+                "son_task_remarks": {"value": t.get("task_remarks", "")},
+                "son_task_choose_id": {"value": tid},
+            })
+        jiandaoyun_data["task"] = {"value": task_rows}
+        jiandaoyun_data["task_id"] = {"value": ",".join(task_ids)}
+
+    data_creator = user.get("integrate_id") or user.get("username", "")
+    writer = JiandaoyunWriter(api_key=jiandaoyun_api_key, app_id=jiandaoyun_app_id, data_creator=data_creator)
+    t_jdy = time.monotonic()
+    jdy_trace = new_trace("rwj")
+    emit("review_jdy_write_attempt", attempt_no=1)
+    try:
+        result = await writer.create_record(entry_id, jiandaoyun_data)
+        t_jdye = (time.monotonic() - t_jdy) * 1000
+        if not result.get("success"):
+            emit("review_jdy_write_error", jdy_latency_ms=t_jdye,
+                 error_type="jdy_api_error", error_msg=str(result.get("detail", ""))[:200],
+                 will_retry=False, final_status="error", degraded=True)
+            raise HTTPException(status_code=500, detail=result.get("detail", "写入简道云失败"))
+        emit("review_jdy_write_done", jdy_latency_ms=t_jdye, status="ok")
+        return {"message": "跟进记录已成功提交到简道云", "data": result.get("data")}
+    except Exception as exc:
+        t_jdye = (time.monotonic() - t_jdy) * 1000
+        if not isinstance(exc, HTTPException):
+            emit("review_jdy_write_error", jdy_latency_ms=t_jdye,
+                 error_type=type(exc).__name__, error_msg=str(exc)[:200],
+                 will_retry=False, final_status="error", degraded=True)
+        raise
 
 
 @app.on_event("startup")
@@ -2710,3 +4075,5 @@ def spa_fallback(full_path: str):
     if index_file.exists():
         return FileResponse(str(index_file))
     return RedirectResponse(url="/docs")
+
+

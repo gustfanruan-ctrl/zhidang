@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -84,6 +85,16 @@ class OperationCard(BaseModel):
     customer_id: str | None = None
     lookup_widget: str | None = None
     data_id: str | None = None
+    customer_com_id: str | None = None
+    customer_com_name: str | None = None
+    # 场景表关联预期：related_yuqi_id 是简道云记录 id；
+    # related_yuqi_card_id 是本次审核队列中预期卡片的 card_id，执行时会解析成记录 id。
+    related_yuqi_id: str | None = None
+    related_yuqi_card_id: str | None = None
+    related_yuqi_source: str | None = None
+    related_yuqi_summary: str | None = None
+    related_yuqi_reason: str | None = None
+    related_yuqi_confidence: float | None = None
 
     @field_validator("field_name")
     @classmethod
@@ -165,6 +176,26 @@ class AgentComparisonResult(BaseModel):
         return val
 
 
+def _normalize_card_operation(raw_card: dict[str, Any]) -> dict[str, Any]:
+    card = dict(raw_card or {})
+    raw_operation = str(card.get("operation_type") or card.get("operation") or card.get("type") or "").strip()
+    normalized = re.sub(r"[\s_\-:/（）()\[\]【】,，.!！？?]+", "", raw_operation.lower())
+
+    if not card.get("target_form"):
+        if any(token in normalized for token in ["expectation", "yuqi", "预期"]):
+            card["target_form"] = "预期表"
+        elif any(token in normalized for token in ["scenario", "changjing", "场景"]):
+            card["target_form"] = "场景表"
+
+    if any(token in normalized for token in ["append", "subform", "追加", "子表"]):
+        card["operation_type"] = "append_subform"
+    elif any(token in normalized for token in ["update", "modify", "edit", "change", "更新", "修改"]):
+        card["operation_type"] = "update"
+    elif any(token in normalized for token in ["create", "new", "add", "新增", "新建", "创建"]):
+        card["operation_type"] = "create"
+    return card
+
+
 def validate_extraction_output(data: dict) -> dict:
     raw_facts = list((data or {}).get("facts") or [])
     validated_facts: list[ExtractedFact] = []
@@ -200,5 +231,12 @@ def validate_extraction_output(data: dict) -> dict:
 
 
 def validate_comparison_output(data: dict) -> dict:
-    result = AgentComparisonResult.model_validate(data)
+    payload = dict(data or {})
+    payload["operation_cards"] = [
+        _normalize_card_operation(card)
+        for card in list(payload.get("operation_cards") or [])
+        if isinstance(card, dict)
+    ]
+    payload["total"] = len(payload["operation_cards"])
+    result = AgentComparisonResult.model_validate(payload)
     return result.model_dump()

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
@@ -23,6 +23,21 @@ class Superadmin(Base, TimestampMixin):
     username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(100))
+
+
+class User(Base, TimestampMixin):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(150))
+    integrate_id: Mapped[str | None] = mapped_column(String(100))
+    departments: Mapped[list[int] | None] = mapped_column(JSON)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    onboarding_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    role: Mapped[str] = mapped_column(String(20), default="user", nullable=False)  # "superadmin" | "user"
+    followup_review_template: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
 
 
 class SystemConfig(Base, TimestampMixin):
@@ -54,6 +69,14 @@ class SystemConfig(Base, TimestampMixin):
     agent_a_max_rounds: Mapped[int] = mapped_column(Integer, default=5)
     agent_b_max_rounds: Mapped[int] = mapped_column(Integer, default=5)
     data_retention_days: Mapped[int] = mapped_column(Integer, default=90)
+    power_map_base_url: Mapped[str | None] = mapped_column(String(500), default="https://crm.finereporthelp.com/WebReport/decision")
+    power_map_get_path: Mapped[str | None] = mapped_column(String(200), default="/url/power_map/getInfo")
+    power_map_update_path: Mapped[str | None] = mapped_column(String(200), default="/url/power_map/upInfo")
+    power_map_auth_token_encrypted: Mapped[str | None] = mapped_column(Text, default="")
+    power_map_login_mobile: Mapped[str | None] = mapped_column(String(100))
+    power_map_login_password_encrypted: Mapped[str | None] = mapped_column(Text, default="")
+
+
 
 
 class Transcript(Base, TimestampMixin):
@@ -76,6 +99,33 @@ class Transcript(Base, TimestampMixin):
     company_name: Mapped[str | None] = mapped_column(String(255))
     sso_user_name: Mapped[str | None] = mapped_column(String(100))
     sso_user_id: Mapped[str | None] = mapped_column(String(255))
+
+
+class FollowupRecord(Base, TimestampMixin):
+    __tablename__ = "followup_records"
+    __table_args__ = (
+        Index("ix_followup_records_company_id_status", "company_id", "status"),
+        Index("ix_followup_records_source_id", "source_id"),
+        Index("ix_followup_records_sso_user_name", "sso_user_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="jiandaoyun")
+    source_id: Mapped[str | None] = mapped_column(String(255))
+    title: Mapped[str | None] = mapped_column(String(255))
+    raw_text: Mapped[str] = mapped_column(Text, nullable=False)
+    segments: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    input_type: Mapped[str] = mapped_column(String(20), default="followup")
+    status: Mapped[str] = mapped_column(String(30), default="parsed")
+    agent_a_result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    agent_b_result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    company_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    company_name: Mapped[str | None] = mapped_column(String(255))
+    sso_user_name: Mapped[str | None] = mapped_column(String(100))
+    sso_user_id: Mapped[str | None] = mapped_column(String(255))
+    review_date: Mapped[str | None] = mapped_column(String(50))
+    follow_type: Mapped[str | None] = mapped_column(String(50))
+    raw_record: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class SsoNonceUsed(Base, TimestampMixin):
@@ -141,3 +191,5 @@ class OperationCardLog(Base, TimestampMixin):
     execute_status: Mapped[str] = mapped_column(String(20), default="pending")
     jiandaoyun_response: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+

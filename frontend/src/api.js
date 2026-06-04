@@ -3,19 +3,19 @@ import axios from 'axios'
 
 const TIMEOUT_KEY = 'zhidang_frontend_timeout_ms'
 const BACKEND_TIMEOUTS_KEY = 'zhidang_backend_timeout_config_v1'
-const DEFAULT_TIMEOUT_MS = 30000
+const DEFAULT_TIMEOUT_MS = 3600000
 
 export function getApiTimeout() {
   const raw = localStorage.getItem(TIMEOUT_KEY)
   const value = Number(raw)
-  if (!Number.isFinite(value) || value < 5000) return DEFAULT_TIMEOUT_MS
-  return Math.min(value, 300000)
+  if (!Number.isFinite(value) || value < 300000) return DEFAULT_TIMEOUT_MS
+  return Math.min(value, 3600000)
 }
 
 export function setApiTimeout(timeoutMs) {
   const value = Number(timeoutMs)
   if (!Number.isFinite(value)) return
-  const safe = Math.min(Math.max(value, 5000), 300000)
+  const safe = Math.min(Math.max(value, 5000), 3600000)
   localStorage.setItem(TIMEOUT_KEY, String(safe))
 }
 
@@ -24,27 +24,27 @@ export function getBackendTimeoutConfig() {
     const raw = localStorage.getItem(BACKEND_TIMEOUTS_KEY)
     if (!raw) {
       return {
-        llm_request_timeout_seconds: 120,
-        llm_connect_timeout_seconds: 20,
-        agent_total_timeout_seconds: 180,
-        agent_tool_timeout_seconds: 30,
+        llm_request_timeout_seconds: 3600,
+        llm_connect_timeout_seconds: 3600,
+        agent_total_timeout_seconds: 3600,
+        agent_tool_timeout_seconds: 3600,
         agent_max_iterations: 8,
       }
     }
     const parsed = JSON.parse(raw)
     return {
-      llm_request_timeout_seconds: Number(parsed.llm_request_timeout_seconds) || 120,
-      llm_connect_timeout_seconds: Number(parsed.llm_connect_timeout_seconds) || 20,
-      agent_total_timeout_seconds: Number(parsed.agent_total_timeout_seconds) || 180,
-      agent_tool_timeout_seconds: Number(parsed.agent_tool_timeout_seconds) || 30,
+      llm_request_timeout_seconds: Number(parsed.llm_request_timeout_seconds) || 3600,
+      llm_connect_timeout_seconds: Number(parsed.llm_connect_timeout_seconds) || 3600,
+      agent_total_timeout_seconds: Number(parsed.agent_total_timeout_seconds) || 3600,
+      agent_tool_timeout_seconds: Number(parsed.agent_tool_timeout_seconds) || 3600,
       agent_max_iterations: Number(parsed.agent_max_iterations) || 8,
     }
   } catch {
     return {
-      llm_request_timeout_seconds: 120,
-      llm_connect_timeout_seconds: 20,
-      agent_total_timeout_seconds: 180,
-      agent_tool_timeout_seconds: 30,
+      llm_request_timeout_seconds: 3600,
+      llm_connect_timeout_seconds: 3600,
+      agent_total_timeout_seconds: 3600,
+      agent_tool_timeout_seconds: 3600,
       agent_max_iterations: 8,
     }
   }
@@ -52,10 +52,10 @@ export function getBackendTimeoutConfig() {
 
 export function setBackendTimeoutConfig(config) {
   const safe = {
-    llm_request_timeout_seconds: Math.min(Math.max(Number(config.llm_request_timeout_seconds) || 120, 10), 600),
-    llm_connect_timeout_seconds: Math.min(Math.max(Number(config.llm_connect_timeout_seconds) || 20, 3), 120),
-    agent_total_timeout_seconds: Math.min(Math.max(Number(config.agent_total_timeout_seconds) || 180, 30), 900),
-    agent_tool_timeout_seconds: Math.min(Math.max(Number(config.agent_tool_timeout_seconds) || 30, 5), 300),
+    llm_request_timeout_seconds: Math.min(Math.max(Number(config.llm_request_timeout_seconds) || 3600, 10), 7200),
+    llm_connect_timeout_seconds: Math.min(Math.max(Number(config.llm_connect_timeout_seconds) || 3600, 3), 7200),
+    agent_total_timeout_seconds: Math.min(Math.max(Number(config.agent_total_timeout_seconds) || 3600, 30), 7200),
+    agent_tool_timeout_seconds: Math.min(Math.max(Number(config.agent_tool_timeout_seconds) || 3600, 5), 7200),
     agent_max_iterations: Math.min(Math.max(Number(config.agent_max_iterations) || 8, 1), 20),
   }
   localStorage.setItem(BACKEND_TIMEOUTS_KEY, JSON.stringify(safe))
@@ -78,7 +78,7 @@ api.interceptors.response.use(
       localStorage.removeItem('zhidang_token')
       window.location.href = '/login'
     } else if (status === 403) {
-      alert('权限不足，请联系管理员')
+      console.warn('权限不足:', error?.response?.data?.detail || '')
     } else if (status >= 500) {
       alert('系统异常，请稍后重试')
     }

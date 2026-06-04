@@ -111,5 +111,5 @@ class FollowupSubmitRequest(BaseAPIModel):
     contid: str = ""
     # 联系人姓名 → contname
     contname: str = ""
-    # 关联预期 → review_yuqi_id (text, 可选)
+    # 关联预期 ID；提交时会同时写 review_yuqi_id(text) 和 lookup 关联字段
     yuqi_id: str = ""

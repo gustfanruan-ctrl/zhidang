@@ -22,6 +22,7 @@ from ..schemas.followup import (
     FollowupSubmitRequest,
     GenjinTag,
 )
+from .followup_yuqi import apply_followup_yuqi_fields
 from .jiandaoyun_client import JiandaoyunClient, JiandaoyunClientError
 from .jiandaoyun_writer import JiandaoyunWriter
 
@@ -174,6 +175,7 @@ class FollowupService:
         llm_api_key: str,
         llm_base_url: str,
         llm_model: str,
+        field_mappings: dict[str, Any] | None = None,
     ):
         self.writer = JiandaoyunWriter(api_key=api_key, app_id=app_id)
         self.client = JiandaoyunClient(api_key=api_key)
@@ -181,6 +183,7 @@ class FollowupService:
         self.llm_api_key = llm_api_key
         self.llm_base_url = llm_base_url.rstrip("/")
         self.llm_model = llm_model
+        self.field_mappings = field_mappings or {}
 
     async def generate(
         self,
@@ -256,8 +259,11 @@ class FollowupService:
             data["contname"] = {"value": payload.contname}
 
         # 关联预期（可选）
-        if payload.yuqi_id:
-            data["review_yuqi_id"] = {"value": payload.yuqi_id}
+        apply_followup_yuqi_fields(
+            data,
+            field_mappings=self.field_mappings,
+            yuqi_id=payload.yuqi_id,
+        )
 
         # 写入
         try:
@@ -300,7 +306,7 @@ class FollowupService:
         ]
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
                 resp = await client.post(
                     f"{self.llm_base_url}/chat/completions",
                     headers={
@@ -331,7 +337,7 @@ class FollowupService:
         ]
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
                 resp = await client.post(
                     f"{self.llm_base_url}/chat/completions",
                     headers={

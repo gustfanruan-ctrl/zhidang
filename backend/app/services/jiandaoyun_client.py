@@ -67,7 +67,7 @@ class JiandaoyunClient:
         如果 V5 失败，自动降级到 V2。
         """
         payload = {"app_id": app_id, "entry_id": entry_id}
-        timeout = httpx.Timeout(30.0)
+        timeout = httpx.Timeout(3600.0)
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             # 首先尝试 V5 API
@@ -120,7 +120,7 @@ class JiandaoyunClient:
             payload["data_id"] = data_id
 
         url = f"{self.v5_base_url}/app/entry/data/list"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
             try:
                 v5_response = await client.post(url, headers=self._headers, json=payload)
                 if v5_response.status_code < 400:
@@ -149,7 +149,7 @@ class JiandaoyunClient:
     async def query_single_data(self, app_id: str, entry_id: str, data_id: str) -> dict[str, Any]:
         payload = {"app_id": app_id, "entry_id": entry_id, "data_id": data_id}
         url = f"{self.v5_base_url}/app/entry/data/get"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
             v5_response = await client.post(url, headers=self._headers, json=payload)
             if v5_response.status_code < 400:
                 return v5_response.json()
@@ -159,19 +159,23 @@ class JiandaoyunClient:
                 return v2_response.json()
         self._raise_for_status(v5_response.status_code, v5_response.text)
 
-    async def create_data(self, app_id: str, entry_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    async def create_data(self, app_id: str, entry_id: str, data: dict[str, Any], data_creator: str = "") -> dict[str, Any]:
         payload = {"app_id": app_id, "entry_id": entry_id, "data": data}
+        if data_creator:
+            payload["data_creator"] = data_creator
         url = f"{self.v5_base_url}/app/entry/data/create"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
             response = await client.post(url, headers=self._headers, json=payload)
         if response.status_code >= 400:
             self._raise_for_status(response.status_code, response.text)
         return response.json()
 
-    async def update_data(self, app_id: str, entry_id: str, data_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    async def update_data(self, app_id: str, entry_id: str, data_id: str, data: dict[str, Any], data_creator: str = "") -> dict[str, Any]:
         payload = {"app_id": app_id, "entry_id": entry_id, "data_id": data_id, "data": data}
+        if data_creator:
+            payload["data_creator"] = data_creator
         url = f"{self.v5_base_url}/app/entry/data/update"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
             response = await client.post(url, headers=self._headers, json=payload)
         if response.status_code >= 400:
             self._raise_for_status(response.status_code, response.text)
@@ -180,7 +184,7 @@ class JiandaoyunClient:
     async def delete_data(self, app_id: str, entry_id: str, data_id: str) -> dict[str, Any]:
         payload = {"app_id": app_id, "entry_id": entry_id, "data_id": data_id}
         url = f"{self.v5_base_url}/app/entry/data/delete"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
             response = await client.post(url, headers=self._headers, json=payload)
         if response.status_code >= 400:
             self._raise_for_status(response.status_code, response.text)
@@ -194,3 +198,47 @@ class JiandaoyunClient:
         fields: list[str] | None = None,
     ) -> dict[str, Any]:
         return await self.query_data_list(app_id=app_id, entry_id=entry_id, limit=limit, fields=fields)
+
+    async def fetch_entry_data_list(
+        self,
+        app_id: str,
+        entry_id: str,
+        *,
+        page_size: int = 100,
+        max_pages: int = 50,
+        fields: list[str] | None = None,
+        filter_condition: dict[str, Any] | None = None,
+        page_sleep_seconds: float = 0.3,
+    ) -> list[dict[str, Any]]:
+        """Fetch ALL records from a Jiandaoyun form by paging through `data_id` cursor.
+
+        Returns a flat list of raw record dicts. Uses the existing v5->v2 fallback
+        in `query_data_list`. Sleeps between pages to respect rate limits.
+        """
+        import asyncio
+
+        all_rows: list[dict[str, Any]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        for _ in range(max_pages):
+            page = await self.query_data_list(
+                app_id=app_id,
+                entry_id=entry_id,
+                limit=max(1, min(page_size, 100)),
+                fields=fields,
+                filter_condition=filter_condition,
+                data_id=cursor,
+            )
+            batch = page.get("data", []) or []
+            if not batch:
+                break
+            all_rows.extend(batch)
+            next_cursor = batch[-1].get("_id")
+            if not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+            if len(batch) < page_size:
+                break
+            await asyncio.sleep(page_sleep_seconds)
+        return all_rows

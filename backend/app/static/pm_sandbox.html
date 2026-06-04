@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Power Map Sandbox</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  svg { display: block; }
+  .dept-title { font-weight: 700; font-size: 14px; fill: #333; }
+  .person-name { font-weight: 600; font-size: 13px; fill: #222; }
+  .person-pos { font-size: 11px; fill: #888; }
+  .leader-name { font-weight: 700; font-size: 14px; fill: #1a1a1a; }
+  .leader-pos { font-size: 11px; fill: #666; }
+  .edge-line { stroke: #bbb; stroke-width: 1.5px; fill: none; }
+  .edge-arrow { fill: #bbb; }
+  .tag-badge { fill: #e74c3c; }
+  .tag-text { fill: #fff; font-size: 10px; font-weight: 700; text-anchor: middle; }
+</style>
+</head>
+<body>
+<svg id="canvas"></svg>
+<script src="https://cdn.jsdelivr.net/npm/@dagrejs/dagre@1.1.8/dist/dagre.min.js"></script>
+<!--GRAPH_DATA_PLACEHOLDER-->
+<script>
+(function() {
+  var data = window.__GRAPH_DATA__;
+  if (!data || !data.nodes || !data.nodes.length) {
+    document.body.innerHTML = '<div style="padding:40px;color:#888;font-size:16px">No graph data</div>';
+    window.__LAYOUT_DONE__ = true;
+    return;
+  }
+
+  // Error tracking
+  window.__JS_ERRORS__ = [];
+  window.onerror = function(msg, url, line) {
+    window.__JS_ERRORS__.push(msg + ' at line ' + line);
+  };
+
+  var DEPT_COLORS = ['#FFE0E0','#FFFFD0','#E0FFE0','#E0E0FF','#FFE0FF','#F0D0FF','#D0FFD0','#D0D0FF'];
+  var USER_W = 160, USER_H = 60;
+  var DEPT_PAD_T = 32, DEPT_PAD_B = 16, DEPT_PAD_L = 16, DEPT_PAD_R = 16;
+
+  function getDeptColor(idx) { return DEPT_COLORS[idx % DEPT_COLORS.length]; }
+
+  // Build dagre compound graph
+  var g = new dagre.graphlib.Graph({ compound: true, directed: true });
+  g.setGraph({
+    rankdir: 'TB',
+    nodesep: 60,
+    ranksep: 60,
+    marginx: 20,
+    marginy: 20
+  });
+  g.setDefaultEdgeLabel(function() { return {}; });
+
+  // Collect dept nodes and their order
+  var deptNodes = [];
+  var deptById = {};
+  var nodeById = {};
+
+  (data.nodes || []).forEach(function(n) {
+    nodeById[n.id] = n;
+    if (n.node_type === 'dept') {
+      deptNodes.push(n);
+      deptById[n.id] = n;
+    }
+  });
+
+  // Add all nodes to dagre
+  (data.nodes || []).forEach(function(n) {
+    var w = n.width || (n.node_type === 'user' ? USER_W : 500);
+    var h = n.height || (n.node_type === 'user' ? USER_H : 200);
+    g.setNode(n.id, { width: w, height: h });
+  });
+
+  // Compound nesting: user nodes inside their dept
+  (data.nodes || []).forEach(function(n) {
+    if (n.parent_dept_id && nodeById[n.parent_dept_id] && nodeById[n.parent_dept_id].node_type === 'dept') {
+      g.setParent(n.id, n.parent_dept_id);
+    }
+  });
+
+  // Add edges (skip structural/parent-child edges)
+  (data.edges || []).forEach(function(e) {
+    var src = nodeById[e.source];
+    var tgt = nodeById[e.target];
+    if (!src || !tgt) return;
+    // Skip edges that would create cycles in compound graph:
+    // a) child -> parent (user inside its own dept)
+    if (src.parent_dept_id && src.parent_dept_id === e.target) return;
+    if (tgt.parent_dept_id && tgt.parent_dept_id === e.source) return;
+    // b) dept -> user where user is child of that dept
+    if (src.node_type === 'dept' && tgt.node_type === 'user' && tgt.parent_dept_id === e.source) return;
+    g.setEdge(e.source, e.target);
+  });
+
+  // Run layout
+  dagre.layout(g);
+
+  // Calculate total SVG bounds
+  var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  g.nodes().forEach(function(id) {
+    var node = g.node(id);
+    var x = node.x - node.width / 2;
+    var y = node.y - node.height / 2;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x + node.width > maxX) maxX = x + node.width;
+    if (y + node.height > maxY) maxY = y + node.height;
+  });
+
+  var MARGIN = 40;
+  var svgW = maxX - minX + MARGIN * 2;
+  var svgH = maxY - minY + MARGIN * 2;
+  var offsetX = -minX + MARGIN;
+  var offsetY = -minY + MARGIN;
+
+  // Create SVG
+  var svg = document.getElementById('canvas');
+  svg.setAttribute('width', svgW);
+  svg.setAttribute('height', svgH);
+
+  // Arrow marker
+  var defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  var marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+  marker.setAttribute('id', 'arrow');
+  marker.setAttribute('viewBox', '0 0 10 10');
+  marker.setAttribute('refX', 5);
+  marker.setAttribute('refY', 5);
+  marker.setAttribute('markerWidth', 6);
+  marker.setAttribute('markerHeight', 6);
+  marker.setAttribute('orient', 'auto');
+  var arrowPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  arrowPath.setAttribute('d', 'M0,0 L10,5 L0,10 Z');
+  arrowPath.setAttribute('fill', '#bbb');
+  marker.appendChild(arrowPath);
+  defs.appendChild(marker);
+  svg.appendChild(defs);
+
+  // Render dept containers
+  deptNodes.forEach(function(dept, idx) {
+    var dnode = g.node(dept.id);
+    var x = offsetX + dnode.x - dnode.width / 2;
+    var y = offsetY + dnode.y - dnode.height / 2;
+    var w = dnode.width;
+    var h = dnode.height;
+
+    var color = getDeptColor(idx);
+
+    // Container rect
+    var rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', x);
+    rect.setAttribute('y', y);
+    rect.setAttribute('width', w);
+    rect.setAttribute('height', h);
+    rect.setAttribute('rx', 8);
+    rect.setAttribute('fill', color);
+    rect.setAttribute('stroke', '#ddd');
+    rect.setAttribute('stroke-width', 1.5);
+    svg.appendChild(rect);
+
+    // Title bar
+    var titleBar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    titleBar.setAttribute('x', x);
+    titleBar.setAttribute('y', y);
+    titleBar.setAttribute('width', w);
+    titleBar.setAttribute('height', 28);
+    titleBar.setAttribute('rx', 8);
+    titleBar.setAttribute('fill', 'rgba(0,0,0,0.06)');
+    svg.appendChild(titleBar);
+
+    // Bottom corner fix (no rounding at bottom)
+    var fixRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    fixRect.setAttribute('x', x);
+    fixRect.setAttribute('y', y + 20);
+    fixRect.setAttribute('width', w);
+    fixRect.setAttribute('height', 8);
+    fixRect.setAttribute('fill', 'rgba(0,0,0,0.06)');
+    svg.appendChild(fixRect);
+
+    // Dept name
+    var titleText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    titleText.setAttribute('x', x + w / 2);
+    titleText.setAttribute('y', y + 19);
+    titleText.setAttribute('text-anchor', 'middle');
+    titleText.setAttribute('class', 'dept-title');
+    titleText.textContent = dept.name;
+    svg.appendChild(titleText);
+  });
+
+  // Render person cards
+  (data.nodes || []).forEach(function(n) {
+    if (n.node_type !== 'user') return;
+    var dnode = g.node(n.id);
+    if (!dnode) return;
+    var x = offsetX + dnode.x - dnode.width / 2;
+    var y = offsetY + dnode.y - dnode.height / 2;
+    var w = dnode.width;
+    var h = dnode.height;
+    var isLeader = n.node_manager === '1';
+
+    // Card background
+    var card = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    card.setAttribute('x', x);
+    card.setAttribute('y', y);
+    card.setAttribute('width', w);
+    card.setAttribute('height', h);
+    card.setAttribute('rx', 4);
+    card.setAttribute('fill', '#fff');
+    card.setAttribute('stroke', isLeader ? '#FFD700' : '#ddd');
+    card.setAttribute('stroke-width', isLeader ? 2 : 1);
+    svg.appendChild(card);
+
+    // Name text
+    var nameY = y + Math.floor(h / 2) - 4;
+    if (n.position && n.position.trim()) {
+      nameY = y + Math.floor(h / 3) + 2;
+    }
+    var nameText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    nameText.setAttribute('x', x + w / 2);
+    nameText.setAttribute('y', nameY);
+    nameText.setAttribute('text-anchor', 'middle');
+    nameText.setAttribute('class', isLeader ? 'leader-name' : 'person-name');
+    nameText.textContent = n.name;
+    svg.appendChild(nameText);
+
+    // Position text
+    if (n.position && n.position.trim()) {
+      var posText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      posText.setAttribute('x', x + w / 2);
+      posText.setAttribute('y', nameY + 16);
+      posText.setAttribute('text-anchor', 'middle');
+      posText.setAttribute('class', isLeader ? 'leader-pos' : 'person-pos');
+      posText.textContent = n.position;
+      svg.appendChild(posText);
+    }
+
+    // Tag badge (top-right)
+    if (n.tagA && n.tagA.trim()) {
+      var badgeR = 9;
+      var badgeCx = x + w - 8;
+      var badgeCy = y + 10;
+      var badge = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      badge.setAttribute('cx', badgeCx);
+      badge.setAttribute('cy', badgeCy);
+      badge.setAttribute('r', badgeR);
+      badge.setAttribute('class', 'tag-badge');
+      svg.appendChild(badge);
+
+      var badgeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      badgeText.setAttribute('x', badgeCx);
+      badgeText.setAttribute('y', badgeCy + 4);
+      badgeText.setAttribute('class', 'tag-text');
+      badgeText.textContent = n.tagA;
+      svg.appendChild(badgeText);
+    }
+  });
+
+  // Render edges
+  (data.edges || []).forEach(function(e) {
+    if (e.type === 'belongs_to') return;
+    var srcType = nodeById[e.source] ? nodeById[e.source].node_type : null;
+    var tgtType = nodeById[e.target] ? nodeById[e.target].node_type : null;
+    if (srcType === 'dept' && tgtType === 'user') return;
+
+    var source = g.node(e.source);
+    var target = g.node(e.target);
+    if (!source || !target) return;
+
+    var x1 = offsetX + source.x;
+    var y1 = offsetY + source.y + source.height / 2;
+    var x2 = offsetX + target.x;
+    var y2 = offsetY + target.y - target.height / 2;
+
+    var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', x1);
+    line.setAttribute('y1', y1);
+    line.setAttribute('x2', x2);
+    line.setAttribute('y2', y2);
+    line.setAttribute('class', 'edge-line');
+    line.setAttribute('marker-end', 'url(#arrow)');
+    svg.appendChild(line);
+  });
+
+  // Signal done
+  window.__LAYOUT_DONE__ = true;
+})();
+</script>
+</body>
+</html>
