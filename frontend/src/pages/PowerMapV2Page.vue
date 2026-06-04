@@ -202,12 +202,7 @@ async function loadBiUrl() {
       biIframeUrl.value = ''
       return
     }
-    const params = new URLSearchParams({
-      prj_id: String(biComId),
-      com_id: String(biComId),
-    })
-    if (currentVer.value) params.set('version', currentVer.value)
-    biIframeUrl.value = `/api/power_map/sandbox?${params.toString()}`
+    biIframeUrl.value = data.bi_iframe_url || ''
   } catch (e) {
     console.error('获取 BI URL 失败', e)
     biIframeUrl.value = ''
