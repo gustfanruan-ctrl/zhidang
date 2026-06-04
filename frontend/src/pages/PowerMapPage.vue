@@ -759,6 +759,7 @@ const sandboxUrl = computed(() => {
   const base = import.meta.env?.VITE_API_BASE || ''
   const params = new URLSearchParams()
   params.set('prj_id', selectedProjectId.value)
+  params.set('com_id', selectedProjectId.value)
   if (harnessSessionId.value) {
     params.set('session_id', harnessSessionId.value)
   }

@@ -202,7 +202,10 @@ async function loadBiUrl() {
       biIframeUrl.value = ''
       return
     }
-    const params = new URLSearchParams({ prj_id: String(biComId) })
+    const params = new URLSearchParams({
+      prj_id: String(biComId),
+      com_id: String(biComId),
+    })
     if (currentVer.value) params.set('version', currentVer.value)
     biIframeUrl.value = `/api/power_map/sandbox?${params.toString()}`
   } catch (e) {
