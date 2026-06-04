@@ -16,7 +16,8 @@ export default defineConfig({
       '/api': 'http://backend:8000',
       '/health': 'http://backend:8000',
       '/sandbox': 'http://backend:8000',
-      '/static/sandbox': 'http://backend:8000'
+      '/static/sandbox': 'http://backend:8000',
+      '/WebReport/decision/url/power_map': 'http://backend:8000'
     }
   }
 })

@@ -134,7 +134,7 @@
       <CardContent class="space-y-5">
         <div class="space-y-1.5">
           <Label>当前客户</Label>
-          <Input :value="companyName" readonly class="bg-muted/50" />
+          <Input :model-value="companyName" readonly class="bg-muted/50" />
         </div>
         <div class="space-y-1.5">
           <Label>上传文件</Label>
@@ -489,7 +489,7 @@ function formatSourceDate(d) {
   } catch { return '-' }
 }
 const companyId = computed(() => customerStore.currentCustomer?.company_id || '')
-const companyName = computed(() => customerStore.currentCustomer?.company_name || '')
+const companyName = computed(() => customerStore.currentCustomer?.company_name || customerStore.currentCustomer?.com_name || '')
 const hasImages = computed(() => uploadedFiles.value.some(f => f.type === 'image'))
 const hasReviewInput = computed(() => transcriptText.value.trim() || hasImages.value)
 const canGenerate = computed(() => hasReviewInput.value && companyName.value)
@@ -512,8 +512,8 @@ function onDragOver() { isDragOver.value = true }
 function onDragLeave() { isDragOver.value = false }
 function onFileDrop(e) {
   isDragOver.value = false
+  const files = e.dataTransfer?.files || []
   for (const f of files) handleFile(f)
-  if (files.length > 0) handleFile(files[0])
 }
 function onFileSelect(e) {
   const files = e.target.files
@@ -696,6 +696,7 @@ async function generateReview() {
       company_name: companyName.value
     })
     const raw = response.data
+    if (raw?.error) throw new Error(raw.error)
     reviewData.value = {
       follow_type: raw.follow_type || raw.business_action || '',
       review_date: todayDate.value,

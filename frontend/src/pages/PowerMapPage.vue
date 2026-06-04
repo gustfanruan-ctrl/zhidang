@@ -1459,7 +1459,12 @@ async function loadMap() {
       if (!currentVer.value) {
         const csVer = vi.find(v => (v.ver_name || '').includes('客户成功'))
         const coVer = vi.find(v => (v.ver_name || '').includes('公司'))
-        currentVer.value = (csVer || coVer || vi[0]).value || ''
+        const initialVer = (csVer || coVer || vi[0]).value || ''
+        if (initialVer) {
+          currentVer.value = initialVer
+          chatVersion.value = initialVer
+          return await loadMap()
+        }
       }
     }
     // 如果当前版本不在列表中，重置
@@ -1467,6 +1472,9 @@ async function loadMap() {
       const csVer = versions.value.find(v => (v.ver_name || '').includes('客户成功'))
       const coVer = versions.value.find(v => (v.ver_name || '').includes('公司'))
       currentVer.value = (csVer || coVer || versions.value[0]).value || ''
+      if (!chatVersion.value || !versions.value.find(v => v.value === chatVersion.value)) {
+        chatVersion.value = currentVer.value
+      }
     }
     const cur = versions.value.find(v => v.value === currentVer.value)
     mapVersion.value = cur?.ver_name || null
@@ -1482,6 +1490,7 @@ async function loadMap() {
 
 function switchVersion(verValue) {
   currentVer.value = verValue
+  chatVersion.value = verValue
   loadMap()
 }
 
@@ -1523,7 +1532,7 @@ async function send(confirm) {
       const companyId = customerStore.currentCustomer.company_id
       const { data } = await api.post(
         `/api/v1/power-map/${companyId}/confirm`,
-        { proposed_changes: pendingChanges.value, version: chatVersion.value || undefined }
+        { proposed_changes: pendingChanges.value, version: chatVersion.value || currentVer.value || undefined }
       )
       messages.value.push({ role: 'assistant', text: data.message || '修改已执行' })
       pendingChanges.value = null
@@ -1543,7 +1552,7 @@ async function send(confirm) {
       const { data } = await api.post(`/api/v1/power-map/${companyId}/chat`, {
         message: text,
         confirm: false,
-        version: chatVersion.value || undefined,
+        version: chatVersion.value || currentVer.value || undefined,
       })
       const reply = data.reply || '收到'
       const hasChanges = data.needs_confirmation && data.changes
@@ -1559,7 +1568,7 @@ async function send(confirm) {
         try {
           const previewResp = await api.post(
             `/api/v1/power-map/${customerStore.currentCustomer.company_id}/preview`,
-            { proposed_changes: data.changes, version: chatVersion.value || undefined }
+            { proposed_changes: data.changes, version: chatVersion.value || currentVer.value || undefined }
           )
           previewMapData.value = previewResp.data
         } catch (e) {

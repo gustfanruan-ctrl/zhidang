@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="max-w-6xl mx-auto space-y-6">
     <!-- Page header with data-source toggle -->
     <div class="flex items-start justify-between gap-3 flex-wrap">
@@ -443,16 +443,78 @@
                     />
                   </div>
                   <p v-else class="font-semibold mb-1.5 break-words">{{ item.title || '未命名场景' }}</p>
-                  <div v-if="isEditing('scenario', index)" class="mb-2">
-                    <Label class="text-xs">描述</Label>
-                    <Textarea
-                      :model-value="item.description"
-                      rows="2"
-                      class="text-sm mt-1"
-                      @update:model-value="(v) => updateScenarioField(item.operationId, 'description', v)"
-                    />
+                  <div v-if="isEditing('scenario', index)" class="mb-2 space-y-2">
+                    <div>
+                      <Label class="text-xs">是否第一价值实现场景</Label>
+                      <SelectNative
+                        class="h-8 px-2 py-0 text-xs mt-1"
+                        :model-value="item.scene_first_value"
+                        @update:model-value="(v) => updateScenarioField(item.operationId, 'scene_first_value', v)"
+                      >
+                        <option value="">未选择</option>
+                        <option value="是">是</option>
+                        <option value="否">否</option>
+                      </SelectNative>
+                    </div>
+                    <div>
+                      <Label class="text-xs">解决什么问题</Label>
+                      <Textarea
+                        :model-value="item.question"
+                        rows="3"
+                        class="text-sm mt-1"
+                        @update:model-value="(v) => updateScenarioField(item.operationId, 'question', v)"
+                      />
+                    </div>
+                    <div>
+                      <Label class="text-xs">怎样解决</Label>
+                      <Textarea
+                        :model-value="item.answer"
+                        rows="3"
+                        class="text-sm mt-1"
+                        @update:model-value="(v) => updateScenarioField(item.operationId, 'answer', v)"
+                      />
+                    </div>
+                    <div>
+                      <Label class="text-xs">价值量化</Label>
+                      <Textarea
+                        :model-value="item.value_quantification"
+                        rows="2"
+                        class="text-sm mt-1"
+                        @update:model-value="(v) => updateScenarioField(item.operationId, 'value_quantification', v)"
+                      />
+                    </div>
+                    <div>
+                      <Label class="text-xs">总结沉淀</Label>
+                      <Textarea
+                        :model-value="item.summary_sedimentation"
+                        rows="2"
+                        class="text-sm mt-1"
+                        @update:model-value="(v) => updateScenarioField(item.operationId, 'summary_sedimentation', v)"
+                      />
+                    </div>
+                    <div>
+                      <Label class="text-xs">成果应用方式</Label>
+                      <SelectNative
+                        class="h-8 px-2 py-0 text-xs mt-1"
+                        :model-value="item.application_mode"
+                        @update:model-value="(v) => updateScenarioField(item.operationId, 'application_mode', v)"
+                      >
+                        <option value="">未选择</option>
+                        <option value="挂载平台或其它系统">挂载平台或其它系统</option>
+                        <option value="其他途径分享（如定时调度邮件、人工导出）">其他途径分享（如定时调度邮件、人工导出）</option>
+                        <option value="个人自己使用">个人自己使用</option>
+                        <option value="其他">其他</option>
+                      </SelectNative>
+                    </div>
                   </div>
-                  <p v-else class="text-muted-foreground mb-2 break-words">{{ item.description || '暂无描述' }}</p>
+                  <div v-else class="text-muted-foreground mb-2 break-words space-y-1">
+                    <p v-if="item.scene_first_value">是否第一价值实现场景：{{ item.scene_first_value }}</p>
+                    <p>解决什么问题：{{ item.question || '暂无问题描述' }}</p>
+                    <p>怎样解决：{{ item.answer || '暂无解决方案' }}</p>
+                    <p v-if="item.value_quantification">价值量化：{{ item.value_quantification }}</p>
+                    <p v-if="item.summary_sedimentation">总结沉淀：{{ item.summary_sedimentation }}</p>
+                    <p v-if="item.application_mode">成果应用方式：{{ item.application_mode }}</p>
+                  </div>
                   <div class="mb-2 space-y-1.5">
                     <Label class="text-xs text-muted-foreground">关联预期</Label>
                     <SelectNative
@@ -910,12 +972,19 @@ const cardGroups = computed(() => {
     }
     const item = {
       summary: getVal('预期简述') || getVal('detail_brief'),
-      description: tf === '场景表'
-        ? (getVal('解决什么问题') || '') + (getVal('怎样解决') ? ' — ' + getVal('怎样解决') : '')
-        : getVal('预期详情') || getVal('detail'),
+      scene_first_value: tf === '场景表' ? (getVal('是否第一价值实现场景') || '') : '',
+      question: tf === '场景表' ? (getVal('解决什么问题') || getVal('solve_what_ques') || '') : '',
+      answer: tf === '场景表' ? (getVal('怎样解决') || getVal('solve_what_ans') || '') : '',
+      value_quantification: tf === '场景表' ? (getVal('价值量化') || '') : '',
+      summary_sedimentation: tf === '场景表' ? (getVal('总结沉淀') || '') : '',
+      application_mode: tf === '场景表' ? (getVal('成果应用方式') || '') : '',
+      description: tf === '场景表' ? '' : (getVal('预期详情') || getVal('detail')),
       title: getVal('场景标题') || getVal('title'),
-      status: getVal('预期状态') || getVal('yuqi_status') || '未启动',
-      is_first_value: getVal('是否第一价值实现预期') || '否',
+      status: (() => {
+        const v = getVal('预期状态') || getVal('yuqi_status') || '未启动'
+        return ['未启动', '进行中', '已达成', '已作废'].includes(v) ? v : '未启动'
+      })(),
+      is_first_value: tf === '场景表' ? (getVal('是否第一价值实现场景') || '') : (getVal('是否第一价值实现预期') || '否'),
       confidence: card.confidence || 0,
       source_quote: card.source_quote || '',
       operationId: card.card_id,
@@ -1077,7 +1146,8 @@ function updateExpectationField(cardId, field, value) {
   } else if (field === 'description') {
     upsertChangeItem(card, '预期详情', 'detail', valueText)
   } else if (field === 'status') {
-    upsertChangeItem(card, '预期状态', 'yuqi_status', valueText)
+    const allowed = new Set(['未启动', '进行中', '已达成', '已作废'])
+    upsertChangeItem(card, '预期状态', 'yuqi_status', allowed.has(valueText) ? valueText : '未启动')
   } else if (field === 'is_first_value') {
     upsertChangeItem(card, '是否第一价值实现预期', 'is_first_value', valueText)
   }
@@ -1089,6 +1159,18 @@ function updateScenarioField(cardId, field, value) {
   const valueText = String(value ?? '')
   if (field === 'title') {
     upsertChangeItem(card, '场景标题', 'title', valueText)
+  } else if (field === 'scene_first_value') {
+    upsertChangeItem(card, '是否第一价值实现场景', '_widget_1744337240628', valueText)
+  } else if (field === 'question') {
+    upsertChangeItem(card, '解决什么问题', 'solve_what_ques', valueText)
+  } else if (field === 'answer') {
+    upsertChangeItem(card, '怎样解决', 'solve_what_ans', valueText)
+  } else if (field === 'value_quantification') {
+    upsertChangeItem(card, '价值量化', '_widget_1773296816191', valueText)
+  } else if (field === 'summary_sedimentation') {
+    upsertChangeItem(card, '总结沉淀', '_widget_1773296816192', valueText)
+  } else if (field === 'application_mode') {
+    upsertChangeItem(card, '成果应用方式', '_widget_1737340360281', valueText)
   } else if (field === 'description') {
     const { question, answer } = splitScenarioDescription(valueText)
     upsertChangeItem(card, '解决什么问题', 'solve_what_ques', question)
@@ -1178,8 +1260,12 @@ async function addManualCard(targetForm) {
       ]
     : [
         { field_name: '场景标题', widget_name: 'title', new_value: '' },
+        { field_name: '是否第一价值实现场景', widget_name: '_widget_1744337240628', new_value: '' },
         { field_name: '解决什么问题', widget_name: 'solve_what_ques', new_value: '' },
         { field_name: '怎样解决', widget_name: 'solve_what_ans', new_value: '' },
+        { field_name: '价值量化', widget_name: '_widget_1773296816191', new_value: '' },
+        { field_name: '总结沉淀', widget_name: '_widget_1773296816192', new_value: '' },
+        { field_name: '成果应用方式', widget_name: '_widget_1737340360281', new_value: '' },
       ]
   const newCard = {
     card_id: cardId,
@@ -1242,6 +1328,10 @@ function switchCardType(type, index, event) {
         const detail = getVal('预期详情') || getVal('detail')
         if (brief) newItems.push({ field_name: '场景标题', widget_name: 'title', new_value: brief })
         if (detail) newItems.push({ field_name: '解决什么问题', widget_name: 'solve_what_ques', new_value: detail })
+        newItems.push({ field_name: '是否第一价值实现场景', widget_name: '_widget_1744337240628', new_value: '' })
+        newItems.push({ field_name: '价值量化', widget_name: '_widget_1773296816191', new_value: '' })
+        newItems.push({ field_name: '总结沉淀', widget_name: '_widget_1773296816192', new_value: '' })
+        newItems.push({ field_name: '成果应用方式', widget_name: '_widget_1737340360281', new_value: '' })
       }
       card.change_items = newItems
       break
@@ -1297,10 +1387,13 @@ async function submitCards() {
       if (item.status) up['预期状态'] = item.status
       if (item.is_first_value) up['是否第一价值实现预期'] = item.is_first_value
     } else if (item._targetForm === '场景表') {
-      const { question, answer } = splitScenarioDescription(item.description || '')
       up['场景标题'] = item.title || ''
-      up['解决什么问题'] = question
-      up['怎样解决'] = answer
+      if (item.scene_first_value) up['是否第一价值实现场景'] = item.scene_first_value
+      up['解决什么问题'] = item.question || splitScenarioDescription(item.description || '').question
+      up['怎样解决'] = item.answer || splitScenarioDescription(item.description || '').answer
+      if (item.value_quantification) up['价值量化'] = item.value_quantification
+      if (item.summary_sedimentation) up['总结沉淀'] = item.summary_sedimentation
+      if (item.application_mode) up['成果应用方式'] = item.application_mode
     }
     if (Object.keys(up).length) fieldUpdates[item.operationId] = up
     // 始终带 target_form，后端用它覆盖 OPERATION_CARD_STORE 中的旧值
@@ -1354,6 +1447,7 @@ async function generateFollowup() {
       company_id: selectedTranscript.value.company_id || customerStore.currentCustomer?.company_id || 'demo',
       company_name: selectedTranscript.value.company_name || customerStore.currentCustomer?.company_name || '',
     })
+    if (resp.data?.error) throw new Error(resp.data.error)
     followupData.value = resp.data
     showMessage('跟进记录生成完成', 'success')
   } catch (e) {

@@ -9,6 +9,7 @@ function makeAssistantMessage() {
     toolCalls: [],
     graphState: null,
     screenshotUrl: null,
+    sandboxUrl: null,
     done: null,
     createdAt: Date.now(),
   }
@@ -59,6 +60,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
     lastDone: null,
     lastError: '',
     lastScreenshot: null,
+    sandboxUrl: '',
     commitRefreshKey: 0,
     sandboxRefreshKey: 0,
   }),
@@ -72,6 +74,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
       this.lastDone = null
       this.lastError = ''
       this.lastScreenshot = null
+      this.sandboxUrl = ''
       this.sandboxRefreshKey = 0
     },
 
@@ -113,6 +116,9 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
             switch (eventType) {
               case 'round_start': {
                 if (data?.session_id) this.currentSessionId = data.session_id
+                if (typeof data?.sandbox_url === 'string' && data.sandbox_url) {
+                  this.sandboxUrl = data.sandbox_url
+                }
                 this.streamingStatus = `第 ${data?.round ?? '?'} 轮开始…`
                 break
               }
@@ -183,6 +189,9 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
                 this.lastDone = data
                 assistant.done = data
                 if (data?.session_id) this.currentSessionId = data.session_id
+                if (typeof data?.sandbox_url === 'string' && data.sandbox_url) {
+                  this.sandboxUrl = data.sandbox_url
+                }
                 if (!data?.error) this.sandboxRefreshKey += 1
                 if (data?.error) {
                   const friendly = mapDoneError(data.error)
@@ -235,6 +244,14 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
       if (!this.currentSessionId || !companyId) return
       if (this.isLoading) return
       const { toast } = useToast()
+      if (this.lastDone?.error || this.lastDone?.converged === false) {
+        toast({
+          title: '当前会话不可提交',
+          description: '本轮维护未正常收敛，请先重新描述需求后再执行。',
+          variant: 'destructive',
+        })
+        return
+      }
       this.isLoading = true
       try {
         const res = await commitChatV2({ companyId, sessionId: this.currentSessionId })

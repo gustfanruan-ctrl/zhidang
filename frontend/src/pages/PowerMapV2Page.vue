@@ -66,7 +66,7 @@
           </div>
           <iframe
             v-else
-            :key="'bi-' + chatStore.commitRefreshKey"
+            :key="`bi-${currentVer}-${chatStore.commitRefreshKey}-${biIframeUrl}`"
             :src="biIframeUrl"
             class="absolute inset-0 w-full h-full border-none"
             @load="onIframeLoad"
@@ -178,12 +178,17 @@ const showBiLoginHint = ref(false)
 
 const lastScreenshot = computed(() => chatStore.lastScreenshot)
 const sandboxIframeUrl = computed(() => {
-  const sessionId = chatStore.currentSessionId
-  if (!sessionId) return ''
-  const sid = encodeURIComponent(sessionId)
-  return `/sandbox/render?session_id=${sid}&r=${chatStore.sandboxRefreshKey}`
+  const rawUrl = chatStore.sandboxUrl || ''
+  if (!rawUrl) return ''
+  try {
+    const u = new URL(rawUrl, window.location.origin)
+    u.searchParams.set('r', String(chatStore.sandboxRefreshKey))
+    return `${u.pathname}${u.search}${u.hash}`
+  } catch {
+    return rawUrl
+  }
 })
-const sandboxIframeKey = computed(() => `${chatStore.currentSessionId || 'empty'}-${chatStore.sandboxRefreshKey}`)
+const sandboxIframeKey = computed(() => `${chatStore.sandboxUrl || 'empty'}-${chatStore.sandboxRefreshKey}`)
 
 async function loadBiUrl() {
   if (!customerStore.currentCustomer) return
@@ -191,8 +196,15 @@ async function loadBiUrl() {
     const { data } = await api.get(
       `/api/v1/power-map/${customerStore.currentCustomer.company_id}/bi-com-id`,
     )
-    biIframeUrl.value = data.bi_iframe_url || ''
     biBaseUrl.value = data.bi_base_url || ''
+    const biComId = data.bi_com_id || ''
+    if (!biComId) {
+      biIframeUrl.value = ''
+      return
+    }
+    const params = new URLSearchParams({ prj_id: String(biComId) })
+    if (currentVer.value) params.set('version', currentVer.value)
+    biIframeUrl.value = `/api/power_map/sandbox?${params.toString()}`
   } catch (e) {
     console.error('获取 BI URL 失败', e)
     biIframeUrl.value = ''
@@ -231,7 +243,11 @@ async function loadMap() {
       if (!currentVer.value) {
         const csVer = vi.find(v => (v.ver_name || '').includes('客户成功'))
         const coVer = vi.find(v => (v.ver_name || '').includes('公司'))
-        currentVer.value = (csVer || coVer || vi[0]).value || ''
+        const initialVer = (csVer || coVer || vi[0]).value || ''
+        if (initialVer) {
+          currentVer.value = initialVer
+          return await loadMap()
+        }
       }
     }
     if (versions.value.length && !versions.value.find((v) => v.value === currentVer.value)) {
@@ -255,10 +271,10 @@ function switchVersion(verValue) {
 
 watch(
   () => customerStore.currentCustomer?.company_id,
-  () => {
+  async () => {
     currentVer.value = ''
     biIframeUrl.value = ''
-    loadMap()
+    await loadMap()
   },
 )
 

@@ -1,4 +1,3 @@
-"""CAS 票据转发服务 —— 智档后端代理访问帆软 BI 系统"""
 from __future__ import annotations
 
 import logging
@@ -13,38 +12,27 @@ logger = logging.getLogger("zhidang.cas_auth")
 CAS_SERVER = "https://passport.fanruan.com"
 CAS_SERVICE_VALIDATE = f"{CAS_SERVER}/cas/p3/serviceValidate"
 CAS_PROXY = f"{CAS_SERVER}/cas/p3/proxy"
-ZHIDANG_SERVICE = "zhidang"
 
 
 class CasAuthError(Exception):
-    """CAS 认证相关错误"""
     pass
 
 
 class CasAuthService:
-    """CAS 票据转发服务
-
-    管理帆软 BI 的 session cookie，通过 CAS proxy ticket 机制
-    代表已登录用户获取 BI 系统的访问权限。
-    """
-
     def __init__(self):
         self._cookie_cache: dict[str, dict[str, Any]] = {}
+        self._token_cache: dict[str, dict[str, Any]] = {}
         self._pgt_store: dict[str, dict[str, Any]] = {}
-        self._pgt_iou_map: dict[str, str] = {}  # pgtIou → pgtId
-
-    # ── PGT 管理 ──────────────────────────────────────
+        self._pgt_iou_map: dict[str, str] = {}
 
     def store_pgt(self, user_id: str, pgt: str, ttl: int = 7200):
         self._pgt_store[user_id] = {"pgt": pgt, "expires_at": time.time() + ttl}
 
     def handle_pgt_callback(self, pgt_id: str, pgt_iou: str):
-        """接收 CAS 服务器的 PGT 回调"""
         self._pgt_iou_map[pgt_iou] = pgt_id
         logger.info("CAS: received PGT callback iou=%s", pgt_iou)
 
     def resolve_pgt(self, user_id: str, pgt_iou: str) -> bool:
-        """用 PGT IOU 查找 PGT 并关联到用户"""
         pgt = self._pgt_iou_map.pop(pgt_iou, None)
         if pgt:
             self.store_pgt(user_id, pgt)
@@ -52,18 +40,14 @@ class CasAuthService:
             return True
         return False
 
-    # ── BI session 获取 ──────────────────────────────
-
     async def get_bi_session(self, user_cas_info: dict) -> dict[str, str]:
-        """用用户当前的 CAS 信息，获取帆软 BI 的有效 session cookie
-
-        流程：
-        1. 用户已在智档通过 CAS 登录，智档持有用户的 PGT
-        2. 用 PGT 向 CAS 服务器请求针对 BI 系统的 PT（Proxy Ticket）
-        3. 用 PT 去 BI 系统验证 → 拿到 BI 的登录 session cookie
-        4. 返回 cookies 供后续 API 调用使用
-        """
-        user_id = user_cas_info.get("user_id") or user_cas_info.get("username", "unknown")
+        user_id = (
+            user_cas_info.get("user_id")
+            or user_cas_info.get("username")
+            or user_cas_info.get("user_name")
+            or "unknown"
+        )
+        bi_service = user_cas_info.get("bi_service") or "https://crm.finereporthelp.com/WebReport/decision"
 
         cached = self._cookie_cache.get(user_id)
         if cached and cached["expires_at"] > time.time():
@@ -71,20 +55,68 @@ class CasAuthService:
             return cached["cookies"]
 
         pgt_entry = self._pgt_store.get(user_id)
-        if not pgt_entry or pgt_entry["expires_at"] <= time.time():
-            if pgt_entry:
-                del self._pgt_store[user_id]
-            raise CasAuthError("认证失败：无法获取帆软登录态，请重新登录")
+        if pgt_entry and pgt_entry["expires_at"] > time.time():
+            pt = await self._get_proxy_ticket(pgt_entry["pgt"], bi_service)
+            cookies = await self._exchange_pt_for_cookies(pt, bi_service)
+            self._cookie_cache[user_id] = {"cookies": cookies, "expires_at": time.time() + 3600}
+            return cookies
+        if pgt_entry:
+            del self._pgt_store[user_id]
 
-        bi_service = user_cas_info.get("bi_service") or "https://crm.finereporthelp.com/WebReport/decision"
-        pt = await self._get_proxy_ticket(pgt_entry["pgt"], bi_service)
+        login_mobile = (user_cas_info.get("login_mobile") or "").strip()
+        login_password = (user_cas_info.get("login_password") or "").strip()
+        if login_mobile and login_password:
+            return await self._login_with_service_account(user_id, bi_service, login_mobile, login_password)
 
-        cookies = await self._exchange_pt_for_cookies(pt, bi_service)
+        token_cached = self._token_cache.get(user_id)
+        if token_cached and token_cached["expires_at"] > time.time():
+            logger.info("CAS: using cached BI token for %s", user_id)
+            return {"Authorization": f"Bearer {token_cached['token']}"}
 
-        self._cookie_cache[user_id] = {"cookies": cookies, "expires_at": time.time() + 3600}
-        return cookies
+        raise CasAuthError("认证失败：无法获取帆软登录态，请重新登录")
 
-    # ── CAS 协议操作 ────────────────────────────────
+    async def _login_with_service_account(self, user_id: str, bi_service: str, mobile: str, password: str) -> dict[str, str]:
+        signin_url = "https://fanruanclub.com/login/signin"
+        verify_url = "https://fanruanclub.com/login/verify"
+        referrer = bi_service
+
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            await client.get(signin_url, params={"app": "crm", "referrer": referrer})
+            resp = await client.post(
+                verify_url,
+                data={"mobile": mobile, "password": password, "app": "crm", "referrer": referrer},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        if not data.get("success") or not isinstance(data.get("data"), dict):
+            raise CasAuthError(f"帆软账号登录失败: {data.get('msg') or 'unknown'}")
+
+        payload = data["data"]
+        token = str(payload.get("token") or "")
+        redirect_url = str(payload.get("redirectUrl") or "")
+        ttl = int(payload.get("time") or 7200)
+        if not token:
+            raise CasAuthError("帆软账号登录失败：未返回 token")
+
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as bi_client:
+            # Carry over CAS TGC so the BI redirect ticket exchange can establish BI cookies.
+            for cookie in client.cookies.jar:
+                bi_client.cookies.set(cookie.name, cookie.value, domain=cookie.domain, path=cookie.path)
+            if redirect_url:
+                redirect_resp = await bi_client.get(redirect_url)
+                redirect_resp.raise_for_status()
+            cookies = {cookie.name: cookie.value for cookie in bi_client.cookies.jar if cookie.name and cookie.value}
+
+        self._token_cache[user_id] = {"token": token, "expires_at": time.time() + max(300, ttl - 120)}
+        if cookies:
+            self._cookie_cache[user_id] = {"cookies": cookies, "expires_at": time.time() + 3600}
+            logger.info("CAS: refreshed BI service cookies for %s", user_id)
+            return cookies
+
+        logger.info("CAS: refreshed BI service token for %s", user_id)
+        return {"Authorization": f"Bearer {token}"}
 
     async def _get_proxy_ticket(self, pgt: str, target_service: str) -> str:
         params = {"pgt": pgt, "targetService": target_service}
@@ -121,7 +153,6 @@ class CasAuthService:
                 return c
 
             cookies = _extract(resp)
-            # follow redirects manually to capture cookies from all responses
             location = resp.headers.get("location")
             while location and not cookies and resp.status_code in (301, 302, 303, 307, 308):
                 resp = await client.get(location, follow_redirects=False)
@@ -133,12 +164,7 @@ class CasAuthService:
 
         return cookies
 
-    # ── ST 验证（用于 SSO 回调） ────────────────────
-
     async def validate_st(self, st: str, service: str, pgt_url: str = "") -> dict[str, Any]:
-        """验证 CAS Service Ticket，返回用户信息。
-        若提供 pgt_url，CAS 服务器会回调该 URL 传递 PGT。
-        """
         params: dict[str, str] = {"ticket": st, "service": service, "format": "json"}
         if pgt_url:
             params["pgtUrl"] = pgt_url
@@ -154,13 +180,11 @@ class CasAuthService:
             desc = auth_failure.get("description", auth_failure.get("code", "未知错误"))
             raise CasAuthError(f"CAS 验证失败: {desc}")
 
-        pgt_iou = auth_success.get("proxyGrantingTicket", "")
         return {
             "username": auth_success.get("user", ""),
             "attributes": auth_success.get("attributes", {}),
-            "pgt_iou": pgt_iou,
+            "pgt_iou": auth_success.get("proxyGrantingTicket", ""),
         }
 
 
-# 全局单例
 cas_auth_service = CasAuthService()

@@ -26,7 +26,7 @@
         <!-- Selected customer -->
         <div v-if="selectedCustomerId" class="flex items-center justify-between bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
           <div class="flex-1 min-w-0">
-            <div class="text-xs font-medium truncate">{{ customerStore.currentCustomer?.company_name || '已选择' }}</div>
+            <div class="text-xs font-medium truncate">{{ customerStore.currentCustomer?.company_name || customerStore.currentCustomer?.com_name || '已选择' }}</div>
             <div class="text-[10px] text-muted-foreground">{{ customerStore.currentCustomer?.csm || '' }}</div>
           </div>
           <Button variant="ghost" size="sm" class="h-6 w-6 p-0 text-muted-foreground hover:text-destructive" @click="selectedCustomerId = ''; customerStore.clearContext()">
@@ -41,7 +41,7 @@
                class="px-3 py-2 text-xs border-b border-border/30 last:border-0 cursor-pointer hover:bg-muted/40 transition-colors"
                :class="{ 'bg-primary/5 border-primary/20': selectedCustomerId === c.company_id }"
                @click="onCustomerSelect(c)">
-            <div class="font-medium truncate">{{ c.company_name }}</div>
+            <div class="font-medium truncate">{{ c.company_name || c.com_name }}</div>
             <div class="text-[10px] text-muted-foreground truncate">{{ c.csm || '' }}</div>
           </div>
         </div>
@@ -256,7 +256,10 @@ const pagedCustomers = computed(() => {
 })
 function filterCustomers() {
   const k = customerKeyword.value.trim().toLowerCase()
-  filteredCustomers.value = !k ? customerStore.customers : customerStore.customers.filter((c) => c.company_name.toLowerCase().includes(k))
+  filteredCustomers.value = !k ? customerStore.customers : customerStore.customers.filter((c) => {
+    const name = `${c.company_name || ''} ${c.com_name || ''}`.toLowerCase()
+    return name.includes(k)
+  })
   customerPage.value = 1
 }
 

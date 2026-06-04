@@ -15,9 +15,43 @@ function cacheKey() {
 function readStoredCustomer() {
   try {
     const raw = localStorage.getItem('zhidang_current_customer')
-    return raw ? JSON.parse(raw) : null
+    return raw ? normalizeCustomer(JSON.parse(raw)) : null
   } catch {
     return null
+  }
+}
+
+function normalizeCustomer(customer) {
+  if (!customer || typeof customer !== 'object') return null
+  const companyName = String(
+    customer.company_name
+    || customer.comname_01
+    || customer.com_name
+    || customer['客户名称']
+    || customer['企业名称']
+    || customer['公司名称']
+    || ''
+  ).trim()
+  const comName = String(customer.com_name || companyName || '').trim()
+  const comId = String(customer.com_id || customer.customer_com_id || '').trim()
+  const companyId = String(customer.company_id || customer._id || customer.id || comId || '').trim()
+  return {
+    ...customer,
+    company_id: companyId,
+    company_name: companyName,
+    com_name: comName,
+    com_id: comId,
+  }
+}
+
+function normalizeCustomers(customers) {
+  return (customers || []).map(normalizeCustomer).filter(Boolean)
+}
+
+function persistLegacyCustomerId(customer) {
+  const value = String(customer?.company_id || customer?.com_id || '').trim()
+  if (value) {
+    localStorage.setItem('zhidang_company_id', value)
   }
 }
 
@@ -38,7 +72,7 @@ export const useCustomerStore = defineStore('customer', {
         if (!raw) return false
         const parsed = JSON.parse(raw)
         if (!parsed?.cacheAt || Date.now() - new Date(parsed.cacheAt).getTime() > CACHE_TTL_MS) return false
-        this.customers = parsed.customers || []
+        this.customers = normalizeCustomers(parsed.customers)
         this.cacheAt = parsed.cacheAt
         return true
       } catch {
@@ -56,7 +90,7 @@ export const useCustomerStore = defineStore('customer', {
         ? { keyword: normalizedKeyword, limit: 200 }
         : { limit: 500 }
       const { data } = await api.get('/api/v1/customers/list', { params })
-      this.customers = data.customers || []
+      this.customers = normalizeCustomers(data.customers)
       this.cacheAt = data.cached_at || new Date().toISOString()
       this.lastMode = data.mode || ''
       this.lastWarning = data.warning || ''
@@ -71,21 +105,31 @@ export const useCustomerStore = defineStore('customer', {
       const { data } = await api.get('/api/v1/customers/search', {
         params: { keyword: keyword.trim(), limit }
       })
+      data.customers = normalizeCustomers(data.customers)
       return data
     },
     async switchCustomer(customer, trigger = 'manual') {
+      const normalized = normalizeCustomer(customer)
+      if (!normalized) return
       const from = this.currentCustomer?.company_id || null
-      this.currentCustomer = customer
-      localStorage.setItem('zhidang_current_customer', JSON.stringify(customer))
+      this.currentCustomer = normalized
+      localStorage.setItem('zhidang_current_customer', JSON.stringify(normalized))
+      persistLegacyCustomerId(normalized)
       this.resetVersion += 1
       await api.post('/api/v1/customers/switch', {
         company_id_from: from,
-        company_id_to: customer.company_id,
+        company_id_to: normalized.company_id,
         trigger,
       }).catch(() => {})
     },
     hydrateCurrentCustomer() {
-      this.currentCustomer = readStoredCustomer()
+      const stored = readStoredCustomer()
+      if (stored) {
+        this.currentCustomer = stored
+        persistLegacyCustomerId(stored)
+      } else {
+        this.currentCustomer = null
+      }
     },
     clearContext() {
       this.currentCustomer = null

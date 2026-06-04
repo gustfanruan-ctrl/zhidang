@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import base64
 import functools
 import json
@@ -703,6 +704,7 @@ POWER_MAP_SYSTEM_PROMPT = """你是一个权力地图结构分析助手。根据
 2. **隶属走 department 字段**：人员归属部门通过 department 字段表达（部门名），不是 edge。
 3. **汇报走 reports_to 字段**：人员之间的汇报关系通过 reports_to 字段表达（引用 tmp_id 或姓名）。
 4. **忽略 BI 的 pid 字段**：BI 数据中的 pid 语义模糊。汇报关系只看 reports_to。
+5. **本轮语义范围最小修改**：只输出用户本轮明确要求或明确提到的人、部门、连线变更。可以为本轮新建对象、或本轮文本明确提到的对象补 reports_to；禁止因为历史画布里存在负责人/title/A 角色，就给本轮未提及的人或部门补边、改边、删边。
 
 ## JSON 输出格式
 
@@ -749,7 +751,7 @@ POWER_MAP_SYSTEM_PROMPT = """你是一个权力地图结构分析助手。根据
 - **dept 节点**：parent_dept（父部门名，顶级留空""）
 - **custom_edges_add**：额外边。格式 {{"source": "tmp_id或姓名", "target": "tmp_id或姓名", "edge_type": "reports_to"}}
   - person 之间的汇报关系优先用 reports_to 字段
-  - custom_edges_add 仅用于已有节点之间的新建边
+  - custom_edges_add 仅用于本轮用户明确提到的已有节点之间的新建边
 - **nodes_update**：修改已有节点。格式 {{"id_or_name": "张三", "position": "新职位"}}
 - **moves**：人员跨部门调动。格式 {{"person": "姓名", "to_dept": "目标部门名"}}
 
@@ -776,6 +778,7 @@ POWER_MAP_SYSTEM_PROMPT = """你是一个权力地图结构分析助手。根据
 - 部门 type 用 "dept"，人员 type 用 "user"
 - person 的 department 写部门名称，不是 id
 - reports_to 用 tmp_id（新建节点之间）或已有节点姓名
+- reports_to / custom_edges_add 只能覆盖本轮新建或本轮用户明确提到的对象；不要扫描历史部门自动补全汇报线
 - 不要输出 markdown 代码块标记，只输出纯 JSON
 - 空数组写 []，不要省略
 """
@@ -844,6 +847,8 @@ class MergeContext:
     harness_current_user: dict[str, Any] | None = None
     harness_version_id: str = ""
     harness_session_id: str = ""
+    harness_can_commit: bool = False
+    harness_last_error: str = ""
     # BI version pass-through — populated when a specific version UUID
     # was requested upstream so sandbox getInfo and save_state can use
     # the actual version instead of falling back to "main".
@@ -868,6 +873,8 @@ def _build_merge_context(
     ctx = MergeContext()
     ctx.all_nodes = list(current_nodes)
     ctx.edges = [dict(e) for e in current_edges]
+    for e in ctx.edges:
+        _ensure_edge_id(e)
 
     for n in ctx.all_nodes:
         ctx.nodes_by_id[n.id] = n
@@ -1157,8 +1164,10 @@ def _apply_delta(
         if dup:
             continue
         ctx.edges.append({
+            "id": uuid.uuid4().hex,
             "source_id": src_node.id,
             "target_id": tgt_node.id,
+            "edge_type": str(item.get("edge_type", "reports_to") or "reports_to").strip().lower(),
             "source_port": "port-bottom",
             "target_port": "port-top",
             "color": str(item.get("color", "#A2B1C3")),
@@ -3020,7 +3029,9 @@ async def _submit_to_bi(
     if not cookies and api_cfg["auth_token"]:
         headers["Authorization"] = f"Bearer {api_cfg['auth_token']}"
 
-    # Strip edge_type from edges — BI HAR has no edge_type field
+    # Preserve BI edge fields as closely as possible. Some real edge remark
+    # update requests carry edge_type (for example "manhattan"), so do not
+    # normalize or drop it when the source edge already has a non-empty value.
     clean_edges = []
     for e in edges:
         ce = {
@@ -3031,6 +3042,9 @@ async def _submit_to_bi(
             "target_id": str(e.get("target_id", "")),
             "target_port": str(e.get("target_port", "port-top")),
         }
+        edge_type = str(e.get("edge_type", "") or "").strip()
+        if edge_type:
+            ce["edge_type"] = edge_type
         clean_edges.append(ce)
 
     payload: dict[str, Any] = {
@@ -3080,6 +3094,14 @@ def _get_power_map_config(cfg: SystemConfig) -> dict[str, str]:
     if not get_path:
         raise ValueError("权利地图查询路径未配置，请前往配置页填写")
     return {"base_url": base_url, "get_path": get_path, "update_path": update_path, "auth_token": auth_token}
+
+
+def _split_bi_auth(auth: dict[str, str] | None) -> tuple[dict[str, str], dict[str, str] | None]:
+    if not auth:
+        return {}, None
+    headers = dict(auth)
+    cookies = headers.pop("__cookies__", None)
+    return headers, cookies if isinstance(cookies, dict) else None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -3786,8 +3808,61 @@ _VALID_EDGE_TYPES = ("reports_to", "influences")  # belongs_to is NOT an edge �
 _VALID_ROLES = ("A", "D", "I", "S")
 _VALID_DIRECTIONS = ("up", "down", "left", "right")
 _DIRECTION_STEP_PX = 15
-_LEADER_KEYWORDS_AUTO_REPORT = ("负责人", "部长", "总监")
 _AUTO_FIX_COLLISIONS_MAX_CALLS = 2
+
+
+_CALCULATOR_ALLOWED_BINOPS: dict[type[ast.operator], Callable[[float, float], float]] = {
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b,
+    ast.Div: lambda a, b: a / b,
+    ast.Mod: lambda a, b: a % b,
+}
+_CALCULATOR_ALLOWED_UNARYOPS: dict[type[ast.unaryop], Callable[[float], float]] = {
+    ast.UAdd: lambda a: a,
+    ast.USub: lambda a: -a,
+}
+
+
+def _tool_calculator(expression: str) -> dict[str, Any]:
+    """Evaluate a small arithmetic expression without eval."""
+    expr = str(expression or "").strip()
+    if not expr or len(expr) > 200:
+        return {"ok": False, "error": "invalid_expression"}
+
+    try:
+        parsed = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return {"ok": False, "error": "invalid_expression"}
+
+    def _eval(node: ast.AST) -> float:
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, (int, float))
+            and not isinstance(node.value, bool)
+        ):
+            return float(node.value)
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _CALCULATOR_ALLOWED_UNARYOPS:
+            return _CALCULATOR_ALLOWED_UNARYOPS[type(node.op)](_eval(node.operand))
+        if isinstance(node, ast.BinOp) and type(node.op) in _CALCULATOR_ALLOWED_BINOPS:
+            left = _eval(node.left)
+            right = _eval(node.right)
+            return _CALCULATOR_ALLOWED_BINOPS[type(node.op)](left, right)
+        raise ValueError("invalid_expression")
+
+    try:
+        result = _eval(parsed)
+    except ZeroDivisionError:
+        return {"ok": False, "error": "division_by_zero"}
+    except Exception:
+        return {"ok": False, "error": "invalid_expression"}
+    if not math.isfinite(result):
+        return {"ok": False, "error": "non_finite_result"}
+
+    value: int | float = int(result) if result.is_integer() else result
+    return {"ok": True, "expression": expr, "result": value}
 
 
 def _node_to_dict(n: PowerNode) -> dict[str, Any]:
@@ -4176,7 +4251,7 @@ def _tool_create_edge(
     if et == "influences":
         edge["dashed"] = True
     ctx.edges.append(edge)
-    return {"ok": True, "edge": _edge_to_dict(edge)}
+    return {"ok": True, "edge": _edge_to_dict(edge), "edge_id": edge["id"]}
 
 
 def _tool_delete_node(ctx: MergeContext, id: str, cascade: bool = True) -> dict[str, Any]:
@@ -4301,6 +4376,7 @@ def _tool_list_edges(
 
     results = []
     for e in ctx.edges:
+        _ensure_edge_id(e)
         if src and e.get("source_id") != src:
             continue
         if tgt and e.get("target_id") != tgt:
@@ -4316,6 +4392,7 @@ def _tool_list_edges(
             "source_name": sname.name if sname else "?",
             "target_name": tname.name if tname else "?",
             "edge_type": e.get("edge_type", ""),
+            "remark": e.get("edge_remark", ""),
         })
 
     return {"ok": True, "edges": results, "count": len(results)}
@@ -4456,6 +4533,36 @@ def _tool_update_edge(
         "target_id": final_tgt,
         "new_source_id": final_src,
         "new_target_id": final_tgt,
+    }
+
+
+def _tool_set_edge_remark(
+    ctx: MergeContext,
+    edge_id: str,
+    remark: str,
+) -> dict[str, Any]:
+    """Set only the BI edge_remark field on an existing line edge."""
+    eid = (edge_id or "").strip()
+    if not eid:
+        return {"ok": False, "error": "edge_id is required"}
+
+    edge = None
+    for e in ctx.edges:
+        if str(e.get("id", "")) == eid:
+            edge = e
+            break
+    if not edge:
+        return {"ok": False, "error": "edge_not_found"}
+
+    text = str(remark or "")
+    edge["edge_remark"] = text
+    return {
+        "ok": True,
+        "edge_id": eid,
+        "remark": text,
+        "source_id": str(edge.get("source_id", "")),
+        "target_id": str(edge.get("target_id", "")),
+        "edge_type": str(edge.get("edge_type", "")),
     }
 
 
@@ -5015,10 +5122,11 @@ async def _tool_render_screenshot(
 
 def _normalize_edges(ctx: MergeContext) -> None:
     """Convert belongs_to edges to parent_id, fix obviously-wrong directions,
-    and auto-create reports_to edges from each person to their department's
-    leader when the leader has role=A or a leader-title position.
+    and preserve explicit line edges from BI.
 
-    Called once on initial load (in _build_merge_context or right after).
+    Called once on initial load. This must not infer new reports_to edges from
+    role/title across the whole graph; inferred edges belong to the current LLM
+    turn's semantic scope, not to BI state normalization.
     """
     if not ctx.all_nodes:
         return
@@ -5028,6 +5136,7 @@ def _normalize_edges(ctx: MergeContext) -> None:
     flagged: list[dict[str, Any]] = []
 
     for e in ctx.edges:
+        _ensure_edge_id(e)
         et = str(e.get("edge_type", "")).lower()
         sid = str(e.get("source_id", ""))
         tid = str(e.get("target_id", ""))
@@ -5077,68 +5186,6 @@ def _normalize_edges(ctx: MergeContext) -> None:
             f"edge_normalization: {len(flagged)} suspicious edges flagged: "
             + json.dumps(flagged[:5], ensure_ascii=False)
         )
-
-    # Auto-report compensation: for each person inside a dept with a clear A-role
-    # or title-based leader, ensure a reports_to edge from person → leader.
-    # Skip users who already have pid set — LLM already specified the relationship.
-    by_dept_leader: dict[str, PowerNode | None] = {}
-    for n in ctx.all_nodes:
-        if n.node_type != "user" or not n.parent_dept_id:
-            continue
-        if n.pid:       # LLM already specified reports_to via node.pid
-            continue
-        if n.parent_dept_id not in by_dept_leader:
-            dept_node = by_id.get(n.parent_dept_id)
-            if not dept_node or dept_node.node_type != "dept":
-                by_dept_leader[n.parent_dept_id] = None
-                continue
-            users_here = [u for u in ctx.all_nodes
-                          if u.node_type == "user" and u.parent_dept_id == dept_node.id]
-            picked: PowerNode | None = None
-            # Prefer role=A
-            for u in users_here:
-                if (u.role or "").upper() == "A":
-                    picked = u
-                    break
-            # Else first user whose position contains a leader keyword
-            if picked is None:
-                for u in users_here:
-                    pos = (u.position or "")
-                    if any(kw in pos for kw in _LEADER_KEYWORDS_AUTO_REPORT):
-                        picked = u
-                        break
-            by_dept_leader[n.parent_dept_id] = picked
-
-        leader = by_dept_leader.get(n.parent_dept_id)
-        if not leader or leader.id == n.id:
-            continue
-
-        exists = any(
-            str(e.get("source_id", "")) == n.id
-            and str(e.get("target_id", "")) == leader.id
-            and str(e.get("edge_type", "")).lower() in ("reports_to", "")
-            for e in ctx.edges
-        )
-        if exists:
-            continue
-
-        logger.info(
-            "[DIAG] _normalize_edges auto-report: %s (%s) → %s (%s, role=%r tagA=%r)",
-            n.name, n.id[-8:], leader.name, leader.id[-8:], leader.role, leader.tagA,
-        )
-
-        ctx.edges.append({
-            "id": uuid.uuid4().hex,
-            "source_id": n.id,
-            "target_id": leader.id,
-            "edge_type": "reports_to",
-            "source_port": "port-bottom",
-            "target_port": "port-top",
-            "color": "#2563eb",
-            "edge_remark": "auto-leader",
-        })
-        if not n.pid:
-            n.pid = leader.id
 
 
 # Visual styling per nesting depth: outer levels look heaviest, inner lightest.
@@ -6222,6 +6269,28 @@ _HARNESS_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "set_edge_remark",
+        "description": (
+            "Set edge_remark on an existing line edge. Use when the user asks "
+            "to annotate, label, explain, or add a remark to a relationship. "
+            "Do not delete/recreate an edge just to write a remark."
+        ),
+        "args": {
+            "edge_id": "string",
+            "remark": "string",
+        },
+    },
+    {
+        "name": "calculator",
+        "description": (
+            "Safely evaluate simple arithmetic with numbers, + - * / %, and "
+            "parentheses. Use for counts, ratios, and hierarchy statistics."
+        ),
+        "args": {
+            "expression": "string",
+        },
+    },
+    {
         "name": "delete_node",
         "description": (
             "Remove a node. cascade=true (default) recursively deletes all "
@@ -6483,6 +6552,42 @@ _HARNESS_TOOLS_OPENAI: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["source_id", "target_id", "edge_type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_edge_remark",
+            "description": (
+                "Set edge_remark on an existing line edge. Use when the user asks "
+                "to annotate, label, explain, or add a remark to a relationship. "
+                "Do not delete/recreate an edge just to write a remark."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "edge_id": {"type": "string"},
+                    "remark": {"type": "string"},
+                },
+                "required": ["edge_id", "remark"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculator",
+            "description": (
+                "Safely evaluate simple arithmetic with numbers, + - * / %, and "
+                "parentheses. Use for counts, ratios, and hierarchy statistics."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                },
+                "required": ["expression"],
             },
         },
     },
@@ -6954,6 +7059,7 @@ HARNESS_SYSTEM_PROMPT = """你是权力地图布局 Agent。每轮对话都会�
 2. **只调布局工具**：你只能调下面列出的工具，不能调感知/截图工具（已移除）
 3. **隶属走 parent_id**：create_node 的 parent_id 表达"X 属于 Y 部门"。create_edge 只接受 reports_to 和 influences
 4. **变更最小化**：只改用户要求的，不顺手优化
+5. **补边只限本轮语义**：可以为本轮用户明确提到或本轮新建的人/部门补 reports_to；禁止因为画布历史数据里存在负责人、leader title 或 A 角色，就给本轮未提及的人/部门补边、改边、删边。
 
 ## 可用工具
 
@@ -6965,6 +7071,7 @@ HARNESS_SYSTEM_PROMPT = """你是权力地图布局 Agent。每轮对话都会�
 
 ### 关系类
 - create_edge(source_id, target_id, edge_type) — edge_type ∈ {reports_to, influences}
+- set_edge_remark(edge_id, remark) — 给已有连线写备注；只改备注，不改关系本身
 - delete_edge(edge_id)
 
 ### 布局类
@@ -6979,6 +7086,9 @@ HARNESS_SYSTEM_PROMPT = """你是权力地图布局 Agent。每轮对话都会�
 - check_collisions(scope?)
 - validate_structure()
 
+### 计算类
+- calculator(expression) — 安全计算数量/比例/层级统计
+
 ### 持久化
 - save_state() — 写回 BI，仅在用户确认后调用
 
@@ -6989,23 +7099,26 @@ HARNESS_SYSTEM_PROMPT = """你是权力地图布局 Agent。每轮对话都会�
 - 需要调整 → 调布局工具，下一轮会有新截图
 
 常见模式：
-**新建部门**: create_node(财务部) → create_node(黄宇, parent_id=财务部, role=A) → create_node(下属们, parent_id=财务部) → create_edge(下属→领导, reports_to) → fit_container_to_children(财务部)
+**新建部门**: create_node(财务部) → create_node(黄宇, parent_id=财务部, role=A) → create_node(本轮提到的下属们, parent_id=财务部) → 仅当用户明说"向黄宇汇报/下属/负责人"时 create_edge(本轮下属→黄宇, reports_to) → fit_container_to_children(财务部)
 **布局调整**: 看图判断 → place_node / center_above / arrange_horizontally
 **删除旧连线**: 从 graph_state / layout_summary 中定位旧边的 id（格式为 `edge_id: [源] --type--> [目标]`，如 `1de3b2: [周浩] --reports_to--> [陈大志]`），直接 delete_edge(edge_id)
+**连线 + 备注**: 用户要求"连 A 到 B，并备注/标注 X"时，先 create_edge，再对返回的 edge_id 调 set_edge_remark；若只是给已有关系加备注，只调 set_edge_remark，不要 delete_edge/create_edge
+**数量计算**: 只要要做加减乘除、比例、差值、求和、取余、层级数换算，就必须先调 calculator，不要心算。若问题包含“数一数有多少人/多少边/多少下属/某类节点有几个”，先用 graph_state / list_edges 拿到数量，再把算式交给 calculator
 **清理多余节点**: delete_node(node_id, cascade=true) 递归删除部门及其全部下属；cascade=false 只删节点、释放子节点
 
 ## dept-dept 父子关系补全（必读）
 
-BI 系统只维护 user→dept 的父子关系（`user.parent_dept_id` 指向所属 dept）。dept-dept 嵌套关系（如"华南销售组属于销售部"）在 BI 数据中不存在，需要根据汇报关系（reports_to）推断后用 set_parent 补全。
+BI 系统只维护 user→dept 的父子关系（`user.parent_dept_id` 指向所属 dept）。dept-dept 嵌套关系（如"华南销售组属于销售部"）在 BI 数据中不存在；只有当本轮用户明确描述了相关部门/人员的汇报链时，才可根据本轮 reports_to 推断后用 set_parent 补全。
 
 **推断规则**：若 dept A 的负责人（部长/总监/组长，可通过 position 字段或汇报链顶端识别）向某人汇报，而那个人属于 dept B，则 A.parent_dept_id 应为 B.id。
 
-**时机**：建图完成后、首次调用 fit_container_to_children 或 arrange 之前，集中调用 set_parent 补全所有 dept-dept 关系。
+**时机**：建图完成后、首次调用 fit_container_to_children 或 arrange 之前，只对本轮涉及的部门调用 set_parent 补全 dept-dept 关系。
 
 **兜底**：若 fit_container_to_children 返回 `geometric_containment_mismatch` 错误，立即按 warning 中提示的 `geo_contained_dept_ids` 调用 set_parent，然后重试 fit。
 
 ## 反模式
 - ❌ create_edge 传 belongs_to
+- ❌ 为了写备注而删除重建边——备注是标注，不是关系语义本身，改备注用 set_edge_remark
 - ❌ 容器建完不调 fit_container_to_children
 - ❌ 明知有错误旧连线却调 validate_structure 而不调 delete_edge——validate 是诊断工具，不是操作工具。看到旧边直接用 delete_edge 删除
 - ❌ 人员离职/调岗不删旧汇报线——必须调 delete_edge 清除旧线再新建
@@ -7018,10 +7131,11 @@ BI 系统只维护 user→dept 的父子关系（`user.parent_dept_id` 指向所
 HARNESS_FALLBACK_RESPONSE_HINT = """【可调用工具】
 - 感知: render_screenshot / get_graph_state / get_node_by_visual_reference
 - 节点: create_node / delete_node / update_node / set_parent
-- 关系: create_edge / delete_edge / update_edge
+- 关系: create_edge / delete_edge / update_edge / set_edge_remark
 - 布局: layout_subtree / relayout_siblings / resolve_collisions
 - 微调: nudge_node / auto_fix_collisions
 - 验证: check_collisions / validate_structure
+- 计算: calculator
 - 持久化: save_state
 
 【create_node】
@@ -7032,6 +7146,13 @@ HARNESS_FALLBACK_RESPONSE_HINT = """【可调用工具】
 【create_edge】
 - edge_type ∈ {reports_to, influences} 仅这两个
 - 隶属关系走 parent_id，不走 edge
+- 用户提出"连线 + 备注/标注/说明"时：先 create_edge，再用 create_edge 返回的 edge_id 调 set_edge_remark；只改已有线备注时只调 set_edge_remark
+
+【calculator】
+- 只支持数字、+ - * / %、一元正负号、括号
+- 适用：纯算术表达式、比例、差值、求和、取余、层级数换算
+- 不适用：直接“从图里数人/数边/筛某类节点/做集合统计”；这类先用 graph_state / list_edges 拿到数字，再调用 calculator
+- 只要进入算式求值阶段，必须调用 calculator，不要心算复杂表达式
 
 【响应格式】仅返回 JSON 数组：
 [
@@ -7135,6 +7256,14 @@ async def _execute_harness_tool(
             str(args.get("target_id", "")),
             str(args.get("edge_type", "")),
         )
+    if tool == "set_edge_remark":
+        return _tool_set_edge_remark(
+            ctx,
+            str(args.get("edge_id", "")),
+            str(args.get("remark", "")),
+        )
+    if tool == "calculator":
+        return _tool_calculator(str(args.get("expression", "")))
     if tool == "delete_node":
         cascade_raw = args.get("cascade", True)
         if isinstance(cascade_raw, str):
@@ -7334,7 +7463,18 @@ def _build_layout_summary(ctx: MergeContext) -> str:
             "user_count": len(children),
             "geometry_locked": bool(n.geometry_locked),
         })
-    return json.dumps({"departments": depts}, ensure_ascii=False, indent=2)
+    node_name_map = {n.id: n.name for n in ctx.all_nodes}
+    edges: list[dict[str, Any]] = []
+    for e in ctx.edges:
+        _ensure_edge_id(e)
+        edges.append({
+            "id": str(e.get("id", "")),
+            "source_name": node_name_map.get(str(e.get("source_id", "")), "?"),
+            "target_name": node_name_map.get(str(e.get("target_id", "")), "?"),
+            "edge_type": str(e.get("edge_type", "")),
+            "remark": str(e.get("edge_remark", "") or ""),
+        })
+    return json.dumps({"departments": depts, "edges": edges}, ensure_ascii=False, indent=2)
 
 
 async def _execute_harness(
@@ -7538,14 +7678,16 @@ def _build_graph_state_text(ctx: MergeContext) -> str:
         )
     edge_lines = []
     for e in ctx.edges:
-        eid = e.get("id", "")
+        eid = _ensure_edge_id(e)
         sid = e.get("source_id", "")
         tid = e.get("target_id", "")
         etype = e.get("edge_type", "")
+        remark = str(e.get("edge_remark", "") or "")
         sname = node_name_map.get(sid, "?")
         tname = node_name_map.get(tid, "?")
+        remark_suffix = f" remark={remark}" if remark else ""
         edge_lines.append(
-            f"  {eid}: {sname} --{etype}--> {tname} ({sid[:8]}→{tid[:8]})"
+            f"  {eid}: {sname} --{etype}--> {tname} ({sid[:8]}→{tid[:8]}){remark_suffix}"
         )
     parts = ["## 当前图结构", f"节点 ({len(ctx.all_nodes)}):"] + lines
     if edge_lines:
@@ -7574,6 +7716,7 @@ _TOOL_TOUCH_RULES: dict[str, dict[str, Any]] = {
     "auto_fix_collisions":      {"type": "result_nodes", "source": "result", "path": "moved_nodes"},
     "relayout":                 {"type": "all_nodes", "source": "special"},
     "create_edge":              {"type": "edge", "source": "result", "path": "edge_id"},
+    "set_edge_remark":          {"type": "edge", "source": "args",   "path": "edge_id"},
     "update_edge":              {"type": "edge", "source": "args",   "path": "edge_id"},
     "delete_edge":              {"type": "edge", "source": "args",   "path": "edge_id"},
 }
@@ -7637,6 +7780,8 @@ def _extract_touched_ids(
 _TOOL_RESULT_COMPRESS_KEEP_FIELDS: dict[str, tuple[str, ...]] = {
     "create_node": ("node_id", "name", "x", "y", "type"),
     "create_edge": ("edge_id", "source_id", "target_id"),
+    "set_edge_remark": ("edge_id", "remark", "source_id", "target_id"),
+    "calculator": ("expression", "result"),
     "place_node": ("node_id", "x", "y"),
     "move_dept_with_children": ("dept_id", "name", "moved_count", "delta_x", "delta_y"),
     "render_screenshot": (),
@@ -7798,6 +7943,30 @@ def _normalize_tool_call_ids(messages: list[dict[str, Any]]) -> list[dict[str, A
     return out
 
 
+def _prepare_messages_for_text_fallback(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop native tool-call history before retrying with text fallback.
+
+    Some OpenAI-compatible gateways reject prior-round native tool history even
+    after we switch away from the ``tools`` parameter. The latest graph-state
+    user message already reflects post-tool state, so it is safer to keep the
+    user-visible state and discard assistant/tool protocol artifacts.
+    """
+    if not messages:
+        return messages
+
+    cleaned: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        if role == "user":
+            cleaned.append(msg)
+            continue
+        if role == "assistant" and not (msg.get("tool_calls") or []):
+            cleaned.append(msg)
+    return cleaned
+
+
 def _build_llm_messages(
     accumulated_messages: list[dict[str, Any]],
     current_round: int,
@@ -7881,6 +8050,7 @@ async def _run_llm_tool_loop(
     screenshot_fn: Callable[[MergeContext], Awaitable[str]],
     max_rounds: int,
     session_id: str = "",
+    sandbox_url: str = "",
 ) -> AsyncGenerator[HarnessEvent, None]:
     """Generic vision-LLM tool-calling loop.
 
@@ -7902,6 +8072,12 @@ async def _run_llm_tool_loop(
     """
     _loop_start_ms = time.time()
     _total_tool_invocations = 0
+
+    def _attach_sandbox_url(payload: dict[str, Any]) -> dict[str, Any]:
+        if sandbox_url:
+            payload.setdefault("sandbox_url", sandbox_url)
+        return payload
+
     try:
         client = _get_llm_client(cfg)
     except Exception as exc:
@@ -7913,14 +8089,14 @@ async def _run_llm_tool_loop(
         )
         yield HarnessEvent(
             type="done",
-            data={
+            data=_attach_sandbox_url({
                 "skipped": True,
                 "error": "llm_client_unavailable",
                 "rounds": 0,
                 "executed": 0,
                 "session_id": session_id,
                 "exit_reason": "error",
-            },
+            }),
         )
         return
 
@@ -7929,6 +8105,8 @@ async def _run_llm_tool_loop(
     rounds_completed = 0
     use_native_tools = True
     accumulated_messages: list[dict[str, Any]] = []
+    ctx.harness_can_commit = False
+    ctx.harness_last_error = ""
 
     round_idx = 0
     consecutive_no_tool_rounds = 0
@@ -7955,7 +8133,7 @@ async def _run_llm_tool_loop(
         rounds_completed = round_idx + 1
         yield HarnessEvent(
             type="round_start",
-            data={"round": rounds_completed, "session_id": session_id},
+            data=_attach_sandbox_url({"round": rounds_completed, "session_id": session_id}),
         )
 
         _accum_total_chars = sum(len(str(m.get("content", ""))) for m in accumulated_messages)
@@ -8114,8 +8292,11 @@ async def _run_llm_tool_loop(
                     exc,
                 )
                 use_native_tools = False
+                accumulated_messages = _prepare_messages_for_text_fallback(accumulated_messages)
                 continue
             logger.warning("llm-loop: vision call failed at round %d: %s", rounds_completed, exc)
+            ctx.harness_can_commit = False
+            ctx.harness_last_error = f"vision_call_failed_round{rounds_completed}"
             logger.info(
                 "[DEBUG-J] 12.EXIT total_rounds=%d total_tool_calls=%d converged=%s total_ms=%d final_nodes=%d final_edges=%d exit_reason=%s",
                 rounds_completed, _total_tool_invocations, "error",
@@ -8124,14 +8305,14 @@ async def _run_llm_tool_loop(
             )
             yield HarnessEvent(
                 type="done",
-                data={
+                data=_attach_sandbox_url({
                     "skipped": False,
                     "error": f"vision_call_failed_round{rounds_completed}",
                     "rounds": rounds_completed,
                     "executed": executed,
                     "session_id": session_id,
                     "exit_reason": "error",
-                },
+                }),
             )
             return
 
@@ -8199,16 +8380,18 @@ async def _run_llm_tool_loop(
                     int((time.time() - _loop_start_ms) * 1000),
                     len(ctx.all_nodes), len(ctx.edges), exit_reason,
                 )
+                ctx.harness_can_commit = True
+                ctx.harness_last_error = ""
                 await _maybe_queue_review(exit_reason)
                 yield HarnessEvent(
                     type="done",
-                    data={
+                    data=_attach_sandbox_url({
                         "rounds": rounds_completed,
                         "executed": executed,
                         "session_id": session_id,
                         "converged": True,
                         "exit_reason": exit_reason,
-                    },
+                    }),
                 )
                 return
             if consecutive_no_tool_rounds >= 3:
@@ -8219,16 +8402,18 @@ async def _run_llm_tool_loop(
                     int((time.time() - _loop_start_ms) * 1000),
                     len(ctx.all_nodes), len(ctx.edges), exit_reason,
                 )
+                ctx.harness_can_commit = True
+                ctx.harness_last_error = ""
                 await _maybe_queue_review(exit_reason)
                 yield HarnessEvent(
                     type="done",
-                    data={
+                    data=_attach_sandbox_url({
                         "rounds": rounds_completed,
                         "executed": executed,
                         "session_id": session_id,
                         "converged": True,
                         "exit_reason": exit_reason,
-                    },
+                    }),
                 )
                 return
             # consecutive_no_tool_rounds == 2: give LLM one more chance
@@ -8294,7 +8479,7 @@ async def _run_llm_tool_loop(
             if len(serialized) > _MAX_TOOL_RESULT_CHARS:
                 # 超大返回值 → 摘要模式：保留关键标量字段
                 summary: dict[str, Any] = {"tool": name, "ok": ok, "_truncated": True, "_original_size": len(serialized)}
-                for key in ("node_id", "edge_id", "x", "y", "w", "h", "placed", "end_x", "end_y",
+                for key in ("node_id", "edge_id", "remark", "expression", "result", "x", "y", "w", "h", "placed", "end_x", "end_y",
                             "total", "child_count", "aligned", "distributed", "fixed", "remaining",
                             "span", "gap", "direction", "distance", "name", "container_id",
                             "total_collisions", "scope", "calls_used", "calls_remaining"):
@@ -8374,6 +8559,8 @@ async def _run_llm_tool_loop(
                 "llm-loop: screenshot refresh failed before round %d: %s",
                 rounds_completed + 1, exc,
             )
+            ctx.harness_can_commit = False
+            ctx.harness_last_error = "screenshot_failed"
             logger.info(
                 "[DEBUG-J] 12.EXIT total_rounds=%d total_tool_calls=%d converged=%s total_ms=%d final_nodes=%d final_edges=%d exit_reason=%s",
                 rounds_completed, _total_tool_invocations, "false",
@@ -8382,12 +8569,12 @@ async def _run_llm_tool_loop(
             )
             yield HarnessEvent(
                 type="done",
-                data={
+                data=_attach_sandbox_url({
                     "rounds": rounds_completed,
                     "executed": executed,
                     "session_id": session_id,
                     "exit_reason": "error",
-                },
+                }),
             )
             return
 
@@ -8412,10 +8599,12 @@ async def _run_llm_tool_loop(
         int((time.time() - _loop_start_ms) * 1000),
         len(ctx.all_nodes), len(ctx.edges), "max_rounds_hit",
     )
+    ctx.harness_can_commit = False
+    ctx.harness_last_error = "max_rounds_hit"
     await _maybe_queue_review("max_rounds_hit")
     yield HarnessEvent(
         type="done",
-        data={
+        data=_attach_sandbox_url({
             "rounds": rounds_completed,
             "executed": executed,
             "session_id": session_id,
@@ -8425,7 +8614,7 @@ async def _run_llm_tool_loop(
                 "本次调整未能自动收敛，建议描述更具体的调整需求，"
                 "例如：将张强移到黄宇左侧"
             ),
-        },
+        }),
     )
 
 
@@ -8508,11 +8697,16 @@ async def _execute_harness_stream(
 
     if current_user:
         try:
-            bi_cookies = await cas_auth_service.get_bi_session({
+            bi_auth = await cas_auth_service.get_bi_session({
                 "user_id": current_user.get("user_id", ""),
                 "username": current_user.get("user_name", ""),
                 "bi_service": api_cfg["base_url"],
+                "login_mobile": getattr(cfg, "power_map_login_mobile", "") or "",
+                "login_password": decrypt_secret(getattr(cfg, "power_map_login_password_encrypted", None) or "") or "",
             })
+            bi_headers, bi_cookies = _split_bi_auth(bi_auth)
+            bi_headers.update(bi_headers or {})
+            bi_cookies = bi_cookies if isinstance(bi_cookies, dict) else None
         except CasAuthError as exc:
             logger.warning("CAS auth unavailable for screenshot: %s", exc)
         except Exception:
@@ -8561,6 +8755,7 @@ async def _execute_harness_stream(
         screenshot_fn=_render_sandbox_preview,
         max_rounds=5,
         session_id=active_session_id,
+        sandbox_url=f"/sandbox/render?session_id={active_session_id}",
     ):
         yield event
 
@@ -8579,11 +8774,16 @@ async def _fetch_from_external(
 
     if current_user:
         try:
-            cookies = await cas_auth_service.get_bi_session({
+            bi_auth = await cas_auth_service.get_bi_session({
                 "user_id": current_user.get("user_id", ""),
                 "username": current_user.get("user_name", ""),
                 "bi_service": base,
+                "login_mobile": getattr(cfg, "power_map_login_mobile", "") or "",
+                "login_password": decrypt_secret(getattr(cfg, "power_map_login_password_encrypted", None) or "") or "",
             })
+            bi_headers, bi_cookies = _split_bi_auth(bi_auth)
+            headers.update(bi_headers)
+            cookies = bi_cookies
         except CasAuthError as exc:
             logger.warning("CAS auth unavailable: %s", exc)
         except Exception:
@@ -8592,12 +8792,34 @@ async def _fetch_from_external(
     if not cookies and api_cfg["auth_token"]:
         headers["Authorization"] = f"Bearer {api_cfg['auth_token']}"
 
+    async def _bi_get(
+        client: httpx.AsyncClient,
+        url: str,
+        *,
+        params: dict[str, Any],
+        allow_com_id_fallback: bool = False,
+    ) -> dict[str, Any]:
+        resp = await client.get(url, params=params, headers=headers, cookies=cookies)
+        resp.raise_for_status()
+        data = resp.json()
+        if allow_com_id_fallback and isinstance(data, dict):
+            has_graph = bool(data.get("node_info") or data.get("nodes") or data.get("edge_info") or data.get("edges"))
+            if not has_graph:
+                fallback_params = dict(params)
+                fallback_params.pop("prj_type", None)
+                fallback_params.pop("prj_id", None)
+                fallback_params["com_id"] = company_id
+                resp2 = await client.get(url, params=fallback_params, headers=headers, cookies=cookies)
+                resp2.raise_for_status()
+                data2 = resp2.json()
+                if isinstance(data2, dict):
+                    return data2
+        return data
+
     async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
         url1 = f"{base}{get_path}"
         params1 = {"prj_type": "company", "prj_id": company_id}
-        resp1 = await client.get(url1, params=params1, headers=headers, cookies=cookies)
-        resp1.raise_for_status()
-        meta = resp1.json()
+        meta = await _bi_get(client, url1, params=params1)
         logger.info("BI getInfo step1 keys: %s", list(meta.keys()) if isinstance(meta, dict) else type(meta).__name__)
 
         result: dict[str, Any] = {"nodes": [], "edges": []}
@@ -8613,9 +8835,7 @@ async def _fetch_from_external(
             # while opp versions carry the actual power map data.
             try:
                 params_opp = {"prj_type": "opp", "prj_id": company_id}
-                resp_opp = await client.get(url1, params=params_opp, headers=headers, cookies=cookies)
-                resp_opp.raise_for_status()
-                opp_meta = resp_opp.json()
+                opp_meta = await _bi_get(client, url1, params=params_opp)
                 if isinstance(opp_meta, dict):
                     vi = opp_meta.get("version_info") or []
                     if isinstance(vi, list) and vi:
@@ -8635,9 +8855,7 @@ async def _fetch_from_external(
 
         if ver_id:
             params2 = {"prj_type": "opp", "ver_info": ver_id, "prj_id": company_id}
-            resp2 = await client.get(url1, params=params2, headers=headers, cookies=cookies)
-            resp2.raise_for_status()
-            data = resp2.json()
+            data = await _bi_get(client, url1, params=params2, allow_com_id_fallback=True)
             logger.info("BI getInfo step2 keys: %s", list(data.keys()) if isinstance(data, dict) else type(data).__name__)
 
             if isinstance(data, dict):
@@ -9216,8 +9434,10 @@ POWER_MAP_SYSTEM_PROMPT_V2 = """你是权力地图（组织架构图）的 AI �
 - "X 任 Y" / "X 担任 Y" → 人员 X，title=Y
 - "X 下面有 A、B、C" → A、B、C 是 X 的下属
 - "都向 X 汇报" → 前面列举的人都 → X
+- "连线/关系备注/标注/说明为 X" → 这是边备注，定位对应 edge 后调用 set_edge_remark
 - "X 部门" / "X 部" / "X 组" → 都是 type=department
 - title 写法保留用户原文（"销售总监"就是"销售总监"，不要改成"销售部总监"）
+- 只要要做加减乘除、比例、差值、求和、取余、层级数换算，就必须先调 calculator，不要心算；若要先“数一数有多少人/多少边/某类节点几个”，先用 graph_state / list_edges 拿到数字，再把算式交给 calculator
 ═══════════════════════════════════════════
 【坐标系 - 必读】
 ═══════════════════════════════════════════
@@ -9271,10 +9491,10 @@ check_geometry 是按需调用的工具，传入 node_ids 列表，返回涉及�
 ═══════════════════════════════════════════
 汇报关系默认：
 - 用户在部门内列举了人员但**没明确说汇报关系**
-→ 默认全员向该部门负责人汇报
-- 部门负责人识别（优先级从高到低）：
-1. title 含"总监/CEO/CTO/CFO/COO/总经理/负责人"的人
-2. 用户列举的第一个人
+→ 不默认创建 reports_to。仅当本轮用户明确说"向 X 汇报"、"X 下面有 A/B/C"、"X 是负责人/直属上级/leader"时，才为本轮文本提到的人创建汇报线。
+- 部门负责人识别只用于本轮明确要求创建汇报关系或布局负责人位置时：
+1. 优先使用用户本轮明说的负责人/上级
+2. 其次使用本轮新建且 title 含"总监/CEO/CTO/CFO/COO/总经理/负责人"的人
 3. 如果都没有，跳过该部门的内部汇报关系
 title 默认：
 - 用户没说 title → title 留空（不要自动填"员工"）
@@ -9304,7 +9524,7 @@ title 默认：
 收到指令后，第一步在 thinking 中识别场景类型：
 - 场景 A（从零新建）：用户描述完整架构，画布为空或几乎为空
 - 场景 B（增量新增）：在已有画布上添加部门/人/连线
-- 场景 C（调整）：移动、改汇报关系、改职级、改名
+- 场景 C（调整）：移动、改汇报关系、改连线备注、改职级、改名
 - 场景 D（删除）：删除节点或连线
 - 场景 E（混合）：用户指令同时包含多种操作 → 按 A→B→C→D 顺序拆解执行
 - 场景 F（模糊）：触发反问策略，纯文本回复，不调工具
@@ -9347,32 +9567,36 @@ Step 3：调整每个部门内人员布局
 a. 识别该部门的负责人：
 - 优先匹配 title 含"总监/CEO/CTO/CFO/COO/总经理/负责人/组长"的人
 - 都不匹配取该部门下第一个创建的人员
-b. 把负责人放到容器顶部居中：
-- 从 graph_state 读取该部门容器的 x, y, w
-- 计算负责人位置：
-x = 部门容器.x + (部门容器.w - 160) / 2（160 是人员默认宽度）
-y = 部门容器.y + 60（60 是容器顶部留白）
-- 调用 place_node(负责人 id, x, y)
-c. 把下属人员横向排列在负责人下方：
+b. 把下属人员横向排列在负责人下方：
 - 收集该部门所有下属人员（除负责人外）
 - 调用 arrange_horizontally，起始 x=部门容器.x + 30, y=部门容器.y + 200, 间距 30
 - 如果下属人员数 > 6，分批调用（每批最多 6 人，第二批 y+=110 换行）
 - 如果部门内包含子部门，把子部门的 node_id 也加入 arrange_horizontally 的 node_ids 列表中
+c. 把负责人放到下属组上方居中：
+- 如果有下属人员，调用 center_above(负责人 id, reference_node_ids=[直属下属人员 id], gap=60)
+- 禁止用旧容器宽度手算 place_node 给负责人居中；fit_container_to_children 会改变容器宽度，手算容易失效
+- 如果没有下属人员，才从 graph_state 读取容器 x/y/w，用 place_node 将负责人放到容器顶部居中
 d. 调用 fit_container_to_children(该部门容器 id) 收缩容器到合适尺寸
+e. 负责人居中复查：
+- 如果该部门存在"负责人/经理 + 下属"结构，fit 后必须确认负责人中心线仍在直属下属组中心线上方
+- 若负责人偏离直属下属组中心，调用 center_above(负责人 id, reference_node_ids=[直属下属人员 id], gap=60)，再调用 fit_container_to_children(该部门容器 id)
 全部部门处理完后：
-e. 调用 check_geometry(node_ids=[所有部门 id + 所有人员 id])
-f. 如果有 HIGH 冲突（人员未完全在父容器内）：
+f. 调用 check_geometry(node_ids=[所有部门 id + 所有人员 id])
+g. 如果有 HIGH 冲突（人员未完全在父容器内）：
 - 调用 fit_container_to_children 重新收缩对应容器
 - 再次 check_geometry 确认无冲突
-g. 如果有 MEDIUM 冲突（同容器人员重叠）：
+h. 如果有 MEDIUM 冲突（同容器人员重叠）：
 - 调用 arrange_horizontally 重新排列对应部门人员
 - 再次 check_geometry 确认
 完成标志：thinking 输出"Step 3 完成"，几何检测无 HIGH 及以上冲突
 Step 4：批量创建所有汇报连线
 操作：
-- 调用 create_edge 创建所有 reports_to 关系
-- 跨部门连线：部门负责人 → 上级负责人（如各部门总监 → CEO）
-- 部门内连线：下属 → 部门负责人
+- 只为本轮用户明确表达的汇报关系调用 create_edge 创建 reports_to
+- 如果本轮用户同时给新连线提出备注/标注/说明，必须在 create_edge 成功后立即用返回的 edge_id 调 set_edge_remark
+- 可补边范围仅限本轮新建节点、或本轮用户文本明确提到的既有节点
+- 禁止扫描历史画布，禁止仅凭既有部门内 A 角色/title/负责人字段给未提及人员补边
+- 跨部门连线：仅当用户本轮明确表达部门负责人向上级负责人汇报时创建
+- 部门内连线：仅当用户本轮明确表达下属 → 部门负责人时创建
 完成标志：thinking 输出"Step 4 完成"
 Step 5：调整顶层部门容器布局（最后做，避免被前面操作破坏）
 必须执行，不允许跳过
@@ -9420,6 +9644,7 @@ Step 6：自然收敛
 ──────────────────────────────────────
 Step 1：读取 graph_state，识别已有结构
 Step 2：仅创建新增对象（部门/人员/连线），不传 x/y
+- 如新增连线带备注，先 create_edge，再 set_edge_remark
 Step 3：仅对受影响的容器 fit_container_to_children
 Step 4：**不重排已有节点**，保护用户已认可的视觉
 Step 5：如果新增部门容器迫使已有顶层部门需要让位（如挤在右侧）：
@@ -9438,6 +9663,7 @@ Step 2：按指令类型执行：
 - 改父部门（部门容器跨容器迁移） → 先 set_parent，再 move_dept_with_children
 - 改职级/改名 → update_node
 - 改汇报关系 → delete_edge + create_edge
+- 给连线加备注/改备注/标注关系 → set_edge_remark；不要为了备注 delete_edge/create_edge，除非用户明确要求改关系本身
 Step 3：fit_container_to_children 受影响的容器
 （注意：move_dept_with_children 不会改 w/h，但如果迁移到新父容器后
 新父容器的 bbox 需要收缩才能合理包裹，仍需 fit_container_to_children）
@@ -9479,6 +9705,11 @@ Step 5：自然收敛
 - 部门负责人居中放在容器顶部
 - 同级部门横向均匀分布，居中对齐画布中线
 - 子部门作为容器内的特殊"人员"对待，放在最右侧
+负责人居中 SOP：
+- 存在"负责人/经理 + 下属"结构时，负责人居中以直属下属组 bbox 的中心线为准，优先调用 center_above
+- 不要用旧容器宽度手算 place_node 给负责人居中；容器 fit 后宽度可能改变，手算位置会偏
+- fit_container_to_children 后必须复查负责人是否仍居中；如偏离，重新 center_above 后再 fit
+- check_geometry 只说明无重叠/无越界，不代表负责人已经语义居中，不能替代居中复查
 ═══════════════════════════════════════════
 【八、工具组合范式 - 易错点】
 ═══════════════════════════════════════════
@@ -9499,6 +9730,14 @@ Step 5：自然收敛
 修改父子嵌套：
 正确：set_parent → fit_container_to_children(old_parent) → fit_container_to_children(new_parent)
 错误：只 set_parent 不收缩容器
+连线备注：
+正确：已有连线加备注/改备注 → set_edge_remark(edge_id, remark)
+正确：新建连线并备注 → create_edge → set_edge_remark
+错误：为了备注删除重建连线（除非用户明确要求改关系本身）
+数量计算：
+正确：进入算式求值阶段（加减乘除、比例、差值、求和、取余、层级数换算）→ calculator(expression)
+正确：先用 graph_state / list_edges 数出数量，再把算式交给 calculator
+错误：一边看图一边心算复杂表达式后直接行动
 批量创建后布局：
 正确：所有 create_node 完成后再统一调 arrange_horizontally
 错误：每 create_node 一个就 arrange 一次
@@ -9672,7 +9911,17 @@ async def chat_power_map_v2(
         from playwright.async_api import async_playwright
     except ImportError as exc:
         logger.warning("chat_v2: playwright unavailable: %s", exc)
-        yield HarnessEvent(type="done", data={"skipped": True, "error": "playwright_unavailable", "rounds": 0, "executed": 0, "session_id": active_session_id})
+        yield HarnessEvent(
+            type="done",
+            data={
+                "skipped": True,
+                "error": "playwright_unavailable",
+                "rounds": 0,
+                "executed": 0,
+                "session_id": active_session_id,
+                "sandbox_url": f"/sandbox/render?session_id={active_session_id}",
+            },
+        )
         return
 
     # TODO: browser 全局单例优化
@@ -9707,7 +9956,17 @@ async def chat_power_map_v2(
                 0, False, 0, int((time.time() - _ss0_start) * 1000),
             )
             logger.warning("chat_v2: initial sandbox screenshot failed: %s", exc)
-            yield HarnessEvent(type="done", data={"skipped": True, "error": "screenshot_failed", "rounds": 0, "executed": 0, "session_id": active_session_id})
+            yield HarnessEvent(
+                type="done",
+                data={
+                    "skipped": True,
+                    "error": "screenshot_failed",
+                    "rounds": 0,
+                    "executed": 0,
+                    "session_id": active_session_id,
+                    "sandbox_url": sandbox_url,
+                },
+            )
             return
 
         # Stage 3·LLM loop
@@ -9731,6 +9990,7 @@ async def chat_power_map_v2(
             screenshot_fn=screenshot_fn,
             max_rounds=50,
             session_id=active_session_id,
+            sandbox_url=sandbox_url,
         ):
             yield event
 
@@ -9769,6 +10029,10 @@ async def commit_power_map_session(
 
     if not ctx.harness_cfg or not ctx.harness_prj_id:
         return {"ok": False, "error": "session_incomplete"}
+
+    if not ctx.harness_can_commit:
+        err = ctx.harness_last_error or "session_not_committable"
+        return {"ok": False, "error": err}
 
     try:
         result = await _submit_to_bi(

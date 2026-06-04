@@ -12,6 +12,7 @@ interface Props {
   min?: number | string
   max?: number | string
   step?: number | string
+  readonly?: boolean
   autocomplete?: string
   autocapitalize?: string
   autocorrect?: string
@@ -45,6 +46,7 @@ const modelProxy = computed({
     :min="min"
     :max="max"
     :step="step"
+    :readonly="readonly"
     :autocomplete="autocomplete"
     :autocapitalize="autocapitalize"
     :autocorrect="autocorrect"

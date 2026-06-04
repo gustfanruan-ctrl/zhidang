@@ -1,4 +1,4 @@
-# CR-FINAL-FIX: 修复后端关键流程的鉴权、错误提示、健康检查和安全写入路径。
+﻿# CR-FINAL-FIX: 修复后端关键流程的鉴权、错误提示、健康检查和安全写入路径。
 from __future__ import annotations
 
 import asyncio
@@ -44,7 +44,8 @@ from .services.followup_review_template import (
     render_followup_review_record,
     save_followup_review_template,
 )
-from .services.power_map_service import _build_merge_context, _ctx_to_getinfo_response, _drop_session, _execute_harness_stream, _fetch_from_external, _get_power_map_config, _get_session, _new_session_id, _node_from_bi_dict, _store_session, chat_power_map, chat_power_map_v2, commit_power_map_session, confirm_power_map, discard_power_map_session, get_power_map, preview_power_map, relayout_power_map
+from .services.followup_yuqi import apply_followup_yuqi_fields, extract_followup_yuqi_id
+from .services.power_map_service import _build_merge_context, _ctx_to_getinfo_response, _drop_session, _execute_harness_stream, _fetch_from_external, _get_power_map_config, _get_session, _new_session_id, _node_from_bi_dict, _split_bi_auth, _store_session, chat_power_map, chat_power_map_v2, commit_power_map_session, confirm_power_map, discard_power_map_session, get_power_map, preview_power_map, relayout_power_map
 from .services import sandbox_infra
 from .services.sandbox_infra import (
     SANDBOX_DIR,
@@ -374,6 +375,108 @@ def build_raw_transcript_payload(text: str, fallback_title: str = "未命名转�
     first_line = clean_text.splitlines()[0].strip() if clean_text else ""
     title = first_line or fallback_title
     return {"title": title, "raw_text": clean_text, "segments": []}
+
+
+def _image_media_type_from_suffix(suffix: str) -> str:
+    normalized = (suffix or "").strip().lower()
+    if normalized in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if normalized == ".png":
+        return "image/png"
+    if normalized == ".webp":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _build_image_input_item(raw_bytes: bytes, suffix: str) -> dict[str, str]:
+    return {
+        "type": "base64",
+        "media_type": _image_media_type_from_suffix(suffix),
+        "data": base64.b64encode(raw_bytes).decode("ascii"),
+    }
+
+
+def _persisted_image_segment(filename: str, image_item: dict[str, str]) -> dict[str, Any]:
+    return {"_kind": "image_input", "name": filename, **image_item}
+
+
+def _extract_image_inputs_from_segments(segments: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for item in list(segments or []):
+        if not isinstance(item, dict) or item.get("_kind") != "image_input":
+            continue
+        media_type = str(item.get("media_type") or "").strip()
+        data = str(item.get("data") or "").strip()
+        if not media_type or not data:
+            continue
+        out.append({"type": "base64", "media_type": media_type, "data": data})
+    return out
+
+
+def _fallback_mock_to_facts(mock_data: dict[str, Any], source_type: str) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    normalized_source = source_type if source_type in {"text", "image"} else "text"
+    base_conf = float(mock_data.get("confidence") or 0.85)
+    for item in list(mock_data.get("expectations") or []):
+        quote = str(item.get("source_quote") or item.get("summary") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if summary:
+            facts.append({
+                "field_name": "detail_brief",
+                "value": summary,
+                "confidence": float(item.get("confidence") or base_conf),
+                "source_quote": quote or summary,
+                "source_type": normalized_source,
+                "category": "requirements",
+                "target_form": "预期表",
+            })
+        if description:
+            facts.append({
+                "field_name": "detail",
+                "value": description,
+                "confidence": float(item.get("confidence") or base_conf),
+                "source_quote": quote or description,
+                "source_type": normalized_source,
+                "category": "requirements",
+                "target_form": "预期表",
+            })
+    for item in list(mock_data.get("scenarios") or []):
+        quote = str(item.get("source_quote") or item.get("summary") or item.get("title") or "").strip()
+        title = str(item.get("title") or item.get("summary") or "").strip()
+        question = str(item.get("pain_point") or item.get("summary") or "").strip()
+        answer = str(item.get("core_metric_solution") or item.get("description") or "").strip()
+        if title:
+            facts.append({
+                "field_name": "title",
+                "value": title,
+                "confidence": float(item.get("confidence") or base_conf),
+                "source_quote": quote or title,
+                "source_type": normalized_source,
+                "category": "requirements",
+                "target_form": "场景表",
+            })
+        if question:
+            facts.append({
+                "field_name": "solve_what_ques",
+                "value": question,
+                "confidence": float(item.get("confidence") or base_conf),
+                "source_quote": quote or question,
+                "source_type": normalized_source,
+                "category": "requirements",
+                "target_form": "场景表",
+            })
+        if answer:
+            facts.append({
+                "field_name": "solve_what_ans",
+                "value": answer,
+                "confidence": float(item.get("confidence") or base_conf),
+                "source_quote": quote or answer,
+                "source_type": normalized_source,
+                "category": "requirements",
+                "target_form": "场景表",
+            })
+    return facts
 
 
 def ensure_system_config(db: Session) -> SystemConfig:
@@ -975,10 +1078,7 @@ async def sso_cas_callback(st: str = "", sid: str = "", service: str = "", reque
         raise HTTPException(status_code=400, detail="缺少 CAS service ticket (st)")
 
     effective_service = service or CAS_REFERRER_URL
-    # PGT 回调暂不启用（CAS 测试环境对 http URL 验证不通过，
-    # 后续需要 HTTPS 代理回调时再修复）
-    # pgt_url = str(request.url_for("sso_cas_pgt_callback")) if request else ""
-    pgt_url = ""
+    pgt_url = str(request.url_for("sso_cas_pgt_callback")) if request else ""
 
     try:
         cas_user = await cas_auth_service.validate_st(st, effective_service, pgt_url=pgt_url)
@@ -1024,15 +1124,17 @@ async def sso_cas_login():
 
 
 @app.get("/api/v1/sso/bi-callback")
-async def sso_bi_callback(ticket: str = "", service: str = ""):
+async def sso_bi_callback(ticket: str = "", service: str = "", request: Request = None):
     """BI 登录链路回调：CAS验证 → 创建JWT → 经BI设cookie → 回到智档"""
     if not ticket:
         raise HTTPException(status_code=400, detail="缺少 CAS ticket")
 
     effective_service = service or f"{CAS_REFERRER_URL}api/v1/sso/bi-callback"
 
+    pgt_url = str(request.url_for("sso_cas_pgt_callback")) if request else ""
+
     try:
-        cas_user = await cas_auth_service.validate_st(ticket, effective_service, pgt_url="")
+        cas_user = await cas_auth_service.validate_st(ticket, effective_service, pgt_url=pgt_url)
     except CasAuthError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except Exception as exc:
@@ -1187,23 +1289,31 @@ def get_admin_config(user: dict[str, Any] = Depends(require_superadmin), db: Ses
         "power_map_get_path": cfg.power_map_get_path or "",
         "power_map_update_path": cfg.power_map_update_path or "",
         "power_map_auth_token_configured": bool(cfg.power_map_auth_token_encrypted),
+        "power_map_login_mobile": cfg.power_map_login_mobile or "",
+        "power_map_login_password_configured": bool(cfg.power_map_login_password_encrypted),
     }
 
 
 @app.put("/api/v1/admin/config")
 def save_admin_config(payload: ConfigPayload, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
     cfg = ensure_system_config(db)
-    before = {k: getattr(cfg, k) for k in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days", "power_map_base_url", "power_map_get_path", "power_map_update_path"]}
+    before = {k: getattr(cfg, k) for k in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days", "power_map_base_url", "power_map_get_path", "power_map_update_path", "power_map_login_mobile"]}
     if payload.jiandaoyun_api_key:
         cfg.jiandaoyun_api_key_encrypted = encrypt_secret(payload.jiandaoyun_api_key)
     if payload.dingtalk_app_secret:
         cfg.dingtalk_app_secret_encrypted = encrypt_secret(payload.dingtalk_app_secret)
     if payload.power_map_auth_token:
         cfg.power_map_auth_token_encrypted = encrypt_secret(payload.power_map_auth_token)
+    if payload.power_map_login_password:
+        cfg.power_map_login_password_encrypted = encrypt_secret(payload.power_map_login_password)
     for key in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days", "power_map_base_url", "power_map_get_path", "power_map_update_path"]:
         value = getattr(payload, key)
         if value is not None:
             setattr(cfg, key, value)
+    if payload.power_map_login_mobile is not None:
+        cfg.power_map_login_mobile = payload.power_map_login_mobile
+    if payload.power_map_login_mobile is not None:
+        cfg.power_map_login_mobile = payload.power_map_login_mobile
     mapping = dict((cfg.field_mappings or {}).get("jiandaoyun", {}) or {})
     forms = dict(mapping.get("forms") or {})
     main_form = dict(forms.get("客户主表") or {})
@@ -1524,6 +1634,7 @@ async def transcript_upload(files: list[UploadFile] = File(...), company_name_hi
     has_image = False
     file_names: list[str] = []
     total_char_count = 0
+    persisted_image_segments: list[dict[str, Any]] = []
 
     for f in files:
         suffix = Path(f.filename or "").suffix.lower()
@@ -1546,6 +1657,12 @@ async def transcript_upload(files: list[UploadFile] = File(...), company_name_hi
                 merged_title = f.filename
         else:
             has_image = True
+            persisted_image_segments.append(
+                _persisted_image_segment(
+                    f.filename or "unknown-image",
+                    _build_image_input_item(raw_bytes, suffix),
+                )
+            )
             merged_text_parts.append(f"--- 文件: {f.filename} (图片) ---")
 
     if has_image and merged_text_parts and any("(图片)" not in p for p in merged_text_parts):
@@ -1566,7 +1683,7 @@ async def transcript_upload(files: list[UploadFile] = File(...), company_name_hi
         source_id=", ".join(file_names),
         title=parsed["title"],
         raw_text=parsed["raw_text"],
-        segments=parsed["segments"],
+        segments=[*(parsed["segments"] or []), *persisted_image_segments],
         input_type=input_type,
         status="parsed",
         company_name=normalized_company or None,
@@ -1677,6 +1794,7 @@ def list_followup_records(
     db: Session = Depends(get_db),
     user: dict[str, Any] = Depends(require_auth),
 ):
+    followup_field_mappings = ensure_system_config(db).field_mappings
     stmt = _allowed_followup_stmt(user).order_by(FollowupRecord.created_at.desc())
     if company_id:
         stmt = stmt.where(FollowupRecord.company_id == company_id)
@@ -1698,6 +1816,7 @@ def list_followup_records(
                 "review_date": r.review_date,
                 "follow_type": r.follow_type,
                 "sso_user_name": r.sso_user_name,
+                "yuqi_id": extract_followup_yuqi_id(r.raw_record, field_mappings=followup_field_mappings),
                 "created_at": r.created_at.isoformat() if r.created_at else None,
                 "extraction_summary": _extraction_summary(r.agent_a_result),
                 "card_count": len((r.agent_b_result or {}).get("result", {}).get("operation_cards", [])) if r.agent_b_result else 0,
@@ -1713,6 +1832,7 @@ def get_followup_record(record_id: str, db: Session = Depends(get_db), user: dic
     r = db.scalar(stmt)
     if not r:
         raise HTTPException(status_code=404, detail="跟进记录不存在")
+    followup_field_mappings = ensure_system_config(db).field_mappings
     return {
         "id": r.id,
         "source": r.source,
@@ -1727,6 +1847,7 @@ def get_followup_record(record_id: str, db: Session = Depends(get_db), user: dic
         "review_date": r.review_date,
         "follow_type": r.follow_type,
         "sso_user_name": r.sso_user_name,
+        "yuqi_id": extract_followup_yuqi_id(r.raw_record, field_mappings=followup_field_mappings),
         "agent_a_result": r.agent_a_result,
         "agent_b_result": r.agent_b_result,
         "raw_record": r.raw_record,
@@ -2206,12 +2327,17 @@ def _build_agent_llm_client(llm_cfg: dict[str, str]) -> Any:
 
 def _fallback_extraction(transcript_id: str, transcript: dict[str, Any], reason: str) -> dict[str, Any]:
     mock_data = agent_a_mock(transcript)
+    facts = _fallback_mock_to_facts(mock_data, str(transcript.get("input_type") or "text"))
     return {
         "task_id": f"ext-{transcript_id}",
         "status": "completed",
         "mode": "fallback",
         "fallback_reason": reason,
-        "result": mock_data,
+        "result": {
+            "facts": facts,
+            "total_extracted": len(facts),
+            "legacy_result": mock_data,
+        },
     }
 
 
@@ -3125,6 +3251,7 @@ _SANDBOX_GETINFO_NEW = (
 async def power_map_sandbox(
     prj_id: str = Query(...),
     session_id: str = Query(""),
+    version: str = Query(""),
     db: Session = Depends(get_db),
 ):
     """Serve a patched BI power-map HTML page that uses in-memory graph data.
@@ -3138,30 +3265,30 @@ async def power_map_sandbox(
     if not cfg:
         raise HTTPException(status_code=500, detail="系统未初始化")
 
-    auth_token = decrypt_secret(cfg.power_map_auth_token_encrypted) if cfg.power_map_auth_token_encrypted else ""
+    api_cfg = _get_power_map_config(cfg)
     headers: dict[str, str] = {}
-    if auth_token:
-        headers["Authorization"] = f"Bearer {auth_token}"
+    cookies: dict[str, str] | None = None
+    try:
+        bi_auth = await cas_auth_service.get_bi_session({
+            "user_id": "power_map_sandbox",
+            "username": "power_map_sandbox",
+            "bi_service": api_cfg["base_url"],
+            "login_mobile": getattr(cfg, "power_map_login_mobile", "") or "",
+            "login_password": decrypt_secret(getattr(cfg, "power_map_login_password_encrypted", None) or "") or "",
+        })
+        headers, cookies = _split_bi_auth(bi_auth)
+    except Exception:
+        auth_token = decrypt_secret(cfg.power_map_auth_token_encrypted) if cfg.power_map_auth_token_encrypted else ""
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(_BI_SANDBOX_HTML_URL, headers=headers, params={"com_id": prj_id})
-            resp.raise_for_status()
-            html = resp.text
-    except Exception as exc:
-        logger.exception("sandbox: failed to fetch BI HTML")
-        raise HTTPException(status_code=502, detail=f"BI HTML 获取失败: {exc}")
+        html = render_sandbox_html("power_map_sandbox")
+    except FileNotFoundError as exc:
+        logger.exception("sandbox: local HTML missing")
+        raise HTTPException(status_code=503, detail=str(exc))
 
     html = html.replace(_SANDBOX_GETINFO_OLD, _SANDBOX_GETINFO_NEW)
-
-    html = _SANDBOX_ASSET_RE.sub(
-        lambda m: f'{m.group(1)}{m.group(2)}/api/power_map/sandbox-proxy?url={_BI_HOST}/',
-        html,
-    )
-    html = _SANDBOX_REL_ASSET_RE.sub(
-        lambda m: f'{m.group(1)}{m.group(2)}/api/power_map/sandbox-proxy?url={_BI_HTML_BASE}',
-        html,
-    )
 
     graph_payload: dict[str, Any] | None = None
     if session_id:
@@ -3173,14 +3300,43 @@ async def power_map_sandbox(
                 logger.exception("sandbox: failed to build ctx getInfo payload")
                 graph_payload = None
 
-    if graph_payload is None and session_id:
+    if graph_payload is None:
         try:
-            api_cfg = _get_power_map_config(cfg)
             get_url = api_cfg["base_url"].rstrip("/") + api_cfg["get_path"]
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(get_url, headers=headers, params={"com_id": prj_id})
+                resp = await client.get(
+                    get_url,
+                    headers=headers,
+                    cookies=cookies,
+                    params={"prj_type": "company", "prj_id": prj_id},
+                )
                 resp.raise_for_status()
                 graph_payload = resp.json()
+                if isinstance(graph_payload, dict) and version:
+                    version_items = list(graph_payload.get("version_info") or [])
+                    selected = next(
+                        (
+                            v for v in version_items
+                            if isinstance(v, dict) and str(v.get("value") or "") == version
+                        ),
+                        None,
+                    )
+                    version_resp = await client.get(
+                        get_url,
+                        headers=headers,
+                        cookies=cookies,
+                        params={"prj_type": "opp", "ver_info": version, "prj_id": prj_id},
+                    )
+                    version_resp.raise_for_status()
+                    version_payload = version_resp.json()
+                    if isinstance(version_payload, dict):
+                        merged = dict(graph_payload)
+                        merged.update(version_payload)
+                        if selected:
+                            merged["version_info"] = [selected]
+                            merged["version_info_copy"] = [dict(selected)]
+                            merged["new_version"] = str(selected.get("value") or version)
+                        graph_payload = merged
         except Exception:
             logger.exception("sandbox: fallback getInfo fetch failed")
             graph_payload = None
@@ -3202,7 +3358,6 @@ async def power_map_sandbox(
 @app.get("/api/power_map/sandbox-proxy")
 async def power_map_sandbox_proxy(
     url: str = Query(...),
-    db: Session = Depends(get_db),
 ):
     """Proxy BI static assets so the sandbox page can load CSS/JS/images without CORS.
 
@@ -3212,20 +3367,19 @@ async def power_map_sandbox_proxy(
     if not url.startswith(_BI_HOST + "/"):
         raise HTTPException(status_code=403, detail="只允许代理 BI 资源")
 
-    cfg = db.get(SystemConfig, 1)
-    if not cfg:
-        raise HTTPException(status_code=500, detail="系统未初始化")
-
-    auth_token = decrypt_secret(cfg.power_map_auth_token_encrypted) if cfg.power_map_auth_token_encrypted else ""
+    # BI 的静态资源是高并发小文件请求，这里不再走 DB 读取配置，
+    # 避免一个 iframe 拉起十几个代理请求时把 SQLAlchemy 连接池打满。
     headers: dict[str, str] = {}
-    if auth_token:
-        headers["Authorization"] = f"Bearer {auth_token}"
+    cookies: dict[str, str] | None = None
+    cached = getattr(cas_auth_service, "_cookie_cache", {}).get("power_map_sandbox")
+    if cached and cached.get("expires_at", 0) > time.time():
+        cookies = dict(cached.get("cookies") or {})
 
     max_bytes = 5 * 1024 * 1024
 
     async def stream_body():
         async with httpx.AsyncClient(timeout=15.0) as client:
-            async with client.stream("GET", url, headers=headers) as upstream:
+            async with client.stream("GET", url, headers=headers, cookies=cookies) as upstream:
                 if upstream.status_code >= 400:
                     raise HTTPException(status_code=upstream.status_code, detail="BI 资源响应错误")
                 cl = upstream.headers.get("content-length")
@@ -3240,7 +3394,7 @@ async def power_map_sandbox_proxy(
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as probe:
-            head = await probe.head(url, headers=headers)
+            head = await probe.head(url, headers=headers, cookies=cookies)
             content_type = head.headers.get("content-type", "application/octet-stream")
     except Exception:
         content_type = "application/octet-stream"
@@ -3653,7 +3807,7 @@ async def generate_review(data: dict[str, Any], user: dict[str, Any] = Depends(r
             emit_llm(event="review_llm_error", model=model, attempt_no=1,
                      total_ms=t_elapsed, error_type="http_error", error_msg=str(resp.status_code),
                      will_retry=False, final_status="error", degraded=True)
-            return {"error": f"LLM 返回 HTTP {resp.status_code}"}
+            raise HTTPException(status_code=502, detail=f"LLM 返回 HTTP {resp.status_code}")
         content = resp.json()["choices"][0]["message"]["content"].strip()
         usage = resp.json().get("usage", {})
         inp_tok = usage.get("prompt_tokens", 0)
@@ -3674,12 +3828,14 @@ async def generate_review(data: dict[str, Any], user: dict[str, Any] = Depends(r
     except json.JSONDecodeError:
         e2e = (time.monotonic() - t0) * 1000
         emit("review_generate_done", trace_id=trace_id, e2e_ms=e2e, status="json_error", degraded=True)
-        return {"error": "LLM 返回内容不是有效 JSON"}
+        raise HTTPException(status_code=502, detail="LLM 返回内容不是有效 JSON")
+    except HTTPException:
+        raise
     except Exception as exc:
         e2e = (time.monotonic() - t0) * 1000
         emit("review_generate_done", trace_id=trace_id, e2e_ms=e2e,
              status="error", error_type=type(exc).__name__, error_msg=str(exc)[:200], degraded=True)
-        return {"error": f"调用 LLM 失败: {exc}"}
+        raise HTTPException(status_code=502, detail=f"调用 LLM 失败: {exc}")
 
 
 @app.post("/api/v1/review/submit")
@@ -3748,9 +3904,11 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
     yuqi_first_value = data.get("yuqi_first_value", "")
     if yuqi_first_value:
         jiandaoyun_data["_widget_1757578251950"] = {"value": yuqi_first_value}
-    yuqi_id = data.get("yuqi_id", "")
-    if yuqi_id:
-        jiandaoyun_data["review_yuqi_id"] = {"value": yuqi_id}
+    apply_followup_yuqi_fields(
+        jiandaoyun_data,
+        field_mappings=field_mappings,
+        yuqi_id=data.get("yuqi_id", ""),
+    )
     # 跟进标签（关联触发式标签）
     relevent_tags = data.get("relevent_tag", [])
     if relevent_tags:
@@ -3917,3 +4075,5 @@ def spa_fallback(full_path: str):
     if index_file.exists():
         return FileResponse(str(index_file))
     return RedirectResponse(url="/docs")
+
+

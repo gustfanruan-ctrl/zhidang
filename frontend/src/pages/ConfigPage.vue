@@ -135,6 +135,14 @@
               <span class="text-xs font-medium text-muted-foreground">CAS 集成账号</span>
               <Input v-model="form.power_map_auth_token" type="password" name="power-map-auth-token" autocomplete="new-password" :autocapitalize="'off'" :autocorrect="'off'" :spellcheck="'false'" placeholder="可选，用于后端代理调用" @input="markSecretTouched('power_map')" />
             </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">BI 账密手机号</span>
+              <Input v-model="form.power_map_login_mobile" placeholder="Gust" />
+            </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">BI 账密密码</span>
+              <Input v-model="form.power_map_login_password" type="password" name="power-map-login-password" autocomplete="new-password" :autocapitalize="'off'" :autocorrect="'off'" :spellcheck="'false'" placeholder="留空不修改" @input="markSecretTouched('power_map_login')" />
+            </label>
           </div>
         </CardContent>
       </Card>
@@ -179,11 +187,11 @@ const form = ref({
   jiandaoyun_api_key: '', jiandaoyun_base_url: '', jiandaoyun_app_id: '', main_entry_id: '',
   customer_main_entry_id: '', yuqi_entry_id: '', changjing_entry_id: '', followup_entry_id: '',
   field_mappings: {}, sso_shared_secret: '', sso_token_ttl_minutes: 5, agent_a_max_rounds: 5, agent_b_max_rounds: 5, data_retention_days: 90, dingtalk_app_key: '', dingtalk_app_secret: '', dingtalk_agent_id: '',
-  power_map_base_url: '', power_map_get_path: '', power_map_update_path: '', power_map_auth_token: ''
+  power_map_base_url: '', power_map_get_path: '', power_map_update_path: '', power_map_auth_token: '', power_map_login_mobile: '', power_map_login_password: ''
 })
 const fieldMappingsText = ref('{}')
 const msg = ref('')
-const secretTouched = ref({ jiandaoyun: false, dingtalk: false, power_map: false })
+const secretTouched = ref({ jiandaoyun: false, dingtalk: false, power_map: false, power_map_login: false })
 const preview = computed(() => JSON.stringify(form.value, null, 2))
 
 async function load() {
@@ -201,18 +209,21 @@ async function load() {
     changjing_entry_id: forms['场景表']?.entry_id || '',
     followup_entry_id: forms['跟进记录表']?.entry_id || '',
   }
-  secretTouched.value = { jiandaoyun: false, dingtalk: false, power_map: false }
+  secretTouched.value = { jiandaoyun: false, dingtalk: false, power_map: false, power_map_login: false }
   fieldMappingsText.value = JSON.stringify(mapping, null, 2)
   form.value.power_map_base_url = data.power_map_base_url || ''
   form.value.power_map_get_path = data.power_map_get_path || ''
   form.value.power_map_update_path = data.power_map_update_path || ''
   form.value.power_map_auth_token = ''
+  form.value.power_map_login_mobile = data.power_map_login_mobile || ''
+  form.value.power_map_login_password = ''
 }
 
 function markSecretTouched(field) {
   if (field === 'jiandaoyun') secretTouched.value.jiandaoyun = true
   if (field === 'dingtalk') secretTouched.value.dingtalk = true
   if (field === 'power_map') secretTouched.value.power_map = true
+  if (field === 'power_map_login') secretTouched.value.power_map_login = true
 }
 
 function buildMergedFieldMappings() {
@@ -257,6 +268,8 @@ async function save() {
       power_map_get_path: form.value.power_map_get_path,
       power_map_update_path: form.value.power_map_update_path,
       power_map_auth_token: secretTouched.value.power_map ? form.value.power_map_auth_token : '',
+      power_map_login_mobile: form.value.power_map_login_mobile,
+      power_map_login_password: secretTouched.value.power_map_login ? form.value.power_map_login_password : '',
       field_mappings: mergedFieldMappings,
     }
     const { data } = await api.put('/api/v1/admin/config', payload)
