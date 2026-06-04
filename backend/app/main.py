@@ -1289,15 +1289,15 @@ def get_admin_config(user: dict[str, Any] = Depends(require_superadmin), db: Ses
         "power_map_get_path": cfg.power_map_get_path or "",
         "power_map_update_path": cfg.power_map_update_path or "",
         "power_map_auth_token_configured": bool(cfg.power_map_auth_token_encrypted),
-        "power_map_login_mobile": cfg.power_map_login_mobile or "",
-        "power_map_login_password_configured": bool(cfg.power_map_login_password_encrypted),
+        "power_map_login_mobile": getattr(cfg, "power_map_login_mobile", "") or "",
+        "power_map_login_password_configured": bool(getattr(cfg, "power_map_login_password_encrypted", "")),
     }
 
 
 @app.put("/api/v1/admin/config")
 def save_admin_config(payload: ConfigPayload, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
     cfg = ensure_system_config(db)
-    before = {k: getattr(cfg, k) for k in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days", "power_map_base_url", "power_map_get_path", "power_map_update_path", "power_map_login_mobile"]}
+    before = {k: getattr(cfg, k, None) for k in ["jiandaoyun_base_url", "jiandaoyun_app_id", "main_entry_id", "field_mappings", "sso_shared_secret", "sso_token_ttl_minutes", "dingtalk_app_key", "dingtalk_agent_id", "agent_a_max_rounds", "agent_b_max_rounds", "data_retention_days", "power_map_base_url", "power_map_get_path", "power_map_update_path", "power_map_login_mobile"]}
     if payload.jiandaoyun_api_key:
         cfg.jiandaoyun_api_key_encrypted = encrypt_secret(payload.jiandaoyun_api_key)
     if payload.dingtalk_app_secret:
