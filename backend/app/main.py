@@ -55,7 +55,14 @@ from .services.sandbox_infra import (
     verify_manifest,
 )
 from .services.prompts import CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
-from .services.chat_executor import OP_LABELS, build_jiandaoyun_payload, build_preview_text, get_entry_id, log_operation
+from .services.chat_executor import (
+    OP_LABELS,
+    ChatPayloadValidationError,
+    build_jiandaoyun_payload,
+    build_preview_text,
+    get_entry_id,
+    log_operation,
+)
 from .services.tool_registry import build_chat_executors, get_chat_tools, get_executors, get_tools
 from .services.tracing import new_trace, emit, emit_llm
 from .sso import build_sso_token, verify_sso_token
@@ -351,6 +358,72 @@ def _cleanup_pending_operations(now: datetime) -> None:
             expired.append(session_id)
     for key in expired:
         PENDING_CHAT_ACTIONS.pop(key, None)
+
+
+_CHAT_WRITE_PLACEHOLDERS = ("需要补充", "待补充", "待确认", "暂缺", "未知")
+
+
+def _contains_placeholder_text(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    return any(marker in text for marker in _CHAT_WRITE_PLACEHOLDERS)
+
+
+def _chat_field_values_by_widget(tool_input: dict[str, Any], form_config: dict[str, Any]) -> dict[str, tuple[str, Any]]:
+    fields = tool_input.get("fields", {}) or {}
+    field_mapping = (form_config.get("field_mapping") or {}) if isinstance(form_config, dict) else {}
+    values: dict[str, tuple[str, Any]] = {}
+    for field_name, value in fields.items():
+        mapping = field_mapping.get(str(field_name), {}) or {}
+        widget = str(mapping.get("widget") or "")
+        if widget:
+            values[widget] = (str(field_name), value)
+    return values
+
+
+def _build_missing_field_prompt(tool_name: str, tool_input: dict[str, Any], form_config: dict[str, Any]) -> str | None:
+    if tool_name not in {"create_customer_record", "update_customer_record"}:
+        return None
+
+    target_form = str(tool_input.get("target_form") or "")
+    values_by_widget = _chat_field_values_by_widget(tool_input, form_config)
+    missing_labels: list[str] = []
+
+    if target_form == "预期表":
+        required_widgets = {
+            "detail_brief": "预期简述",
+            "detail": "预期详情",
+        }
+    elif target_form == "场景表":
+        required_widgets = {
+            "title": "场景标题",
+            "solve_what_ques": "业务诉求/痛点分析",
+            "solve_what_ans": "核心指标/解决方案",
+        }
+    else:
+        return None
+
+    for widget, label in required_widgets.items():
+        pair = values_by_widget.get(widget)
+        if tool_name == "create_customer_record":
+            if pair is None or _contains_placeholder_text(pair[1]):
+                missing_labels.append(label)
+        elif pair is not None and _contains_placeholder_text(pair[1]):
+            missing_labels.append(label)
+
+    if target_form == "场景表" and tool_name == "create_customer_record":
+        related_yuqi_id = str(tool_input.get("related_yuqi_id") or "").strip()
+        if not related_yuqi_id:
+            missing_labels.append("关联预期")
+
+    if not missing_labels:
+        return None
+
+    joined = "、".join(dict.fromkeys(missing_labels))
+    if target_form == "预期表":
+        return f"这条预期还缺少这些关键信息：{joined}。请先补充，我再帮你生成待确认写入。"
+    return f"这个场景还缺少这些关键信息：{joined}。请先补充，我再帮你生成待确认写入。"
 
 
 def fetch_customers_for_user(db: Session, user: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2830,9 +2903,20 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         tool_input = pending.get("tool_input", {}) or {}
         target_form = str(tool_input.get("target_form") or "")
         form_config = mapping_forms.get(target_form, {}) or {}
+        missing_prompt = _build_missing_field_prompt(tool_name, tool_input, form_config)
+        if missing_prompt:
+            pending["created_at"] = now
+            PENDING_CHAT_ACTIONS[session_id] = pending
+            return {"reply": missing_prompt, "session_id": session_id, "needs_confirmation": False}
         entry_id = get_entry_id(target_form, mapping_forms)
         data_creator = user.get("integrate_id") or user.get("username", "")
         writer = JiandaoyunWriter(api_key=api_key, app_id=app_id, data_creator=data_creator)
+        if tool_name == "create_customer_record" and target_form in {"预期表", "场景表"} and company_id:
+            customer_write_context = await _resolve_customer_write_context(company_id, runtime_cfg)
+            if customer_write_context.get("customer_com_id"):
+                tool_input["customer_com_id"] = customer_write_context["customer_com_id"]
+            if customer_write_context.get("customer_com_name"):
+                tool_input["customer_com_name"] = customer_write_context["customer_com_name"]
         try:
             if tool_name == "create_customer_record":
                 result = await writer.create_record(entry_id=entry_id, data=build_jiandaoyun_payload(tool_input, form_config))
@@ -2846,6 +2930,18 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
                 result = await writer.delete_record(entry_id=entry_id, data_id=str(tool_input.get("data_id") or ""))
             else:
                 return {"reply": "未识别的待执行操作", "session_id": session_id, "needs_confirmation": False}
+        except ChatPayloadValidationError as exc:
+            log_operation(
+                db,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                status="failed",
+                source="chat",
+                error=str(exc),
+                operator_name=_user_name(user),
+                operator_id=str(user.get("user_id") or _user_name(user)),
+            )
+            return {"reply": f"写入失败：{exc}", "session_id": session_id, "needs_confirmation": False}
         except Exception as exc:
             log_operation(
                 db,
@@ -2973,6 +3069,17 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         return {"reply": result.message or f"处理失败：{result.status}", "session_id": session_id, "needs_confirmation": False}
     if runner.pending_write:
         pending = dict(runner.pending_write)
+        pending_tool_name = str(pending.get("tool_name") or "")
+        pending_tool_input = pending.get("tool_input", {}) or {}
+        pending_target_form = str(pending_tool_input.get("target_form") or "")
+        pending_form_config = forms_cfg.get(pending_target_form, {}) or {}
+        missing_prompt = _build_missing_field_prompt(pending_tool_name, pending_tool_input, pending_form_config)
+        if missing_prompt:
+            return {
+                "reply": missing_prompt,
+                "needs_confirmation": False,
+                "session_id": session_id,
+            }
         pending["created_at"] = now
         PENDING_CHAT_ACTIONS[session_id] = pending
         preview = build_preview_text(pending["tool_name"], pending["tool_input"])
