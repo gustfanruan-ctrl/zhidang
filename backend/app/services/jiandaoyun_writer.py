@@ -11,20 +11,21 @@ def _err(code: str, detail: str) -> dict[str, Any]:
 
 
 class JiandaoyunWriter:
-    def __init__(self, api_key: str, app_id: str):
+    def __init__(self, api_key: str, app_id: str, data_creator: str = ""):
         self.client = JiandaoyunClient(api_key=api_key)
         self.app_id = app_id
+        self.data_creator = data_creator
 
     async def create_record(self, entry_id: str, data: dict[str, Any]) -> dict[str, Any]:
         try:
-            result = await self.client.create_data(self.app_id, entry_id, data)
+            result = await self.client.create_data(self.app_id, entry_id, data, data_creator=self.data_creator)
             return {"success": True, **result}
         except JiandaoyunClientError as exc:
             return _err("create_failed", str(exc))
 
     async def update_record(self, entry_id: str, data_id: str, data: dict[str, Any]) -> dict[str, Any]:
         try:
-            result = await self.client.update_data(self.app_id, entry_id, data_id, data)
+            result = await self.client.update_data(self.app_id, entry_id, data_id, data, data_creator=self.data_creator)
             return {"success": True, **result}
         except JiandaoyunClientError as exc:
             return _err("update_failed", str(exc))

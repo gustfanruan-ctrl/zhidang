@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from uuid import uuid4
 from typing import Any, Awaitable, Callable
+import json
 import re
 from difflib import SequenceMatcher
+
+import httpx
 
 from .customer_matcher import match_customer
 from .field_safety import check_operation_cards
@@ -28,6 +31,12 @@ FIELD_ALIASES: dict[str, dict[str, str]] = {
         "detail": "预期详情",
         "预期状态": "预期状态",
         "yuqistatus": "预期状态",
+        "是否第一价值实现预期": "是否第一价值实现预期",
+        "是否第一价值": "是否第一价值实现预期",
+        "第一价值": "是否第一价值实现预期",
+        "第一价值实现": "是否第一价值实现预期",
+        "isfirstvalue": "是否第一价值实现预期",
+        "_widget_1770346583096": "是否第一价值实现预期",
         "推进想法": "推进想法",
         "推进思路": "推进想法",
         "promoteidea": "推进想法",
@@ -95,6 +104,8 @@ def _resolve_field_rule(target_form: str, raw_field_name: str, form_cfg: dict[st
             return "预期简述", field_mapping["预期简述"]
         if "预期详情" in field_mapping:
             return "预期详情", field_mapping["预期详情"]
+        if ("第一价值" in raw_field_name or "价值" in raw_field_name) and "是否第一价值实现预期" in field_mapping:
+            return "是否第一价值实现预期", field_mapping["是否第一价值实现预期"]
     if target_form == "场景表":
         if ("标题" in raw_field_name or "场景" in raw_field_name) and "场景标题" in field_mapping:
             return "场景标题", field_mapping["场景标题"]
@@ -364,9 +375,20 @@ async def exec_compare_ops_mock(params: dict[str, Any]) -> dict[str, Any]:
 
 
 async def exec_compare_ops(params: dict[str, Any]) -> dict[str, Any]:
+    """LLM 驱动的比对：用 LLM 判断每条提取内容与已有记录的关系（create/update/skip）。
+
+    params 除原有字段外，新增：
+      llm_cfg: dict 包含 provider / api_key / model_name / base_url
+      agent_b_prompt: str | None — LLM 的 system prompt 模板
+    """
+    return await exec_compare_ops_llm(params)
+
+
+async def exec_compare_ops_llm(params: dict[str, Any]) -> dict[str, Any]:
     facts = params.get("extracted_facts", []) or []
     existing = params.get("existing_profile", {}) or {}
     runtime_cfg = params.get("runtime_cfg", {}) or {}
+    llm_cfg = params.get("llm_cfg") or {}
     mapping = (runtime_cfg.get("mapping", {}) or {}).get("forms", {}) or {}
     primary_field_by_form = {"预期表": "预期简述", "场景表": "场景标题"}
     existing_rows_by_form = {
@@ -374,30 +396,9 @@ async def exec_compare_ops(params: dict[str, Any]) -> dict[str, Any]:
         "场景表": list(existing.get("changjing") or []),
     }
 
+    # ---------- 1. 先用纯 Python 构建 grouped cards（保持原有分组逻辑） ----------
     def _normalized(text: Any) -> str:
         return _normalize_key(str(text or ""))
-
-    def _similarity(left: Any, right: Any) -> float:
-        a = _normalized(left)
-        b = _normalized(right)
-        if not a or not b:
-            return 0.0
-        if a in b or b in a:
-            return 1.0
-        return SequenceMatcher(None, a, b).ratio()
-
-    def _match_existing_row(target_form: str, primary_widget: str, primary_value: str) -> dict[str, Any] | None:
-        threshold = 0.82
-        best_score = 0.0
-        best_row: dict[str, Any] | None = None
-        for row in existing_rows_by_form.get(target_form, []):
-            score = _similarity(row.get(primary_widget), primary_value)
-            if score > best_score:
-                best_score = score
-                best_row = row
-        if best_score >= threshold:
-            return best_row
-        return None
 
     grouped: dict[str, dict[str, Any]] = {}
     last_group_key_by_form: dict[str, str] = {}
@@ -443,7 +444,6 @@ async def exec_compare_ops(params: dict[str, Any]) -> dict[str, Any]:
                 }
             last_group_key_by_form[target_form] = group_key
         else:
-            # Non-primary fields belong to the most recent primary in this form.
             group_key = last_group_key_by_form.get(target_form)
             if not group_key:
                 continue
@@ -454,7 +454,6 @@ async def exec_compare_ops(params: dict[str, Any]) -> dict[str, Any]:
         if quote:
             current["source_quote"] = f"{current['source_quote']}\n{quote}".strip() if current["source_quote"] else quote
 
-        # One field appears at most once in each card.
         previous = current["item_by_field"].get(canonical_field_name)
         if previous is None or float(fact.get("confidence", 0.0)) >= float(previous.get("_confidence", 0.0)):
             current["item_by_field"][canonical_field_name] = {
@@ -463,6 +462,573 @@ async def exec_compare_ops(params: dict[str, Any]) -> dict[str, Any]:
                 "new_value": new_value,
                 "_confidence": float(fact.get("confidence", 0.0)),
             }
+
+    if not grouped:
+        return {"operation_cards": [], "total": 0}
+
+    # ---------- 2. 如果有 llm_cfg，尝试 LLM 比对 ----------
+    use_llm = bool(llm_cfg.get("api_key") and llm_cfg.get("base_url"))
+    llm_result = None
+    if use_llm:
+        try:
+            llm_result = await _call_llm_comparison(
+                llm_cfg=llm_cfg,
+                grouped=grouped,
+                existing_rows_by_form=existing_rows_by_form,
+                primary_field_by_form=primary_field_by_form,
+                mapping=mapping,
+                existing=existing,
+                user_prompt_override=params.get("agent_b_prompt"),
+            )
+        except Exception as exc:
+            import logging
+            logger = logging.getLogger("zhidang")
+            logger.warning("LLM comparison failed, falling back to string matching: %s", exc)
+
+    # ---------- 3. 如果 LLM 成功，用 LLM 结果；否则回退到原逻辑 ----------
+    cards: list[dict[str, Any]] = []
+    if llm_result and llm_result.get("decisions"):
+        # LLM 模式
+        cards = _build_cards_from_llm_decisions(
+            grouped=grouped,
+            decisions=llm_result["decisions"],
+            existing_rows_by_form=existing_rows_by_form,
+            existing=existing,
+            mapping=mapping,
+        )
+    else:
+        # 回退：纯字符串匹配原逻辑
+        cards = _build_cards_by_string_match(
+            grouped=grouped,
+            existing_rows_by_form=existing_rows_by_form,
+            existing=existing,
+            mapping=mapping,
+        )
+
+    return {"operation_cards": cards, "total": len(cards)}
+
+
+import asyncio as _asyncio
+import logging as _logging
+
+_comparison_logger = _logging.getLogger("zhidang.comparison")
+_shared_llm_client: httpx.AsyncClient | None = None
+_shared_llm_lock = _asyncio.Lock()
+
+
+async def _get_shared_llm_client() -> httpx.AsyncClient:
+    """获取或创建共享的 httpx 客户端，复用连接池。"""
+    global _shared_llm_client
+    async with _shared_llm_lock:
+        if _shared_llm_client is None or _shared_llm_client.is_closed:
+            _shared_llm_client = httpx.AsyncClient(timeout=httpx.Timeout(7200, connect=120))
+        return _shared_llm_client
+
+
+async def _llm_post_with_retry(url: str, headers: dict, payload: dict, max_retries: int = 2) -> httpx.Response:
+    """带重试的 LLM HTTP POST，复用连接池。"""
+    client = await _get_shared_llm_client()
+    last_exc: Exception | None = None
+    for attempt in range(1 + max_retries):
+        try:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code >= 500:
+                raise RuntimeError(f"服务端错误 HTTP {resp.status_code}")
+            return resp
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, RuntimeError) as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                wait = 1.5 * (2 ** attempt)
+                _comparison_logger.warning("比较 LLM 请求失败 (尝试 %d/%d)，%.1fs 后重试: %s", attempt + 1, 1 + max_retries, wait, exc)
+                await _asyncio.sleep(wait)
+                # 重建 client
+                async with _shared_llm_lock:
+                    if _shared_llm_client and not _shared_llm_client.is_closed:
+                        await _shared_llm_client.aclose()
+                    _shared_llm_client = None
+                client = await _get_shared_llm_client()
+    raise RuntimeError(f"比较 LLM 请求重试 {max_retries} 次后仍失败: {last_exc}")
+
+
+def _compact_text(value: Any, limit: int = 80) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text if len(text) <= limit else f"{text[:limit]}..."
+
+
+def _grouped_card_text(card: dict[str, Any]) -> str:
+    values = [str(card.get("primary_value") or "")]
+    for item in (card.get("item_by_field") or {}).values():
+        val = str(item.get("new_value") or "").strip()
+        if val and val not in values:
+            values.append(val)
+    return " ".join(values)
+
+
+def _yuqi_row_summary(row: dict[str, Any], mapping: dict[str, Any]) -> str:
+    primary_widget = (
+        mapping.get("预期表", {})
+        .get("field_mapping", {})
+        .get("预期简述", {})
+        .get("widget", "detail_brief")
+    )
+    return str(
+        row.get(primary_widget)
+        or row.get("detail_brief")
+        or row.get("detail")
+        or row.get("_id")
+        or ""
+    ).strip()
+
+
+def _clean_optional_id(value: Any) -> str:
+    text = str(value or "").strip()
+    return "" if text.lower() in {"", "null", "none", "无", "不关联"} else text
+
+
+def _normalize_llm_operation(decision: dict[str, Any]) -> tuple[str, str | None]:
+    """Normalize model operation names to the operation-card protocol.
+
+    Older prompts used tool-like names such as update_expectation/update_scenario.
+    The review card schema only accepts create/update/append_subform, with the
+    target form carried separately.
+    """
+    raw = str(
+        decision.get("operation")
+        or decision.get("operation_type")
+        or decision.get("type")
+        or decision.get("action")
+        or "skip"
+    ).strip()
+    normalized = _normalize_key(raw)
+    target_form: str | None = None
+
+    if any(token in normalized for token in ["expectation", "yuqi", "预期"]):
+        target_form = "预期表"
+    elif any(token in normalized for token in ["scenario", "changjing", "场景"]):
+        target_form = "场景表"
+
+    if any(token in normalized for token in ["append", "subform", "追加", "子表"]):
+        return "append_subform", target_form
+    if any(token in normalized for token in ["update", "modify", "edit", "change", "更新", "修改"]):
+        return "update", target_form
+    if any(token in normalized for token in ["create", "new", "add", "新增", "新建", "创建"]):
+        return "create", target_form
+    return "skip", target_form
+
+
+def _resolve_related_yuqi_from_decision(
+    *,
+    decision: dict[str, Any],
+    grouped: dict[str, dict[str, Any]],
+    decisions_by_group_key: dict[str, dict[str, Any]],
+    existing_rows_by_form: dict[str, list[dict[str, Any]]],
+    mapping: dict[str, Any],
+) -> dict[str, Any]:
+    reason = str(decision.get("related_yuqi_reason") or decision.get("relation_reason") or "").strip()
+    confidence_raw = decision.get("related_yuqi_confidence")
+    confidence: float | None = None
+    try:
+        if confidence_raw is not None:
+            confidence = max(0.0, min(1.0, float(confidence_raw)))
+    except (TypeError, ValueError):
+        confidence = None
+
+    related_id = _clean_optional_id(
+        decision.get("related_yuqi_id")
+        or decision.get("related_expectation_id")
+        or decision.get("related_record_id")
+    )
+    if related_id:
+        for row in existing_rows_by_form.get("预期表", []):
+            if str(row.get("_id") or "") == related_id:
+                return {
+                    "related_yuqi_id": related_id,
+                    "related_yuqi_card_id": None,
+                    "related_yuqi_source": "existing",
+                    "related_yuqi_summary": _compact_text(_yuqi_row_summary(row, mapping)),
+                    "related_yuqi_reason": reason,
+                    "related_yuqi_confidence": confidence,
+                }
+
+    group_keys = list(grouped.keys())
+    related_group_key = _clean_optional_id(decision.get("related_yuqi_group_key"))
+    related_index = decision.get("related_yuqi_index") or decision.get("related_expectation_index")
+    if not related_group_key and related_index not in (None, ""):
+        try:
+            idx = int(str(related_index).strip()) - 1
+            if 0 <= idx < len(group_keys):
+                related_group_key = group_keys[idx]
+        except (TypeError, ValueError):
+            related_group_key = ""
+
+    if related_group_key and related_group_key in grouped:
+        target = grouped[related_group_key]
+        target_decision = decisions_by_group_key.get(related_group_key) or {}
+        target_operation, _ = _normalize_llm_operation(target_decision)
+        if target.get("target_form") == "预期表" and target_operation in {"create", "update"}:
+            return {
+                "related_yuqi_id": None,
+                "related_yuqi_card_id": target.get("card_id"),
+                "related_yuqi_source": "generated",
+                "related_yuqi_summary": _compact_text(target.get("primary_value")),
+                "related_yuqi_reason": reason,
+                "related_yuqi_confidence": confidence,
+            }
+
+    return {}
+
+
+async def _call_llm_comparison(
+    *,
+    llm_cfg: dict[str, str],
+    grouped: dict[str, dict[str, Any]],
+    existing_rows_by_form: dict[str, list[dict[str, Any]]],
+    primary_field_by_form: dict[str, str],
+    mapping: dict[str, Any],
+    existing: dict[str, Any],
+    user_prompt_override: str | None = None,
+) -> dict[str, Any]:
+    """调用 OpenAI-compatible API 做语义比对。
+
+    返回 {"decisions": [...]}，每个 decision 包含：
+      - group_key: 对应 grouped 中的 key
+      - operation: "create" | "update" | "skip"
+      - matched_record_id: str | None (update 时必需)
+      - reason: str
+    """
+    base_url = llm_cfg.get("base_url", "").rstrip("/")
+    api_key = llm_cfg.get("api_key", "")
+    model_name = llm_cfg.get("model_name", "")
+
+    # 构建已有记录的可读摘要
+    existing_summaries = []
+    for form_name in ["预期表", "场景表"]:
+        rows = existing_rows_by_form.get(form_name, [])
+        if not rows:
+            existing_summaries.append(f"【{form_name}】无已有记录")
+            continue
+        existing_summaries.append(f"【{form_name}】（共 {len(rows)} 条）：")
+        for row in rows:
+            primary_widget = mapping.get(form_name, {}).get("field_mapping", {}).get(primary_field_by_form[form_name], {}).get("widget", "")
+            summary = row.get(primary_widget) or row.get("detail_brief") or row.get("title") or str(row.get("_id", ""))
+            detail = row.get("detail") or row.get("solve_what_ques") or ""
+            status = row.get("yuqi_status") or row.get("status") or ""
+            detail_snippet = f" | 详情: {detail[:200]}" if detail else ""
+            existing_summaries.append(f"  - _id: {row.get('_id')} | 摘要: {summary} | 状态: {status}{detail_snippet}")
+    existing_text = "\n".join(existing_summaries)
+
+    # 构建待比对的新数据描述
+    new_items_lines = []
+    for idx, (gk, card) in enumerate(grouped.items(), start=1):
+        target_form = card.get("target_form", "未知")
+        primary_value = card.get("primary_value", "")
+        non_primary = [
+            f"{v.get('field_name', '')}: {v.get('new_value', '')}"
+            for fk, v in card.get("item_by_field", {}).items()
+            if fk != card.get("primary_field")
+        ]
+        extras = "；".join(non_primary) if non_primary else ""
+        new_items_lines.append(f"  {idx}. group_key: {gk} | 表单: {target_form} | 核心: {primary_value} | 额外字段: {extras}")
+    new_items_text = "\n".join(new_items_lines)
+
+    # system prompt
+    default_system_prompt = """你是一个客户档案管理专家，负责将新提取的客户预期和场景与简道云中已有的档案数据进行智能比对，生成精确的操作指令。
+
+## 你的任务
+对比「新提取的数据」和「已有档案数据」，判断每条提取内容应该执行什么操作。
+
+## 操作类型判断规则
+1. **新增（create）**：提取内容在已有档案中无语义相似项，调用 `create` 操作
+2. **更新（update）**：提取内容与已有档案某条记录语义高度相似，但有新信息需要补充或状态需要变更，调用 `update` 操作，并填写 matched_record_id 指向已有记录
+3. **跳过（skip）**：提取内容与已有记录完全重复且无新信息
+
+## 相似度判断原则
+- 基于语义，不要求字面完全一致
+- 例如「希望提升审批效率」和「审批流程太慢需要优化」应视为相似
+- update 时，只有真正有新信息才标记为 update，仅措辞差异不算新信息
+- 如果核心内容判断为已存在且没有新增有价值的信息，应为 skip
+
+## 输出格式
+你必须仅返回一个 JSON 数组，不要包含其他内容：
+
+```json
+[
+  {
+    "operation": "create | update | skip",
+    "matched_record_id": null,
+    "related_yuqi_id": null,
+    "related_yuqi_index": null,
+    "related_yuqi_reason": "",
+    "related_yuqi_confidence": null,
+    "reason": "判断理由"
+  }
+]
+```
+
+注意：
+- 数组顺序与输入的新数据顺序一致
+- matched_record_id 只在 update 时填写已有记录的完整 _id（例如 '67f9002404ad14d923d362fb'），create/skip 时为 null
+- 只有“场景表”条目需要判断 related_yuqi：如果关联已有预期，填写 related_yuqi_id；如果关联本次新提取的预期，填写 related_yuqi_index（输入序号，1 开始）；无法确定时都填 null
+- reason 必须用中文说明判断依据"""
+
+    association_prompt = """## 场景关联预期规则
+- 每条“场景表”数据都要额外判断是否属于某条客户预期下的具体落地场景。
+- 可以关联“已有档案数据”里的预期，也可以关联“新提取的数据”里同批生成的预期。
+- 关联已有预期时，填写 related_yuqi_id 为该预期完整 _id。
+- 关联本次生成预期时，填写 related_yuqi_index 为输入列表里的预期序号；不要填写场景序号。
+- 只有当场景是某个预期的具体执行、应用、方案、流程或指标承接时才关联；只是同属一个客户或弱相关时不要关联。
+- related_yuqi_reason 用一句中文说明为什么关联；related_yuqi_confidence 填 0 到 1 的置信度。"""
+
+    user_prompt = f"""## 已有档案数据
+
+{existing_text}
+
+## 新提取的数据（按条目序号排列，每个序号对应一条预期或场景）
+
+{new_items_text}
+
+请逐条判断每条新数据与已有档案的关系（create / update / skip），按相同顺序返回 JSON 数组。"""
+
+    custom_prompt = (user_prompt_override or "").strip()
+    custom_prompt_section = ""
+    if custom_prompt and custom_prompt != default_system_prompt:
+        custom_prompt_section = (
+            "\n\n## 管理端补充比对规则（仅作业务判断参考）\n"
+            "如果本节与上面的 JSON 输出格式、operation 枚举或字段名冲突，必须以上面的硬性输出格式为准。\n"
+            f"{custom_prompt}"
+        )
+
+    system_prompt = f"{default_system_prompt}{custom_prompt_section}\n\n{association_prompt}"
+
+    url = f"{base_url}/chat/completions"
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {"model": model_name, "messages": messages, "temperature": 0.1, "max_tokens": 4096}
+
+    resp = await _llm_post_with_retry(url, headers, payload)
+
+    if resp.status_code >= 400:
+        raise RuntimeError(f"LLM comparison call failed: HTTP {resp.status_code} {resp.text[:200]}")
+
+    data = resp.json()
+    text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+    if not text:
+        raise RuntimeError("LLM returned empty content")
+
+    raw = text.strip()
+    # 去除 markdown code block
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+
+    decisions = json.loads(raw)
+    if not isinstance(decisions, list):
+        raise RuntimeError(f"LLM did not return an array: {type(decisions)}")
+
+    # 验证决策数与 grouped 数一致
+    group_keys = list(grouped.keys())
+    if len(decisions) != len(group_keys):
+        raise RuntimeError(f"LLM returned {len(decisions)} decisions, expected {len(group_keys)}")
+
+    # 挂载 group_key
+    for i, gk in enumerate(group_keys):
+        decisions[i]["group_key"] = gk
+
+    # 兜底：如果 LLM 全判 create 但明明有已有记录，回退到字符串匹配
+    all_create = all(_normalize_llm_operation(d)[0] == "create" for d in decisions)
+    has_existing = any(len(rows) > 0 for rows in existing_rows_by_form.values())
+    has_related_yuqi = any(
+        _clean_optional_id(
+            d.get("related_yuqi_id")
+            or d.get("related_expectation_id")
+            or d.get("related_record_id")
+            or d.get("related_yuqi_group_key")
+        )
+        or d.get("related_yuqi_index")
+        or d.get("related_expectation_index")
+        for d in decisions
+    )
+    if all_create and has_existing and not has_related_yuqi:
+        import logging
+        logger = logging.getLogger("zhidang")
+        logger.warning("LLM returned all-create but existing records found, raw decisions: %s", json.dumps(decisions, ensure_ascii=False)[:500])
+        raise RuntimeError("LLM returned all-create with existing records, falling back")
+
+    return {"decisions": decisions}
+
+
+def _build_cards_from_llm_decisions(
+    grouped: dict[str, dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    existing_rows_by_form: dict[str, list[dict[str, Any]]],
+    existing: dict[str, Any],
+    mapping: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """根据 LLM 的 decisions 构建 operation_cards。"""
+    cards: list[dict[str, Any]] = []
+    decisions_by_group_key = {str(item.get("group_key") or ""): item for item in decisions}
+
+    for decision in decisions:
+        gk = decision.get("group_key")
+        operation, operation_target_form = _normalize_llm_operation(decision)
+        if operation == "skip":
+            continue
+        grouped_card = grouped.get(gk)
+        if not grouped_card:
+            continue
+
+        target_form = str(grouped_card.get("target_form") or "")
+        if operation_target_form and operation_target_form != target_form:
+            target_form = operation_target_form
+        form_cfg = grouped_card.get("form_cfg") or mapping.get(target_form, {})
+        item_by_field = grouped_card.get("item_by_field") or {}
+        primary_value = str(grouped_card.get("primary_value") or "")
+
+        if not item_by_field or not primary_value:
+            continue
+
+        # 找到匹配的已有记录
+        matched_row = None
+        matched_id = (
+            decision.get("matched_record_id")
+            or decision.get("match_id")
+            or decision.get("record_id")
+            or decision.get("data_id")
+            or decision.get("target_record_id")
+        )
+        if operation == "update" and matched_id:
+            for row in existing_rows_by_form.get(target_form, []):
+                if str(row.get("_id", "")) == matched_id:
+                    matched_row = row
+                    break
+        if operation == "update" and not matched_row:
+            continue
+
+        change_items: list[dict[str, Any]] = []
+        for field_name, item in item_by_field.items():
+            widget_name = str(item.get("widget_name") or "")
+            old_raw = (matched_row or {}).get(widget_name) if matched_row else None
+            change_items.append({
+                "field_name": field_name,
+                "widget_name": widget_name,
+                "old_value": None if operation == "create" else (None if old_raw is None else str(old_raw)),
+                "new_value": str(item.get("new_value") or ""),
+            })
+
+        card = {
+            "card_id": grouped_card.get("card_id") or str(uuid4()),
+            "target_form": target_form,
+            "operation_type": operation,
+            "confidence": float(grouped_card.get("confidence") or 0.0),
+            "source_quote": str(grouped_card.get("source_quote") or ""),
+            "review_status": "pending",
+            "execute_status": "pending",
+            "data_id": (matched_row or {}).get("_id") if operation == "update" else None,
+            "customer_id": existing.get("_id"),
+            "lookup_widget": str(grouped_card.get("lookup_widget") or ""),
+            "change_items": change_items,
+        }
+        if target_form == "场景表":
+            card.update(
+                _resolve_related_yuqi_from_decision(
+                    decision=decision,
+                    grouped=grouped,
+                    decisions_by_group_key=decisions_by_group_key,
+                    existing_rows_by_form=existing_rows_by_form,
+                    mapping=mapping,
+                )
+            )
+        safe = check_operation_cards([card], form_cfg)[0]
+        cards.append(safe)
+    return cards
+
+
+def _build_cards_by_string_match(
+    grouped: dict[str, dict[str, Any]],
+    existing_rows_by_form: dict[str, list[dict[str, Any]]],
+    existing: dict[str, Any],
+    mapping: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """纯字符串相似度匹配（原 exec_compare_ops 逻辑保留作为回退）。"""
+    def _normalized(text: Any) -> str:
+        return _normalize_key(str(text or ""))
+
+    def _similarity(left: Any, right: Any) -> float:
+        a = _normalized(left)
+        b = _normalized(right)
+        if not a or not b:
+            return 0.0
+        if a in b or b in a:
+            return 1.0
+        return SequenceMatcher(None, a, b).ratio()
+
+    def _match_existing_row(target_form, primary_widget, primary_value):
+        threshold = 0.82
+        best_score = 0.0
+        best_row = None
+        for row in existing_rows_by_form.get(target_form, []):
+            score = _similarity(row.get(primary_widget), primary_value)
+            if score > best_score:
+                best_score = score
+                best_row = row
+        return best_row if best_score >= threshold else None
+
+    def _best_related_yuqi(scene_card: dict[str, Any]) -> dict[str, Any]:
+        scene_text = _grouped_card_text(scene_card)
+        candidates: list[dict[str, Any]] = []
+
+        for row in existing_rows_by_form.get("预期表", []):
+            related_id = str(row.get("_id") or "").strip()
+            if not related_id:
+                continue
+            summary = _yuqi_row_summary(row, mapping)
+            candidates.append(
+                {
+                    "source": "existing",
+                    "id": related_id,
+                    "summary": summary,
+                    "text": " ".join([summary, str(row.get("detail") or "")]),
+                }
+            )
+
+        for candidate_card in grouped.values():
+            if candidate_card.get("target_form") != "预期表":
+                continue
+            candidates.append(
+                {
+                    "source": "generated",
+                    "card_id": candidate_card.get("card_id"),
+                    "summary": str(candidate_card.get("primary_value") or ""),
+                    "text": _grouped_card_text(candidate_card),
+                }
+            )
+
+        best_score = 0.0
+        best: dict[str, Any] | None = None
+        for candidate in candidates:
+            score = _similarity(scene_text, candidate.get("text", ""))
+            if score > best_score:
+                best_score = score
+                best = candidate
+
+        if not best or best_score < 0.42:
+            return {}
+        base = {
+            "related_yuqi_source": best["source"],
+            "related_yuqi_summary": _compact_text(best.get("summary")),
+            "related_yuqi_reason": "根据场景内容与预期内容相似自动关联",
+            "related_yuqi_confidence": round(best_score, 3),
+        }
+        if best["source"] == "existing":
+            return {**base, "related_yuqi_id": best.get("id"), "related_yuqi_card_id": None}
+        return {**base, "related_yuqi_id": None, "related_yuqi_card_id": best.get("card_id")}
 
     cards: list[dict[str, Any]] = []
     for grouped_card in grouped.values():
@@ -479,21 +1045,18 @@ async def exec_compare_ops(params: dict[str, Any]) -> dict[str, Any]:
         op_type = "update" if matched_row else "create"
         data_id = str((matched_row or {}).get("_id") or "") or None
         if op_type == "update" and not data_id:
-            # update must have data_id; fallback to create otherwise.
             op_type = "create"
 
         change_items: list[dict[str, Any]] = []
         for field_name, item in item_by_field.items():
             widget_name = str(item.get("widget_name") or "")
             old_raw = (matched_row or {}).get(widget_name) if matched_row else None
-            change_items.append(
-                {
-                    "field_name": field_name,
-                    "widget_name": widget_name,
-                    "old_value": None if op_type == "create" else (None if old_raw is None else str(old_raw)),
-                    "new_value": str(item.get("new_value") or ""),
-                }
-            )
+            change_items.append({
+                "field_name": field_name,
+                "widget_name": widget_name,
+                "old_value": None if op_type == "create" else (None if old_raw is None else str(old_raw)),
+                "new_value": str(item.get("new_value") or ""),
+            })
 
         card = {
             "card_id": grouped_card.get("card_id") or str(uuid4()),
@@ -508,9 +1071,11 @@ async def exec_compare_ops(params: dict[str, Any]) -> dict[str, Any]:
             "lookup_widget": str(grouped_card.get("lookup_widget") or ""),
             "change_items": change_items,
         }
+        if target_form == "场景表":
+            card.update(_best_related_yuqi(grouped_card))
         safe = check_operation_cards([card], form_cfg)[0]
         cards.append(safe)
-    return {"operation_cards": cards, "total": len(cards)}
+    return cards
 
 
 async def _exec_chat_query_records(params: dict[str, Any], runtime_cfg: dict[str, Any]) -> dict[str, Any]:

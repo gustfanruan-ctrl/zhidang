@@ -1,0 +1,54 @@
+---
+description: 部署规则：前端 dist 文件同步到服务器
+alwaysApply: true
+---
+
+# 前端 dist 文件同步到服务器规则
+
+## 问题根因
+部署前端时，用 `rm -rf /opt/zhidang/frontend/dist && mkdir -p /opt/zhidang/frontend/dist` 重建 host 目录，会导致 Docker bind mount 的容器内挂载指向旧 inode 的已删除目录，容器看不到新文件（assets 目录丢失），Nginx 返回 500。
+
+## 正确部署步骤
+
+### 方案一：覆盖文件，不删除目录（推荐）
+```python
+sftp = ssh.open_sftp()
+# 只覆盖/新增文件，不删除目录
+for root, dirs, files in os.walk(local_dist):
+    for f in files:
+        local_path = os.path.join(root, f)
+        rel_path = os.path.relpath(local_path, local_dist)
+        remote_path = "/opt/zhidang/frontend/dist/%s" % rel_path.replace("\\", "/")
+        remote_dir = os.path.dirname(remote_path)
+        try:
+            sftp.stat(remote_dir)
+        except:
+            ssh.exec_command("mkdir -p %s" % remote_dir)
+        sftp.put(local_path, remote_path)
+sftp.close()
+# 不需要重启 Nginx，bind mount 自动同步
+```
+
+### 方案二：如果非要删除重建，必须重启 frontend 容器
+```python
+# 先删除重建 host 目录
+run("rm -rf /opt/zhidang/frontend/dist && mkdir -p /opt/zhidang/frontend/dist")
+# 上传文件...
+# 然后必须重启 frontend 容器，否则容器内挂载失效
+run("docker restart zhidang-frontend-1")
+```
+
+### 方案三：只在容器内更新（避免 bind mount 问题）
+```python
+# 直接把 dist 传给容器
+run("docker cp /opt/zhidang/frontend/dist/index.html zhidang-frontend-1:/usr/share/nginx/html/")
+run("docker cp /opt/zhidang/frontend/dist/assets zhidang-frontend-1:/usr/share/nginx/html/")
+# 然后 reload Nginx
+run("docker exec zhidang-frontend-1 nginx -s reload")
+```
+
+## 原则
+- **不要用 `rm -rf` + `mkdir` 重建 bind mount 指向的目录**
+- 如果改了 host 的 bind mount 源目录，必须 `docker restart` 容器才能生效
+- 只覆盖文件是安全的，不用重启容器
+- 也可以用 `docker cp` + `nginx -s reload` 直接推送

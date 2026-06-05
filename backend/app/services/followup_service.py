@@ -300,7 +300,7 @@ class FollowupService:
         ]
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
                 resp = await client.post(
                     f"{self.llm_base_url}/chat/completions",
                     headers={
@@ -331,7 +331,7 @@ class FollowupService:
         ]
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0)) as client:
                 resp = await client.post(
                     f"{self.llm_base_url}/chat/completions",
                     headers={

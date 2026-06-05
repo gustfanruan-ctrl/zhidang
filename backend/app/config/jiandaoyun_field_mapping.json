@@ -100,6 +100,15 @@
         "已作废"
       ]
     },
+    "是否第一价值实现预期": {
+      "widget": "_widget_1770346583096",
+      "type": "radiogroup",
+      "safety": "writable",
+      "allowed_values": [
+        "是",
+        "否"
+      ]
+    },
         "推进想法": {
           "widget": "promote_idea",
           "type": "textarea",
@@ -147,6 +156,11 @@
     },
     "跟进记录": {
       "entry_id": "670a28334883adafb152a869",
+      "lookup_yuqi": {
+        "widget": "_widget_1757576851901",
+        "resolve_by": "_id"
+      },
+      "yuqi_id_widget": "review_yuqi_id",
       "display_fields": ["com_name", "follow_type", "review_date", "review_record", "if_tuisong", "genjin"]
     }
   }

@@ -1,0 +1,50 @@
+branch: feature/followup-records-pipeline
+risk_level: L1
+gates:
+  g1_approved: true
+  g2_approved: true
+  g3_required: false
+  g3_approved: false
+change_context_notes:
+  - .fde/evidence/feature/followup-records-pipeline/T1/change-context-note.md
+  - .fde/evidence/feature/followup-records-pipeline/T4/change-context-note.md
+tasks:
+  - id: T1
+    name: normalize chat expectation status writeback
+    status: completed
+    files:
+      - backend/app/services/chat_executor.py
+      - backend/app/main.py
+  - id: T2
+    name: add chat executor status normalization tests
+    status: completed
+    files:
+      - backend/tests/test_chat_executor.py
+  - id: T4
+    name: sync review follow type with selected trip
+    status: completed
+    files:
+      - frontend/src/pages/ReviewPage.vue
+      - docs/decisions/review-trip-follow-type-sync-spec.approved.md
+      - docs/decisions/review-trip-follow-type-sync-plan.approved.md
+build_and_test:
+  py_compile: pass
+  pytest:
+    status: pass
+    command: pytest D:\智档\backend\tests\test_chat_executor.py -q
+  frontend_build:
+    status: pass
+    command: npm.cmd run build
+review:
+  status: pass
+  notes:
+    - scope kept to chat maintenance path only
+    - operation_executor.py intentionally unchanged
+    - T4 frontend linkage reviewed with stage-1 and stage-2 artifacts
+delivery:
+  production_deploy: pass
+  production_regression: skipped
+  explicit_failures: []
+  missing_items:
+    - no online regression verification performed
+recommendation: ready
