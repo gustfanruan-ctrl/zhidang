@@ -66,19 +66,19 @@
       <nav class="flex-1 px-3 py-3 space-y-1 overflow-y-auto">
         <RouterLink to="/chat" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
           <MessageSquare class="h-4 w-4 shrink-0" />
-          <span class="truncate">对话</span>
+          <span class="truncate">对话维护客户档案</span>
         </RouterLink>
         <RouterLink to="/review" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
           <FileText class="h-4 w-4 shrink-0" />
-          <span class="truncate">跟进记录</span>
+          <span class="truncate">生成跟进记录</span>
         </RouterLink>
         <RouterLink to="/transcripts" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
           <Upload class="h-4 w-4 shrink-0" />
-          <span class="truncate">上传</span>
+          <span class="truncate">生成预期&场景</span>
         </RouterLink>
         <RouterLink to="/power-map" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors hover:bg-muted text-foreground no-underline" active-class="bg-primary/10 text-primary hover:bg-primary/15">
           <MapIcon class="h-4 w-4 shrink-0" />
-          <span class="truncate">权利地图</span>
+          <span class="truncate">权力地图维护</span>
         </RouterLink>
       </nav>
 

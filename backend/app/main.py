@@ -21,7 +21,7 @@ import httpx
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .auth import create_jwt, get_current_user, get_current_user_for_sse, require_superadmin
+from .auth import create_jwt, decode_jwt, get_current_user, get_current_user_for_sse, require_superadmin
 from .config import settings
 from .crypto_utils import decrypt_secret, encrypt_secret
 from .database import Base, engine, get_db
@@ -61,6 +61,7 @@ from .services.chat_executor import (
     build_jiandaoyun_payload,
     build_preview_text,
     get_entry_id,
+    normalize_chat_tool_input,
     log_operation,
 )
 from .services.tool_registry import build_chat_executors, get_chat_tools, get_executors, get_tools
@@ -399,7 +400,7 @@ def _build_missing_field_prompt(tool_name: str, tool_input: dict[str, Any], form
         required_widgets = {
             "title": "场景标题",
             "solve_what_ques": "业务诉求/痛点分析",
-            "solve_what_ans": "核心指标/解决方案",
+            "solve_what_ans": "核心指标&解决方案",
         }
     else:
         return None
@@ -572,6 +573,22 @@ def _load_jiandaoyun_seed_mapping() -> dict[str, Any]:
         return {}
 
 
+def _merge_non_empty_mapping(base: Any, override: Any) -> Any:
+    if isinstance(base, dict):
+        result = dict(base)
+        if not isinstance(override, dict):
+            return result if override in (None, "", [], {}) else override
+        for key, value in override.items():
+            if key in result:
+                result[key] = _merge_non_empty_mapping(result[key], value)
+            elif value not in (None, "", [], {}):
+                result[key] = value
+        return result
+    if isinstance(base, list):
+        return list(override) if isinstance(override, list) and override else list(base)
+    return base if override in (None, "", [], {}) else override
+
+
 def seed_jiandaoyun_mapping_if_missing(cfg: SystemConfig, db: Session) -> None:
     field_mappings = dict(cfg.field_mappings or {})
     if field_mappings.get("jiandaoyun"):
@@ -588,7 +605,9 @@ def seed_jiandaoyun_mapping_if_missing(cfg: SystemConfig, db: Session) -> None:
 
 
 def get_jiandaoyun_runtime_config(cfg: SystemConfig) -> dict[str, Any]:
-    seed = dict((cfg.field_mappings or {}).get("jiandaoyun", {}) or {})
+    file_seed = _load_jiandaoyun_seed_mapping()
+    db_seed = dict((cfg.field_mappings or {}).get("jiandaoyun", {}) or {})
+    seed = _merge_non_empty_mapping(file_seed, db_seed)
     forms = dict(seed.get("forms") or {})
     main_form = dict(forms.get("客户主表") or {})
     mapping_entry_id = str(main_form.get("entry_id") or "").strip()
@@ -1033,6 +1052,35 @@ def _reload_cards_on_startup() -> None:
         db.close()
 
 
+def _restore_operation_cards_from_db(transcript_id: str, db: Session) -> list[dict[str, Any]]:
+    """当运行态内存丢失时，从 DB 中恢复指定 transcript/followup 的卡片。"""
+    transcript_id = str(transcript_id or "").strip()
+    if not transcript_id:
+        return []
+    record = db.get(Transcript, transcript_id) or db.get(FollowupRecord, transcript_id)
+    if not record or not record.agent_b_result:
+        return []
+    cards = (record.agent_b_result.get("result", {}) or {}).get("operation_cards", []) or []
+    restored = [dict(card) for card in cards if isinstance(card, dict)]
+    if restored:
+        OPERATION_CARD_STORE[transcript_id] = restored
+    return restored
+
+
+def _resolve_requested_operation_cards(cards: list[dict[str, Any]], requested_ids: set[str]) -> list[dict[str, Any]]:
+    """优先取已审批卡片；若运行态缺失审批态，则对本次明确提交的卡片做兜底批准。"""
+    if not requested_ids:
+        return []
+    requested_cards = [card for card in cards if str(card.get("card_id") or "") in requested_ids]
+    approved = [card for card in requested_cards if card.get("review_status") == "approved"]
+    if approved or not requested_cards:
+        return approved
+    for card in requested_cards:
+        card["review_status"] = "approved"
+    logger.warning("execute fallback: auto-approved %d requested cards because persisted review status was missing", len(requested_cards))
+    return requested_cards
+
+
 def _reset_stale_transcripts() -> None:
     """将卡在 extracting/comparing 超过 1 小时的转写标记为 error。"""
     from .database import SessionLocal as _SL
@@ -1423,6 +1471,7 @@ def get_llm_config(user: dict[str, Any] = Depends(require_superadmin), db: Sessi
         "agent_a_model": cfg.agent_a_model,
         "agent_b_model": cfg.agent_b_model,
         "nl_chat_model": cfg.nl_chat_model,
+        "power_map_llm_model": getattr(cfg, "power_map_llm_model", "") or "",
         "temperature": cfg.temperature,
         "max_tokens": cfg.max_tokens,
         "agent_a_prompt": cfg.agent_a_prompt,
@@ -1437,11 +1486,11 @@ def get_llm_config(user: dict[str, Any] = Depends(require_superadmin), db: Sessi
 @app.put("/api/v1/admin/llm-config")
 def save_llm_config(payload: LlmConfigPayload, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
     cfg = ensure_system_config(db)
-    before = {k: getattr(cfg, k) for k in ["llm_provider", "llm_base_url", "agent_a_model", "agent_b_model", "nl_chat_model", "temperature", "max_tokens", "agent_a_prompt", "agent_b_prompt", "nl_query_prompt", "nl_modify_prompt"]}
+    before = {k: getattr(cfg, k) for k in ["llm_provider", "llm_base_url", "agent_a_model", "agent_b_model", "nl_chat_model", "power_map_llm_model", "temperature", "max_tokens", "agent_a_prompt", "agent_b_prompt", "nl_query_prompt", "nl_modify_prompt"]}
     if payload.api_key:
         cfg.llm_api_key_encrypted = encrypt_secret(payload.api_key)
     mapping = {"provider": "llm_provider", "base_url": "llm_base_url"}
-    for key in ["provider", "base_url", "agent_a_model", "agent_b_model", "nl_chat_model", "temperature", "max_tokens", "agent_a_prompt", "agent_b_prompt", "nl_query_prompt", "nl_modify_prompt"]:
+    for key in ["provider", "base_url", "agent_a_model", "agent_b_model", "nl_chat_model", "power_map_llm_model", "temperature", "max_tokens", "agent_a_prompt", "agent_b_prompt", "nl_query_prompt", "nl_modify_prompt"]:
         value = getattr(payload, key)
         if value is None:
             continue
@@ -2738,6 +2787,8 @@ def operations_add(payload: dict[str, Any], db: Session = Depends(get_db), user:
 @app.post("/api/v1/operations/review")
 def operations_review(payload: ReviewAction, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     cards = OPERATION_CARD_STORE.get(payload.transcript_id, [])
+    if not cards:
+        cards = _restore_operation_cards_from_db(payload.transcript_id, db)
     updated = False
     for card in cards:
         if card.get("card_id") == payload.card_id:
@@ -2748,7 +2799,7 @@ def operations_review(payload: ReviewAction, db: Session = Depends(get_db), user
             break
     # 同步写入 DB，防止重启丢失审批状态
     if updated:
-        t = db.get(Transcript, payload.transcript_id)
+        t = db.get(Transcript, payload.transcript_id) or db.get(FollowupRecord, payload.transcript_id)
         if t and t.agent_b_result:
             # 深拷贝避免引用问题
             result = dict(t.agent_b_result.get("result", {}) or {})
@@ -2772,8 +2823,11 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
     # New flow: execute approved cards from in-memory review store.
     if "card_ids" in payload:
         req = OperationExecuteRequest.model_validate(payload)
+        requested_ids = {str(card_id) for card_id in req.card_ids if str(card_id).strip()}
         cards = OPERATION_CARD_STORE.get(req.transcript_id, [])
-        approved = [c for c in cards if c.get("review_status") == "approved" and c.get("card_id") in set(req.card_ids)]
+        if not cards:
+            cards = _restore_operation_cards_from_db(req.transcript_id, db)
+        approved = _resolve_requested_operation_cards(cards, requested_ids)
         runtime_cfg = get_jiandaoyun_runtime_config(ensure_system_config(db))
         forms_cfg = (((runtime_cfg.get("mapping") or {}).get("forms")) or {})
         api_key = runtime_cfg.get("api_key") or ""
@@ -2874,8 +2928,10 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
 
 @app.get("/api/v1/operations/{transcript_id}/status")
 def operations_status(transcript_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
-    _ = (db, user)
+    _ = user
     cards = OPERATION_CARD_STORE.get(transcript_id, [])
+    if not cards:
+        cards = _restore_operation_cards_from_db(transcript_id, db)
     return {"transcript_id": transcript_id, "cards": cards}
 
 
@@ -2900,7 +2956,8 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         if not api_key or not app_id:
             return {"reply": "写入失败：请先配置简道云 API Key", "session_id": session_id, "needs_confirmation": False}
         tool_name = str(pending.get("tool_name") or "")
-        tool_input = pending.get("tool_input", {}) or {}
+        tool_input = normalize_chat_tool_input(pending.get("tool_input", {}) or {})
+        pending["tool_input"] = tool_input
         target_form = str(tool_input.get("target_form") or "")
         form_config = mapping_forms.get(target_form, {}) or {}
         missing_prompt = _build_missing_field_prompt(tool_name, tool_input, form_config)
@@ -3058,6 +3115,7 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
                     "validated": False,
                     "created_at": now,
                 }
+                pending["tool_input"] = normalize_chat_tool_input(pending["tool_input"])
                 PENDING_CHAT_ACTIONS[session_id] = pending
                 preview = build_preview_text(pending["tool_name"], pending["tool_input"])
                 return {
@@ -3070,7 +3128,8 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
     if runner.pending_write:
         pending = dict(runner.pending_write)
         pending_tool_name = str(pending.get("tool_name") or "")
-        pending_tool_input = pending.get("tool_input", {}) or {}
+        pending_tool_input = normalize_chat_tool_input(pending.get("tool_input", {}) or {})
+        pending["tool_input"] = pending_tool_input
         pending_target_form = str(pending_tool_input.get("target_form") or "")
         pending_form_config = forms_cfg.get(pending_target_form, {}) or {}
         missing_prompt = _build_missing_field_prompt(pending_tool_name, pending_tool_input, pending_form_config)
@@ -3083,7 +3142,7 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         pending["created_at"] = now
         PENDING_CHAT_ACTIONS[session_id] = pending
         preview = build_preview_text(pending["tool_name"], pending["tool_input"])
-        reply = result.final_text or f"{preview}\n请点击“确认执行”继续。"
+        reply = preview
         return {
             "reply": reply,
             "needs_confirmation": True,
@@ -3110,7 +3169,7 @@ async def power_map_get(company_id: str, version: str | None = None, db: Session
 
 
 @app.get("/api/v1/power-map/{company_id}/bi-com-id")
-async def power_map_bi_com_id(company_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+async def power_map_bi_com_id(company_id: str, request: Request, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     """返回 BI 系统的 com_id，前端用于构造 iframe URL"""
     cfg = db.get(SystemConfig, 1)
     if not cfg:
@@ -3136,15 +3195,12 @@ async def power_map_bi_com_id(company_id: str, db: Session = Depends(get_db), us
         pass
 
     api_cfg = _get_power_map_config(cfg)
-    # powerMap_v3.13.html is served from /WebReport/power_map/, not /WebReport/decision/
-    # Extract origin from base_url to construct the correct path
-    from urllib.parse import urlparse
-    origin = f"{urlparse(api_cfg['base_url']).scheme}://{urlparse(api_cfg['base_url']).netloc}"
+    iframe_token = create_jwt({k: v for k, v in user.items() if k != "exp"})
     return {
         "company_id": company_id,
         "bi_com_id": prj_id,
         "bi_base_url": api_cfg["base_url"],
-        "bi_iframe_url": f"{origin}/WebReport/power_map/powerMap_v3.13.html?com_id={prj_id}",
+        "bi_iframe_url": f"{_POWER_MAP_LIVE_PROXY_PREFIX}/WebReport/power_map/powerMap_v3.13.html?com_id={prj_id}&token={iframe_token}",
     }
 
 
@@ -3342,6 +3398,14 @@ _SANDBOX_REL_ASSET_RE = re.compile(
     re.IGNORECASE,
 )
 _BI_HTML_BASE = f"{_BI_HOST}/WebReport/power_map/"
+_POWER_MAP_LIVE_PROXY_PREFIX = "/api/power_map/live"
+_LIVE_PROXY_HTML_PATH = "power_map/powerMap_v3.13.html"
+_LIVE_PROXY_DEFAULT_VERSION_RE = re.compile(
+    r"let defaultVersion=null;.*?if\(version_data && version_data\[\"ver_name\"\]===\"【客户成功】数据\"\)\{\s*changeOpp\(version_data\.value,self\);\s*\}",
+    re.S,
+)
+_LIVE_PROXY_CFG_CACHE_TTL = 60.0
+_live_proxy_cfg_cache: dict[str, Any] = {"cfg": None, "loaded_at": 0.0}
 _SANDBOX_GETINFO_OLD = (
     "success: function(result){\n"
     "                    var obj = eval('(' + result + ')');\n"
@@ -3352,6 +3416,226 @@ _SANDBOX_GETINFO_NEW = (
     "                    var obj = window.__GRAPH_DATA__ || eval('(' + result + ')');\n"
     "                    switchVersion(ver_type,obj,self);"
 )
+
+
+def _power_map_proxy_headers(upstream: httpx.Response) -> dict[str, str]:
+    allowed = {"cache-control", "content-disposition", "etag", "last-modified"}
+    return {
+        key: value
+        for key, value in upstream.headers.items()
+        if key.lower() in allowed
+    }
+
+
+def _get_cached_power_map_system_config() -> SystemConfig:
+    now = time.time()
+    cached = _live_proxy_cfg_cache.get("cfg")
+    loaded_at = float(_live_proxy_cfg_cache.get("loaded_at") or 0.0)
+    if cached is not None and (now - loaded_at) < _LIVE_PROXY_CFG_CACHE_TTL:
+        return cached
+
+    with Session(engine) as db:
+        cfg = db.get(SystemConfig, 1)
+        if not cfg:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+        db.expunge(cfg)
+    _live_proxy_cfg_cache["cfg"] = cfg
+    _live_proxy_cfg_cache["loaded_at"] = now
+    return cfg
+
+
+def _power_map_proxy_query_params(request: Request) -> list[tuple[str, str]]:
+    return [(key, value) for key, value in request.query_params.multi_items() if key != "token"]
+
+
+def _get_current_user_for_live_proxy(request: Request) -> dict[str, Any]:
+    token = request.query_params.get("token") or request.cookies.get("power_map_live_token") or ""
+    if not token:
+        header = request.headers.get("authorization") or request.headers.get("Authorization")
+        if header and header.lower().startswith("bearer "):
+            token = header.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="未登录")
+    try:
+        return decode_jwt(token)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="登录已失效") from exc
+
+
+async def _get_live_power_map_auth(
+    cfg: SystemConfig,
+    current_user: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, str] | None]:
+    api_cfg = _get_power_map_config(cfg)
+    headers: dict[str, str] = {}
+    cookies: dict[str, str] | None = None
+    try:
+        bi_auth = await cas_auth_service.get_bi_session({
+            "user_id": current_user.get("user_id", ""),
+            "username": current_user.get("user_name", ""),
+            "bi_service": api_cfg["base_url"],
+            "login_mobile": getattr(cfg, "power_map_login_mobile", "") or "",
+            "login_password": decrypt_secret(getattr(cfg, "power_map_login_password_encrypted", None) or "") or "",
+        })
+        headers, cookies = _split_bi_auth(bi_auth)
+    except CasAuthError as exc:
+        logger.warning("power map live proxy CAS auth unavailable: %s", exc)
+    except Exception:
+        logger.exception("power map live proxy CAS auth unexpected error")
+
+    if not cookies and api_cfg["auth_token"]:
+        headers["Authorization"] = f"Bearer {api_cfg['auth_token']}"
+    return headers, cookies
+
+
+def _patch_live_power_map_html(html: str) -> str:
+    html = html.replace(
+        "let serverName=window.location.origin;",
+        f"let serverName=window.location.origin + '{_POWER_MAP_LIVE_PROXY_PREFIX}';",
+        1,
+    )
+    html = html.replace(
+        'serverName+"WebReport/decision/url/power_map/upFile',
+        'serverName+"/WebReport/decision/url/power_map/upFile',
+    )
+    html = html.replace(
+        """            var prj_type="opp";
+            if(ver_name.indexOf("【主】")>=0 || ver_name.indexOf("【体系】")>=0)
+                prj_type="company";
+            else
+            {
+                if(ver_name=="【客户成功】数据")
+                    ver_type="support";
+            }""",
+        """            var prj_type="opp";
+            if(ver_name=="【客户成功】数据")
+                ver_type="support";""",
+        1,
+    )
+    html = _LIVE_PROXY_DEFAULT_VERSION_RE.sub(
+        """let requestedVersion=getQueryString("ver_info") || "";
+                                let defaultVersion=null;
+                                if(requestedVersion){
+                                    for(let i=0;i<version_arr.length;i++){
+                                        let v=version_arr[i];
+                                        if(v && String(v["value"] || "")===requestedVersion){
+                                            defaultVersion=v;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if(defaultVersion==null){
+                                    for(let i=0;i<version_arr.length;i++){
+                                        let v=version_arr[i];
+                                        if(is_support && v && v["ver_name"]==="【客户成功】数据"){
+                                            defaultVersion=v;
+                                            break;
+                                        }
+                                        if(!is_support && v && (v["ver_name"] && (v["ver_name"].indexOf("【主】")>=0 || v["ver_name"].indexOf("【体系】")>=0))){
+                                            defaultVersion=v;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if(defaultVersion==null && version_arr.length>0){
+                                    defaultVersion=version_arr[0];
+                                }
+                                if(defaultVersion==null){
+                                    defaultVersion={value:"",text:"",ver_name:""};
+                                }
+                                version_data=defaultVersion;
+                                self.version_info.populate(version_arr);//版本下拉
+                                if(version_data && version_data.value!=undefined && version_data.value!="")
+                                    self.version_info.setValue(version_data.value);//版本当前值
+                                if(requestedVersion && version_data && String(version_data.value || "")===requestedVersion){
+                                    changeOpp(requestedVersion,self);
+                                }
+                                else if(version_data && version_data["ver_name"]==="【客户成功】数据"){
+                                    changeOpp(version_data.value,self);
+                                }""",
+        html,
+        count=1,
+    )
+    return html
+
+
+def _inject_live_proxy_token_cookie(html: str, token: str) -> str:
+    if not token:
+        return html
+    cookie_script = (
+        "<script>"
+        f"document.cookie='power_map_live_token={token}; Path={_POWER_MAP_LIVE_PROXY_PREFIX}/; Secure; SameSite=Lax';"
+        "</script>"
+    )
+    if "<head>" in html:
+        return html.replace("<head>", "<head>" + cookie_script, 1)
+    return cookie_script + html
+
+
+async def _proxy_live_power_map_request(
+    request: Request,
+    proxy_path: str,
+    cfg: SystemConfig,
+    current_user: dict[str, Any],
+) -> Response:
+    from urllib.parse import urlparse
+
+    api_cfg = _get_power_map_config(cfg)
+    headers, cookies = await _get_live_power_map_auth(cfg, current_user)
+    parsed = urlparse(api_cfg["base_url"])
+    upstream_base = f"{parsed.scheme}://{parsed.netloc}"
+    upstream_url = f"{upstream_base}/WebReport/{proxy_path.lstrip('/')}"
+
+    forward_headers = dict(headers)
+    content_type = request.headers.get("content-type")
+    if content_type:
+        forward_headers["Content-Type"] = content_type
+    x_requested_with = request.headers.get("x-requested-with")
+    if x_requested_with:
+        forward_headers["X-Requested-With"] = x_requested_with
+
+    body = await request.body() if request.method != "GET" else None
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+        upstream = await client.request(
+            request.method,
+            upstream_url,
+            params=_power_map_proxy_query_params(request),
+            headers=forward_headers,
+            cookies=cookies,
+            content=body,
+        )
+
+    if upstream.status_code in {301, 302, 303, 307, 308}:
+        logger.warning(
+            "power map live proxy upstream redirect: path=%s location=%s",
+            proxy_path,
+            upstream.headers.get("location", ""),
+        )
+    if upstream.status_code >= 400:
+        raise HTTPException(status_code=upstream.status_code, detail=f"上游 BI 响应异常: {proxy_path}")
+
+    response_headers = _power_map_proxy_headers(upstream)
+    if proxy_path == _LIVE_PROXY_HTML_PATH:
+        token = request.query_params.get("token") or ""
+        html = _inject_live_proxy_token_cookie(_patch_live_power_map_html(upstream.text), token)
+        response = HTMLResponse(content=html, headers=response_headers)
+        if token:
+            response.set_cookie(
+                key="power_map_live_token",
+                value=token,
+                path=f"{_POWER_MAP_LIVE_PROXY_PREFIX}/",
+                secure=True,
+                httponly=True,
+                samesite="lax",
+            )
+        return response
+
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type"),
+        headers=response_headers,
+    )
 
 
 @app.get("/api/power_map/sandbox")
@@ -3507,6 +3791,16 @@ async def power_map_sandbox_proxy(
         content_type = "application/octet-stream"
 
     return StreamingResponse(stream_body(), media_type=content_type)
+
+
+@app.api_route("/api/power_map/live/WebReport/{proxy_path:path}", methods=["GET", "POST"])
+async def power_map_live_proxy(
+    proxy_path: str,
+    request: Request,
+    user: dict[str, Any] = Depends(_get_current_user_for_live_proxy),
+):
+    cfg = _get_cached_power_map_system_config()
+    return await _proxy_live_power_map_request(request, proxy_path, cfg, user)
 
 
 # ═══════════════════════════════════════════════════════════

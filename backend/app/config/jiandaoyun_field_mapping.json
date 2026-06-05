@@ -141,14 +141,34 @@
           "type": "text",
           "safety": "writable"
         },
-        "解决什么问题": {
+        "是否第一价值实现场景": {
+          "widget": "_widget_1744337240628",
+          "type": "text",
+          "safety": "writable"
+        },
+        "业务诉求/痛点分析": {
           "widget": "solve_what_ques",
           "type": "textarea",
           "safety": "writable"
         },
-        "怎样解决": {
+        "核心指标&解决方案": {
           "widget": "solve_what_ans",
           "type": "textarea",
+          "safety": "writable"
+        },
+        "价值量化": {
+          "widget": "_widget_1773296816191",
+          "type": "textarea",
+          "safety": "writable"
+        },
+        "总结沉淀": {
+          "widget": "_widget_1773296816192",
+          "type": "textarea",
+          "safety": "writable"
+        },
+        "成果应用方式": {
+          "widget": "_widget_1737340360281",
+          "type": "text",
           "safety": "writable"
         }
       },

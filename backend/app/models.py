@@ -55,6 +55,7 @@ class SystemConfig(Base, TimestampMixin):
     agent_a_model: Mapped[str] = mapped_column(String(100), default="qwen-plus")
     agent_b_model: Mapped[str] = mapped_column(String(100), default="qwen-plus")
     nl_chat_model: Mapped[str] = mapped_column(String(100), default="qwen-plus")
+    power_map_llm_model: Mapped[str | None] = mapped_column(String(100), default="")
     temperature: Mapped[float] = mapped_column(Float, default=0.3)
     max_tokens: Mapped[int] = mapped_column(Integer, default=4096)
     agent_a_prompt: Mapped[str] = mapped_column(Text, default="你是一个专业的客户成功分析师，专门从客户拜访会议转写文本中提取结构化信息。\n\n## 你的任务\n分析以下会议转写文本，识别并提取其中的「客户预期」和「业务场景」。\n\n## 关键定义\n- **客户预期**：客户明确或隐含表达的期望、需求、目标、希望达成的效果。包括功能需求、时间节点要求、效果预期等。\n- **业务场景**：客户当前面临的业务痛点、正在使用的工作流程、希望优化的具体场景。\n\n## 工具使用规则\n1. 对识别到的每一条预期，调用 `add_expectation` 工具\n2. 对识别到的每一条场景，调用 `add_scenario` 工具\n3. 每条提取必须附带原文引用（source_quote），用于用户审核时溯源\n4. 如果转写内容明显不是客户拜访（如内部会议、闲聊），不调用任何工具，直接回复说明原因\n5. 宁可多提取、不要遗漏，用户后续会审核\n\n## 字段填写指南\n- summary：一句话概括，不超过50字\n- is_first_value：如果是首次提出该预期/场景，为 true；如果是对已有内容的补充或跟进，为 false\n- description：详细描述，2-3句话\n- status：根据上下文判断，可选值为「未启动」「进行中」「已完成」「已搁置」，无法判断时默认「未启动」\n- source_quote：从原文中摘录最相关的一段话，保持原文不改动\n- speaker：说话人姓名或角色（如「客户方张总」「我方小李」），无法识别时填「未知」\n- timestamp：如果转写中有时间标记，填写对应时间段；没有则留空\n\n## 上下文信息\n- 行业：{industry}\n- 部门：{department}\n- 公司：{company_name}\n\n## 转写文本\n{transcript_text}\n")
@@ -73,6 +74,8 @@ class SystemConfig(Base, TimestampMixin):
     power_map_get_path: Mapped[str | None] = mapped_column(String(200), default="/url/power_map/getInfo")
     power_map_update_path: Mapped[str | None] = mapped_column(String(200), default="/url/power_map/upInfo")
     power_map_auth_token_encrypted: Mapped[str | None] = mapped_column(Text, default="")
+    power_map_login_mobile: Mapped[str | None] = mapped_column(String(100))
+    power_map_login_password_encrypted: Mapped[str | None] = mapped_column(Text, default="")
 
 
 

@@ -41,14 +41,14 @@ def test_scene_create_requires_related_yuqi_and_core_fields():
             "field_mapping": {
                 "场景标题": {"widget": "title"},
                 "业务诉求/痛点分析": {"widget": "solve_what_ques"},
-                "核心指标/解决方案": {"widget": "solve_what_ans"},
+                "核心指标&解决方案": {"widget": "solve_what_ans"},
             }
         },
     )
 
     assert prompt is not None
     assert "业务诉求/痛点分析" in prompt
-    assert "核心指标/解决方案" in prompt
+    assert "核心指标&解决方案" in prompt
     assert "关联预期" in prompt
 
 
@@ -61,14 +61,14 @@ def test_complete_scene_create_does_not_get_blocked():
             "fields": {
                 "场景标题": "经营分析看板",
                 "业务诉求/痛点分析": "当前靠 Excel 汇总，口径不统一。",
-                "核心指标/解决方案": "统一口径后按日推送经营指标。",
+                "核心指标&解决方案": "统一口径后按日推送经营指标。",
             },
         },
         {
             "field_mapping": {
                 "场景标题": {"widget": "title"},
                 "业务诉求/痛点分析": {"widget": "solve_what_ques"},
-                "核心指标/解决方案": {"widget": "solve_what_ans"},
+                "核心指标&解决方案": {"widget": "solve_what_ans"},
             }
         },
     )

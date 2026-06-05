@@ -190,6 +190,10 @@ const sandboxIframeUrl = computed(() => {
 })
 const sandboxIframeKey = computed(() => `${chatStore.sandboxUrl || 'empty'}-${chatStore.sandboxRefreshKey}`)
 
+function getBiPrjType() {
+  return 'opp'
+}
+
 async function loadBiUrl() {
   if (!customerStore.currentCustomer) return
   try {
@@ -202,7 +206,26 @@ async function loadBiUrl() {
       biIframeUrl.value = ''
       return
     }
-    biIframeUrl.value = data.bi_iframe_url || ''
+    const rawUrl = data.bi_iframe_url || ''
+    if (!rawUrl) {
+      biIframeUrl.value = ''
+      return
+    }
+    const u = new URL(rawUrl, window.location.origin)
+    const token = localStorage.getItem('zhidang_token') || ''
+    if (token) {
+      u.searchParams.set('token', token)
+    } else {
+      u.searchParams.delete('token')
+    }
+    if (currentVer.value) {
+      u.searchParams.set('ver_info', currentVer.value)
+      u.searchParams.set('prj_type', getBiPrjType())
+    } else {
+      u.searchParams.delete('ver_info')
+      u.searchParams.delete('prj_type')
+    }
+    biIframeUrl.value = u.toString()
   } catch (e) {
     console.error('获取 BI URL 失败', e)
     biIframeUrl.value = ''

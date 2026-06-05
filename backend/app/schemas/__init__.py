@@ -42,6 +42,8 @@ class AdminConfigPayload(BaseAPIModel):
     power_map_get_path: str | None = None
     power_map_update_path: str | None = None
     power_map_auth_token: str | None = None
+    power_map_login_mobile: str | None = None
+    power_map_login_password: str | None = None
 
 class LlmConfigPayload(BaseAPIModel):
     api_key: str | None = None
@@ -50,6 +52,7 @@ class LlmConfigPayload(BaseAPIModel):
     agent_a_model: str | None = None
     agent_b_model: str | None = None
     nl_chat_model: str | None = None
+    power_map_llm_model: str | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1, le=32768)
     agent_a_prompt: str | None = None

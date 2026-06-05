@@ -506,6 +506,18 @@ const selectedYuqiSummary = computed(() => {
   if (!selectedId) return ''
   return reviewYuqiOptions.value.find(opt => opt.id === selectedId)?.summary || ''
 })
+function resetReviewFlowState() {
+  transcriptText.value = ''
+  reviewData.value = null
+  uploadedFiles.value = []
+  selectedSourceIds.value = new Set()
+  appliedSources.value = []
+  selectedContactId.value = ''
+  selectedTaskIds.value = []
+  sourcePanelOpen.value = false
+  currentStep.value = 1
+  todayDate.value = new Date().toISOString().split('T')[0]
+}
 // File methods
 function triggerFileInput() { fileInput.value?.click() }
 function onDragOver() { isDragOver.value = true }
@@ -743,6 +755,7 @@ async function submitReview() {
       relevent_tag: reviewData.value.relevent_tag || []
     }
     await api.post('/api/v1/followup/submit', payload)
+    resetReviewFlowState()
     showMessage('成功提交到简道云', 'success')
   } catch (error) {
     console.error('提交失败', error)

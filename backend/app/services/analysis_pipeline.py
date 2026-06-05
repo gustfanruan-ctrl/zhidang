@@ -36,7 +36,7 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
         ensure_system_config, run_extraction_task, get_jiandaoyun_runtime_config,
         _get_llm_runtime_config, get_executors, check_operation_cards,
         validate_comparison_output, hash_company_id, emit_event,
-        _format_exc,
+        _format_exc, _extract_image_inputs_from_segments,
     )
     from ..schemas import AgentExtractionPayload
 
@@ -80,7 +80,7 @@ async def run_analysis_pipeline(transcript_id: str, source_type: str = "transcri
                 transcript_id=transcript_id,
                 input_type=agent_input_type,
                 content=transcript.raw_text,
-                images=[],
+                images=_extract_image_inputs_from_segments(transcript.segments),
                 transcript={"id": transcript_id, "raw_text": transcript.raw_text},
             )
             result = await run_extraction_task(payload, cfg)

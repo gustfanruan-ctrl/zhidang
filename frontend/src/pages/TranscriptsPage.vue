@@ -457,7 +457,7 @@
                       </SelectNative>
                     </div>
                     <div>
-                      <Label class="text-xs">解决什么问题</Label>
+                      <Label class="text-xs">业务诉求/痛点分析</Label>
                       <Textarea
                         :model-value="item.question"
                         rows="3"
@@ -466,7 +466,7 @@
                       />
                     </div>
                     <div>
-                      <Label class="text-xs">怎样解决</Label>
+                      <Label class="text-xs">核心指标&解决方案</Label>
                       <Textarea
                         :model-value="item.answer"
                         rows="3"
@@ -509,8 +509,8 @@
                   </div>
                   <div v-else class="text-muted-foreground mb-2 break-words space-y-1">
                     <p v-if="item.scene_first_value">是否第一价值实现场景：{{ item.scene_first_value }}</p>
-                    <p>解决什么问题：{{ item.question || '暂无问题描述' }}</p>
-                    <p>怎样解决：{{ item.answer || '暂无解决方案' }}</p>
+                    <p>业务诉求/痛点分析：{{ item.question || '暂无问题描述' }}</p>
+                    <p>核心指标&解决方案：{{ item.answer || '暂无解决方案' }}</p>
                     <p v-if="item.value_quantification">价值量化：{{ item.value_quantification }}</p>
                     <p v-if="item.summary_sedimentation">总结沉淀：{{ item.summary_sedimentation }}</p>
                     <p v-if="item.application_mode">成果应用方式：{{ item.application_mode }}</p>
@@ -665,6 +665,7 @@ function toggleSourceMode(mode) {
   sourceMode.value = mode
   selectedId.value = null
   selectedTranscript.value = null
+  currentPage.value = 1
   loadTranscripts()
 }
 
@@ -803,6 +804,7 @@ function goPage(n) { currentPage.value = Math.max(1, Math.min(n, totalPages.valu
 
 async function loadTranscripts() {
   try {
+    const previousPage = currentPage.value
     let data
     if (sourceMode.value === 'followup') {
       const cid = customerStore.currentCustomer?.company_id || ''
@@ -811,7 +813,8 @@ async function loadTranscripts() {
       data = await fetchTranscripts()
     }
     transcripts.value = data.items || []
-    currentPage.value = 1
+    const nextTotalPages = Math.max(1, Math.ceil(transcripts.value.length / pageSize))
+    currentPage.value = Math.min(Math.max(previousPage, 1), nextTotalPages)
     startPollIfNeeded()
   } catch (e) {
     console.warn('加载列表失败', e)
@@ -855,6 +858,7 @@ async function batchAnalyzeSelected() {
     showMessage(`已合并 ${parts.length} 条记录并启动分析`, 'success')
     selectedIds.value = new Set()
     sourceMode.value = 'transcript'
+    currentPage.value = 1
     await triggerAnalysis(result.transcript_id)
     await loadTranscripts()
   } catch (e) {
@@ -970,14 +974,19 @@ const cardGroups = computed(() => {
       const ci = items.find(i => i.field_name === name || i.widget_name === name)
       return ci ? ci.new_value : ''
     }
+    const rawQuestion = tf === '场景表' ? (getVal('业务诉求/痛点分析') || getVal('解决什么问题') || getVal('solve_what_ques') || '') : ''
+    const rawAnswer = tf === '场景表' ? (getVal('核心指标&解决方案') || getVal('核心指标/解决方案') || getVal('怎样解决') || getVal('solve_what_ans') || '') : ''
+    const parsedScenarioFields = tf === '场景表'
+      ? parseScenarioStructuredFields(rawQuestion, rawAnswer)
+      : null
     const item = {
       summary: getVal('预期简述') || getVal('detail_brief'),
-      scene_first_value: tf === '场景表' ? (getVal('是否第一价值实现场景') || '') : '',
-      question: tf === '场景表' ? (getVal('解决什么问题') || getVal('solve_what_ques') || '') : '',
-      answer: tf === '场景表' ? (getVal('怎样解决') || getVal('solve_what_ans') || '') : '',
-      value_quantification: tf === '场景表' ? (getVal('价值量化') || '') : '',
-      summary_sedimentation: tf === '场景表' ? (getVal('总结沉淀') || '') : '',
-      application_mode: tf === '场景表' ? (getVal('成果应用方式') || '') : '',
+      scene_first_value: tf === '场景表' ? (getVal('是否第一价值实现场景') || parsedScenarioFields?.scene_first_value || '') : '',
+      question: tf === '场景表' ? (parsedScenarioFields?.question || rawQuestion) : '',
+      answer: tf === '场景表' ? (parsedScenarioFields?.answer || rawAnswer) : '',
+      value_quantification: tf === '场景表' ? (getVal('价值量化') || parsedScenarioFields?.value_quantification || '') : '',
+      summary_sedimentation: tf === '场景表' ? (getVal('总结沉淀') || parsedScenarioFields?.summary_sedimentation || '') : '',
+      application_mode: tf === '场景表' ? (getVal('成果应用方式') || parsedScenarioFields?.application_mode || '') : '',
       description: tf === '场景表' ? '' : (getVal('预期详情') || getVal('detail')),
       title: getVal('场景标题') || getVal('title'),
       status: (() => {
@@ -1137,6 +1146,36 @@ function splitScenarioDescription(value) {
   return { question: question.trim(), answer: rest.join(marker).trim() }
 }
 
+function extractScenarioSection(text, label) {
+  const source = String(text ?? '').trim()
+  if (!source) return ''
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`【${escapedLabel}】([\\s\\S]*?)(?=【[^】]+】|$)`)
+  const match = source.match(pattern)
+  return match?.[1]?.trim() || ''
+}
+
+function parseScenarioStructuredFields(questionText, answerText) {
+  const questionSource = String(questionText ?? '').trim()
+  const answerSource = String(answerText ?? '').trim()
+
+  const sceneFirstValue = extractScenarioSection(questionSource, '是否第一价值实现场景')
+  const question = extractScenarioSection(questionSource, '业务诉求/痛点分析') || questionSource
+  const valueQuantification = extractScenarioSection(questionSource, '价值量化')
+  const summarySedimentation = extractScenarioSection(questionSource, '总结沉淀')
+  const answer = extractScenarioSection(answerSource, '核心指标&解决方案') || answerSource
+  const applicationMode = extractScenarioSection(answerSource, '成果应用方式')
+
+  return {
+    scene_first_value: sceneFirstValue,
+    question,
+    answer,
+    value_quantification: valueQuantification,
+    summary_sedimentation: summarySedimentation,
+    application_mode: applicationMode,
+  }
+}
+
 function updateExpectationField(cardId, field, value) {
   const card = findSelectedCard(cardId)
   if (!card) return
@@ -1162,9 +1201,9 @@ function updateScenarioField(cardId, field, value) {
   } else if (field === 'scene_first_value') {
     upsertChangeItem(card, '是否第一价值实现场景', '_widget_1744337240628', valueText)
   } else if (field === 'question') {
-    upsertChangeItem(card, '解决什么问题', 'solve_what_ques', valueText)
+    upsertChangeItem(card, '业务诉求/痛点分析', 'solve_what_ques', valueText)
   } else if (field === 'answer') {
-    upsertChangeItem(card, '怎样解决', 'solve_what_ans', valueText)
+    upsertChangeItem(card, '核心指标&解决方案', 'solve_what_ans', valueText)
   } else if (field === 'value_quantification') {
     upsertChangeItem(card, '价值量化', '_widget_1773296816191', valueText)
   } else if (field === 'summary_sedimentation') {
@@ -1173,8 +1212,8 @@ function updateScenarioField(cardId, field, value) {
     upsertChangeItem(card, '成果应用方式', '_widget_1737340360281', valueText)
   } else if (field === 'description') {
     const { question, answer } = splitScenarioDescription(valueText)
-    upsertChangeItem(card, '解决什么问题', 'solve_what_ques', question)
-    upsertChangeItem(card, '怎样解决', 'solve_what_ans', answer)
+    upsertChangeItem(card, '业务诉求/痛点分析', 'solve_what_ques', question)
+    upsertChangeItem(card, '核心指标&解决方案', 'solve_what_ans', answer)
   }
 }
 
@@ -1261,8 +1300,8 @@ async function addManualCard(targetForm) {
     : [
         { field_name: '场景标题', widget_name: 'title', new_value: '' },
         { field_name: '是否第一价值实现场景', widget_name: '_widget_1744337240628', new_value: '' },
-        { field_name: '解决什么问题', widget_name: 'solve_what_ques', new_value: '' },
-        { field_name: '怎样解决', widget_name: 'solve_what_ans', new_value: '' },
+        { field_name: '业务诉求/痛点分析', widget_name: 'solve_what_ques', new_value: '' },
+        { field_name: '核心指标&解决方案', widget_name: 'solve_what_ans', new_value: '' },
         { field_name: '价值量化', widget_name: '_widget_1773296816191', new_value: '' },
         { field_name: '总结沉淀', widget_name: '_widget_1773296816192', new_value: '' },
         { field_name: '成果应用方式', widget_name: '_widget_1737340360281', new_value: '' },
@@ -1318,8 +1357,8 @@ function switchCardType(type, index, event) {
       const newItems = []
       if (oldTarget === '场景表' && newTarget === '预期表') {
         const title = getVal('场景标题') || getVal('title')
-        const ques = getVal('解决什么问题') || getVal('solve_what_ques')
-        const ans  = getVal('怎样解决') || getVal('solve_what_ans')
+        const ques = getVal('业务诉求/痛点分析') || getVal('解决什么问题') || getVal('solve_what_ques')
+        const ans  = getVal('核心指标&解决方案') || getVal('核心指标/解决方案') || getVal('怎样解决') || getVal('solve_what_ans')
         const desc = [ques, ans].filter(Boolean).join('；')
         if (title) newItems.push({ field_name: '预期简述', widget_name: 'detail_brief', new_value: title })
         if (desc) newItems.push({ field_name: '预期详情', widget_name: 'detail', new_value: desc })
@@ -1327,7 +1366,7 @@ function switchCardType(type, index, event) {
         const brief = getVal('预期简述') || getVal('detail_brief')
         const detail = getVal('预期详情') || getVal('detail')
         if (brief) newItems.push({ field_name: '场景标题', widget_name: 'title', new_value: brief })
-        if (detail) newItems.push({ field_name: '解决什么问题', widget_name: 'solve_what_ques', new_value: detail })
+        if (detail) newItems.push({ field_name: '业务诉求/痛点分析', widget_name: 'solve_what_ques', new_value: detail })
         newItems.push({ field_name: '是否第一价值实现场景', widget_name: '_widget_1744337240628', new_value: '' })
         newItems.push({ field_name: '价值量化', widget_name: '_widget_1773296816191', new_value: '' })
         newItems.push({ field_name: '总结沉淀', widget_name: '_widget_1773296816192', new_value: '' })
@@ -1353,15 +1392,32 @@ async function markCard(type, index, action) {
   const key = `${type}_${index}_${action}`
   if (cardMarking.value.has(key)) return
   cardMarking.value.add(key)
+  const previousApproved = !!item.approved
+  const previousRejected = !!item.rejected
+  const previousReviewState = reviewState.get(item.operationId)
   if (action === 'approve') { item.approved = true; item.rejected = false; reviewState.set(item.operationId, 'approved') }
   else { item.approved = false; item.rejected = true; reviewState.set(item.operationId, 'rejected') }
   try {
-    await reviewCard({
+    const resp = await reviewCard({
       transcript_id: selectedId.value,
       card_id: item.operationId,
       action: action,
     })
-  } catch (e) { console.warn('同步审核状态失败', e) }
+    if (!resp?.success) {
+      item.approved = previousApproved
+      item.rejected = previousRejected
+      if (previousReviewState) reviewState.set(item.operationId, previousReviewState)
+      else reviewState.delete(item.operationId)
+      showMessage('审批状态同步失败，请刷新后重试', 'error')
+    }
+  } catch (e) {
+    item.approved = previousApproved
+    item.rejected = previousRejected
+    if (previousReviewState) reviewState.set(item.operationId, previousReviewState)
+    else reviewState.delete(item.operationId)
+    console.warn('同步审核状态失败', e)
+    showMessage(e?.response?.data?.detail || '审批状态同步失败，请重试', 'error')
+  }
   cardMarking.value.delete(key)
 }
 
@@ -1389,8 +1445,8 @@ async function submitCards() {
     } else if (item._targetForm === '场景表') {
       up['场景标题'] = item.title || ''
       if (item.scene_first_value) up['是否第一价值实现场景'] = item.scene_first_value
-      up['解决什么问题'] = item.question || splitScenarioDescription(item.description || '').question
-      up['怎样解决'] = item.answer || splitScenarioDescription(item.description || '').answer
+      up['业务诉求/痛点分析'] = item.question || splitScenarioDescription(item.description || '').question
+      up['核心指标&解决方案'] = item.answer || splitScenarioDescription(item.description || '').answer
       if (item.value_quantification) up['价值量化'] = item.value_quantification
       if (item.summary_sedimentation) up['总结沉淀'] = item.summary_sedimentation
       if (item.application_mode) up['成果应用方式'] = item.application_mode

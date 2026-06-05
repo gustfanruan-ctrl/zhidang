@@ -36,6 +36,13 @@ except ImportError:
 
 logger = logging.getLogger("zhidang.power_map")
 
+
+def _get_power_map_llm_model(cfg: SystemConfig) -> str:
+    model = (getattr(cfg, "power_map_llm_model", "") or "").strip()
+    if model:
+        return model
+    return (cfg.nl_chat_model or "qwen-plus").strip()
+
 # ═══════════════════════════════════════════════════════════
 #  Layout Constants (v4 — minimum intrusion)
 # ═══════════════════════════════════════════════════════════
@@ -3099,9 +3106,17 @@ def _get_power_map_config(cfg: SystemConfig) -> dict[str, str]:
 def _split_bi_auth(auth: dict[str, str] | None) -> tuple[dict[str, str], dict[str, str] | None]:
     if not auth:
         return {}, None
-    headers = dict(auth)
-    cookies = headers.pop("__cookies__", None)
-    return headers, cookies if isinstance(cookies, dict) else None
+    payload = dict(auth)
+    cookies = payload.pop("__cookies__", None)
+    if isinstance(cookies, dict):
+        return payload, cookies
+
+    # Newer CAS helper returns plain BI cookie dicts directly. Preserve an
+    # explicit Authorization header if present; treat the remaining keys as
+    # request cookies instead of arbitrary headers.
+    auth_header = payload.pop("Authorization", None)
+    headers = {"Authorization": auth_header} if auth_header else {}
+    return headers, payload or None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -7526,7 +7541,7 @@ async def _execute_harness(
         logger.warning("harness: LLM client unavailable, skipping: %s", exc)
         return {**summary, "skipped": True, "error": "llm_client_unavailable"}
 
-    model = cfg.nl_chat_model or "gpt-4o"
+    model = _get_power_map_llm_model(cfg)
     use_native_tools = True  # downgraded to False if endpoint rejects tools
 
     for round_idx in range(5):
@@ -8100,7 +8115,7 @@ async def _run_llm_tool_loop(
         )
         return
 
-    model = cfg.nl_chat_model or "gpt-4o"
+    model = _get_power_map_llm_model(cfg)
     executed = 0
     rounds_completed = 0
     use_native_tools = True
@@ -8738,7 +8753,7 @@ async def _execute_harness_stream(
         yield HarnessEvent(type="done", data={"skipped": True, "error": "llm_client_unavailable", "rounds": 0, "executed": 0})
         return
 
-    model = cfg.nl_chat_model or "gpt-4o"
+    model = _get_power_map_llm_model(cfg)
 
     layout_summary = _build_layout_summary(ctx)
     user_text = (
@@ -8819,7 +8834,7 @@ async def _fetch_from_external(
     async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
         url1 = f"{base}{get_path}"
         params1 = {"prj_type": "company", "prj_id": company_id}
-        meta = await _bi_get(client, url1, params=params1)
+        meta = await _bi_get(client, url1, params=params1, allow_com_id_fallback=True)
         logger.info("BI getInfo step1 keys: %s", list(meta.keys()) if isinstance(meta, dict) else type(meta).__name__)
 
         result: dict[str, Any] = {"nodes": [], "edges": []}
@@ -8835,7 +8850,7 @@ async def _fetch_from_external(
             # while opp versions carry the actual power map data.
             try:
                 params_opp = {"prj_type": "opp", "prj_id": company_id}
-                opp_meta = await _bi_get(client, url1, params=params_opp)
+                opp_meta = await _bi_get(client, url1, params=params_opp, allow_com_id_fallback=True)
                 if isinstance(opp_meta, dict):
                     vi = opp_meta.get("version_info") or []
                     if isinstance(vi, list) and vi:
@@ -8852,6 +8867,14 @@ async def _fetch_from_external(
             vi = meta.get("version_info") or []
             if isinstance(vi, list) and vi:
                 ver_id = vi[0].get("value") if isinstance(vi[0], dict) else vi[0]
+
+        logger.info(
+            "BI getInfo resolved version: prj_id=%s requested=%s resolved=%s meta_keys=%s",
+            company_id,
+            version or "",
+            ver_id or "",
+            list(result.keys()),
+        )
 
         if ver_id:
             params2 = {"prj_type": "opp", "ver_info": ver_id, "prj_id": company_id}
@@ -8970,7 +8993,7 @@ async def chat_power_map(
 
     try:
         client = _get_llm_client(cfg)
-        model = cfg.nl_chat_model or "qwen-plus"
+        model = _get_power_map_llm_model(cfg)
         temperature = cfg.temperature if cfg.temperature is not None else 0.3
         max_tokens = cfg.max_tokens or 4096
 
