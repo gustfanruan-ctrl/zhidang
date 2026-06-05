@@ -773,6 +773,17 @@ watch(() => customerStore.currentCustomer?.company_id, (id, prev) => {
   loadTasks()
   loadCustomerYuqiOptions(id)
 })
+
+watch(
+  () => selectedTaskIds.value.length,
+  (count) => {
+    if (!reviewData.value) return
+    if (count > 0) {
+      reviewData.value.follow_type = '线下跟进'
+    }
+  },
+)
+
 async function ensureCustomerContext() {
   if (customerStore.currentCustomer?.company_id) return
   customerStore.hydrateCurrentCustomer()
