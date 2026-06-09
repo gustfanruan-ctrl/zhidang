@@ -44,6 +44,12 @@ from .services.followup_review_template import (
     render_followup_review_record,
     save_followup_review_template,
 )
+from .services.followup_push import (
+    build_followup_push_payload,
+    extract_created_data_id,
+    get_followup_push_config,
+    push_followup_to_travel_server,
+)
 from .services.followup_yuqi import apply_followup_yuqi_fields, extract_followup_yuqi_id
 from .services.power_map_service import _build_merge_context, _ctx_to_getinfo_response, _drop_session, _execute_harness_stream, _fetch_from_external, _get_power_map_config, _get_session, _new_session_id, _node_from_bi_dict, _split_bi_auth, _store_session, chat_power_map, chat_power_map_v2, commit_power_map_session, confirm_power_map, discard_power_map_session, get_power_map, preview_power_map, relayout_power_map
 from .services import sandbox_infra
@@ -276,6 +282,7 @@ def _save_shared_cache(data: dict[str, Any]) -> None:
         logger.warning(f"写入共享缓存文件失败: {exc}")
 
 OPERATION_CARD_STORE: dict[str, list[dict[str, Any]]] = {}
+CHAT_SESSION_MESSAGES: dict[str, list[dict[str, str]]] = {}
 
 
 def _append_llm_line(transcript_id: str, line: str) -> None:
@@ -337,15 +344,43 @@ def _allowed_followup_stmt(user: dict[str, Any]):
 
 
 def _is_affirmative(text: str) -> bool:
-    normalized = text.strip().lower()
-    words = ["是", "确认", "好的", "执行", "ok", "yes", "y"]
-    return any(word in normalized for word in words)
+    normalized = re.sub(r"[\s,，。.!！?？:：;；'\"“”‘’()\[\]（）【】、\-_\/]+", "", text.strip().lower())
+    if not normalized or len(normalized) > 12:
+        return False
+    phrases = {
+        "是",
+        "是的",
+        "好",
+        "好的",
+        "可以",
+        "行",
+        "确认",
+        "确认执行",
+        "执行",
+        "ok",
+        "okay",
+        "yes",
+    }
+    return normalized in phrases
 
 
 def _is_negative(text: str) -> bool:
-    normalized = text.strip().lower()
-    words = ["否", "取消", "算了", "no", "n"]
-    return any(word in normalized for word in words)
+    normalized = re.sub(r"[\s,，。.!！?？:：;；'\"“”‘’()\[\]（）【】、\-_\/]+", "", text.strip().lower())
+    if not normalized or len(normalized) > 12:
+        return False
+    phrases = {
+        "否",
+        "不是",
+        "取消",
+        "取消吧",
+        "先取消",
+        "算了",
+        "不执行",
+        "不执行了",
+        "先不执行",
+        "no",
+    }
+    return normalized in phrases
 
 
 def _cleanup_pending_operations(now: datetime) -> None:
@@ -359,6 +394,19 @@ def _cleanup_pending_operations(now: datetime) -> None:
             expired.append(session_id)
     for key in expired:
         PENDING_CHAT_ACTIONS.pop(key, None)
+
+
+def _get_chat_session_history(session_id: str) -> list[dict[str, str]]:
+    return list(CHAT_SESSION_MESSAGES.get(session_id, []))
+
+
+def _append_chat_session_message(session_id: str, role: str, text: str) -> None:
+    cleaned = str(text or "").strip()
+    if not session_id or role not in {"user", "assistant"} or not cleaned:
+        return
+    history = list(CHAT_SESSION_MESSAGES.get(session_id, []))
+    history.append({"role": role, "text": cleaned})
+    CHAT_SESSION_MESSAGES[session_id] = history[-10:]
 
 
 _CHAT_WRITE_PLACEHOLDERS = ("需要补充", "待补充", "待确认", "暂缺", "未知")
@@ -425,6 +473,44 @@ def _build_missing_field_prompt(tool_name: str, tool_input: dict[str, Any], form
     if target_form == "预期表":
         return f"这条预期还缺少这些关键信息：{joined}。请先补充，我再帮你生成待确认写入。"
     return f"这个场景还缺少这些关键信息：{joined}。请先补充，我再帮你生成待确认写入。"
+
+
+def _build_chat_user_message(
+    company_id: str,
+    msg: str,
+    history: list[dict[str, Any]] | None,
+    pending_action: dict[str, Any] | None = None,
+) -> str:
+    lines = [f"company_id={company_id}", "用户请求：", msg.strip()]
+    normalized_history: list[str] = []
+    for item in list(history or [])[-8:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        text = str(item.get("text") or item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not text:
+            continue
+        speaker = "用户" if role == "user" else "助手"
+        normalized_history.append(f"{speaker}: {text}")
+    if normalized_history:
+        lines.extend(["", "最近对话历史：", *normalized_history])
+    if isinstance(pending_action, dict) and pending_action:
+        pending_tool_name = str(pending_action.get("tool_name") or "").strip()
+        pending_tool_input = normalize_chat_tool_input(pending_action.get("tool_input", {}) or {})
+        pending_snapshot = {
+            "tool_name": pending_tool_name,
+            "target_form": str(pending_tool_input.get("target_form") or ""),
+            "related_yuqi_id": str(pending_tool_input.get("related_yuqi_id") or ""),
+            "fields": pending_tool_input.get("fields") or {},
+        }
+        lines.extend(
+            [
+                "",
+                "当前有一条待补全的写入操作，请优先在这条操作上补齐缺失信息，不要新建一条无关操作：",
+                json.dumps(pending_snapshot, ensure_ascii=False),
+            ]
+        )
+    return "\n".join(lines)
 
 
 def fetch_customers_for_user(db: Session, user: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2945,6 +3031,16 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
     now = now_utc()
     _cleanup_pending_operations(now)
 
+    def _reply(reply_text: str, *, needs_confirmation: bool = False, **extra: Any) -> dict[str, Any]:
+        _append_chat_session_message(session_id, "user", msg)
+        _append_chat_session_message(session_id, "assistant", reply_text)
+        return {
+            "reply": reply_text,
+            "session_id": session_id,
+            "needs_confirmation": needs_confirmation,
+            **extra,
+        }
+
     if payload_data.get("confirm"):
         pending = PENDING_CHAT_ACTIONS.pop(session_id, None)
         if not pending:
@@ -2974,17 +3070,53 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
                 tool_input["customer_com_id"] = customer_write_context["customer_com_id"]
             if customer_write_context.get("customer_com_name"):
                 tool_input["customer_com_name"] = customer_write_context["customer_com_name"]
+        target_ids = list(tool_input.get("data_ids") or [])
+        if tool_input.get("data_id") and not target_ids:
+            target_ids = [str(tool_input.get("data_id") or "")]
         try:
             if tool_name == "create_customer_record":
                 result = await writer.create_record(entry_id=entry_id, data=build_jiandaoyun_payload(tool_input, form_config))
             elif tool_name == "update_customer_record":
-                result = await writer.update_record(
-                    entry_id=entry_id,
-                    data_id=str(tool_input.get("data_id") or ""),
-                    data=build_jiandaoyun_payload(tool_input, form_config),
-                )
+                payload = build_jiandaoyun_payload(tool_input, form_config)
+                if len(target_ids) > 1:
+                    results: list[dict[str, Any]] = []
+                    for data_id in target_ids:
+                        item_result = await writer.update_record(
+                            entry_id=entry_id,
+                            data_id=str(data_id or ""),
+                            data=payload,
+                        )
+                        results.append(item_result)
+                    failed = [item for item in results if not item.get("success")]
+                    result = {
+                        "success": not failed,
+                        "results": results,
+                        "data": {"_id": target_ids[0]} if target_ids else {},
+                        "detail": failed[0].get("detail") if failed else "",
+                        "error_code": failed[0].get("error_code") if failed else "",
+                    }
+                else:
+                    result = await writer.update_record(
+                        entry_id=entry_id,
+                        data_id=str(tool_input.get("data_id") or ""),
+                        data=payload,
+                    )
             elif tool_name == "delete_customer_record":
-                result = await writer.delete_record(entry_id=entry_id, data_id=str(tool_input.get("data_id") or ""))
+                if len(target_ids) > 1:
+                    results = []
+                    for data_id in target_ids:
+                        item_result = await writer.delete_record(entry_id=entry_id, data_id=str(data_id or ""))
+                        results.append(item_result)
+                    failed = [item for item in results if not item.get("success")]
+                    result = {
+                        "success": not failed,
+                        "results": results,
+                        "data": {"_id": target_ids[0]} if target_ids else {},
+                        "detail": failed[0].get("detail") if failed else "",
+                        "error_code": failed[0].get("error_code") if failed else "",
+                    }
+                else:
+                    result = await writer.delete_record(entry_id=entry_id, data_id=str(tool_input.get("data_id") or ""))
             else:
                 return {"reply": "未识别的待执行操作", "session_id": session_id, "needs_confirmation": False}
         except ChatPayloadValidationError as exc:
@@ -3036,37 +3168,43 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
             operator_id=str(user.get("user_id") or _user_name(user)),
         )
         op_label = OP_LABELS.get(tool_name, "写入")
+        result_count = len(target_ids) if target_ids else 1
+        count_suffix = f"{result_count}条记录" if result_count > 1 else f"到{target_form}"
         return {
-            "reply": f"已成功{op_label}到{target_form}",
+            "reply": f"已成功{op_label}{count_suffix}",
             "execute_result": {"status": "success", "jiandaoyun_id": (result.get("data") or {}).get("_id")},
             "session_id": session_id,
             "needs_confirmation": False,
             "refresh_profile": True,
         }
 
-    if _is_negative(msg):
+    existing_pending_action = PENDING_CHAT_ACTIONS.get(session_id)
+    has_pending_action = existing_pending_action is not None
+    if has_pending_action and _is_negative(msg):
         PENDING_CHAT_ACTIONS.pop(session_id, None)
-        return {"reply": "已取消当前待确认操作。", "session_id": session_id, "needs_confirmation": False}
+        return _reply("已取消当前待确认操作。", needs_confirmation=False)
+    if not has_pending_action and _is_negative(msg):
+        return _reply("当前没有待确认操作。", needs_confirmation=False)
 
     if not company_id:
-        return {"reply": "请先选择客户", "session_id": session_id, "needs_confirmation": False}
+        return _reply("请先选择客户", needs_confirmation=False)
     llm_cfg = _get_llm_runtime_config(cfg)
     provider = str(llm_cfg.get("provider") or "").strip().lower()
     if provider not in {"anthropic", "claude", "anthropic_compatible", "dashscope", "openai_compatible"}:
-        return {"reply": f"当前 provider={provider} 不支持 Chat Agent ToolCall", "session_id": session_id, "needs_confirmation": False}
+        return _reply(f"当前 provider={provider} 不支持 Chat Agent ToolCall", needs_confirmation=False)
     if not llm_cfg.get("api_key"):
-        return {"reply": "请先在配置页填写 LLM API Key", "session_id": session_id, "needs_confirmation": False}
+        return _reply("请先在配置页填写 LLM API Key", needs_confirmation=False)
     if provider in {"dashscope", "openai_compatible"} and not llm_cfg.get("base_url"):
-        return {"reply": "OpenAI-compatible 模式缺少 Base URL", "session_id": session_id, "needs_confirmation": False}
+        return _reply("OpenAI-compatible 模式缺少 Base URL", needs_confirmation=False)
     if provider in {"anthropic", "claude", "anthropic_compatible"} and AsyncAnthropic is None:
-        return {"reply": "当前环境不支持 Chat Agent ToolCall（缺少 anthropic SDK）", "session_id": session_id, "needs_confirmation": False}
+        return _reply("当前环境不支持 Chat Agent ToolCall（缺少 anthropic SDK）", needs_confirmation=False)
 
     runtime_cfg = get_jiandaoyun_runtime_config(cfg)
     forms_cfg = ((runtime_cfg.get("mapping") or {}).get("forms") or {})
     try:
         llm_client = _build_agent_llm_client(llm_cfg)
     except Exception as exc:
-        return {"reply": f"初始化 LLM 客户端失败：{exc}", "session_id": session_id, "needs_confirmation": False}
+        return _reply(f"初始化 LLM 客户端失败：{exc}", needs_confirmation=False)
     runner = AgentRunner(
         llm_client=llm_client,
         phase=AgentPhase.COMPARISON,
@@ -3081,9 +3219,17 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         write_form_configs=forms_cfg,
         write_preview_builder=build_preview_text,
     )
-    result = await runner.run(session_id=session_id, user_message=f"company_id={company_id}\n用户请求：{msg}")
+    result = await runner.run(
+        session_id=session_id,
+        user_message=_build_chat_user_message(
+            company_id,
+            msg,
+            _get_chat_session_history(session_id),
+            existing_pending_action,
+        ),
+    )
     if result.status == "max_iterations":
-        return {"reply": "无法完成操作，请检查指令", "session_id": session_id, "needs_confirmation": False}
+        return _reply("无法完成操作，请检查指令", needs_confirmation=False)
     if result.status != "success":
         # LLM auth/runtime failure fallback: keep chat confirm workflow usable.
         err = (result.message or "").lower()
@@ -3118,13 +3264,12 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
                 pending["tool_input"] = normalize_chat_tool_input(pending["tool_input"])
                 PENDING_CHAT_ACTIONS[session_id] = pending
                 preview = build_preview_text(pending["tool_name"], pending["tool_input"])
-                return {
-                    "reply": f"LLM 鉴权失败，已切换本地兜底预览。\n{preview}\n请点击“确认执行”继续。",
-                    "session_id": session_id,
-                    "needs_confirmation": True,
-                    "preview_data": pending["tool_input"],
-                }
-        return {"reply": result.message or f"处理失败：{result.status}", "session_id": session_id, "needs_confirmation": False}
+                return _reply(
+                    f"LLM 鉴权失败，已切换本地兜底预览。\n{preview}\n请点击“确认执行”继续。",
+                    needs_confirmation=True,
+                    preview_data=pending["tool_input"],
+                )
+        return _reply(result.message or f"处理失败：{result.status}", needs_confirmation=False)
     if runner.pending_write:
         pending = dict(runner.pending_write)
         pending_tool_name = str(pending.get("tool_name") or "")
@@ -3134,26 +3279,15 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         pending_form_config = forms_cfg.get(pending_target_form, {}) or {}
         missing_prompt = _build_missing_field_prompt(pending_tool_name, pending_tool_input, pending_form_config)
         if missing_prompt:
-            return {
-                "reply": missing_prompt,
-                "needs_confirmation": False,
-                "session_id": session_id,
-            }
+            pending["created_at"] = now
+            PENDING_CHAT_ACTIONS[session_id] = pending
+            return _reply(missing_prompt, needs_confirmation=False, preview_data=pending.get("tool_input"))
         pending["created_at"] = now
         PENDING_CHAT_ACTIONS[session_id] = pending
         preview = build_preview_text(pending["tool_name"], pending["tool_input"])
         reply = preview
-        return {
-            "reply": reply,
-            "needs_confirmation": True,
-            "preview_data": pending.get("tool_input"),
-            "session_id": session_id,
-        }
-    return {
-        "reply": result.final_text or "已完成查询。",
-        "needs_confirmation": False,
-        "session_id": session_id,
-    }
+        return _reply(reply, needs_confirmation=True, preview_data=pending.get("tool_input"))
+    return _reply(result.final_text or "已完成查询。", needs_confirmation=False)
 
 
 # ── 权利地图 API ──────────────────────────────────────
@@ -4368,6 +4502,8 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
 
     data_creator = user.get("integrate_id") or user.get("username", "")
     writer = JiandaoyunWriter(api_key=jiandaoyun_api_key, app_id=jiandaoyun_app_id, data_creator=data_creator)
+    client = JiandaoyunClient(api_key=jiandaoyun_api_key)
+    followup_push_cfg = get_followup_push_config(field_mappings)
     t_jdy = time.monotonic()
     jdy_trace = new_trace("rwj")
     emit("review_jdy_write_attempt", attempt_no=1)
@@ -4380,7 +4516,55 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
                  will_retry=False, final_status="error", degraded=True)
             raise HTTPException(status_code=500, detail=result.get("detail", "写入简道云失败"))
         emit("review_jdy_write_done", jdy_latency_ms=t_jdye, status="ok")
-        return {"message": "跟进记录已成功提交到简道云", "data": result.get("data")}
+        response_payload: dict[str, Any] = {
+            "message": "跟进记录已成功提交到简道云",
+            "data": result.get("data"),
+        }
+        if followup_push_cfg.get("enabled") and followup_push_cfg.get("url"):
+            created_data_id = extract_created_data_id(result)
+            if created_data_id:
+                try:
+                    created_record = await client.query_single_data(jiandaoyun_app_id, entry_id, created_data_id)
+                    push_payload = build_followup_push_payload(created_record.get("data", {}) or {})
+                    push_result = await push_followup_to_travel_server(
+                        url=str(followup_push_cfg.get("url") or ""),
+                        payload=push_payload,
+                        secret=str(followup_push_cfg.get("secret") or ""),
+                        timeout_seconds=float(followup_push_cfg.get("timeout_seconds") or 2.0),
+                    )
+                    response_payload["travel_push"] = push_result
+                    if push_result.get("ok"):
+                        emit("review_travel_push_done", status="ok", http_status=push_result.get("status_code", 0))
+                    else:
+                        emit(
+                            "review_travel_push_error",
+                            status="error",
+                            http_status=push_result.get("status_code", 0),
+                            error_msg=str(push_result.get("response_text", ""))[:200],
+                            degraded=True,
+                        )
+                        response_payload["warning"] = "简道云已写入成功，但出差库推送失败"
+                except Exception as push_exc:
+                    emit(
+                        "review_travel_push_error",
+                        status="error",
+                        error_type=type(push_exc).__name__,
+                        error_msg=str(push_exc)[:200],
+                        degraded=True,
+                    )
+                    response_payload["travel_push"] = {"ok": False, "error": str(push_exc)}
+                    response_payload["warning"] = "简道云已写入成功，但出差库推送失败"
+            else:
+                emit(
+                    "review_travel_push_error",
+                    status="error",
+                    error_type="missing_data_id",
+                    error_msg="create result missing data id",
+                    degraded=True,
+                )
+                response_payload["travel_push"] = {"ok": False, "error": "missing_data_id"}
+                response_payload["warning"] = "简道云已写入成功，但出差库推送失败"
+        return response_payload
     except Exception as exc:
         t_jdye = (time.monotonic() - t_jdy) * 1000
         if not isinstance(exc, HTTPException):

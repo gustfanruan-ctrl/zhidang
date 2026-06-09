@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from ..models import OperationCardLog
 from .jiandaoyun_writer import JiandaoyunWriter
 
+MAX_LOG_WIDGET_NAME_LEN = 100
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -39,6 +41,44 @@ def _scene_customer_name_widget(form_cfg: dict[str, Any]) -> str:
     if isinstance(configured, str):
         return configured
     return "_widget_1743993204408"
+
+
+def _build_log_widget_name(change_items: list[dict[str, Any]], fallback_widget_name: str = "") -> str:
+    widgets: list[str] = []
+    seen: set[str] = set()
+    for item in change_items:
+        widget = str(item.get("widget_name") or "").strip()
+        if not widget or widget in seen:
+            continue
+        seen.add(widget)
+        widgets.append(widget)
+    if not widgets and fallback_widget_name:
+        fallback = str(fallback_widget_name or "").strip()
+        if fallback:
+            widgets.append(fallback)
+    if not widgets:
+        return ""
+
+    joined = ",".join(widgets)
+    if len(joined) <= MAX_LOG_WIDGET_NAME_LEN:
+        return joined
+
+    kept: list[str] = []
+    for idx, widget in enumerate(widgets):
+        remaining = len(widgets) - idx - 1
+        suffix = f",...(+{remaining})" if remaining > 0 else ""
+        candidate = ",".join(kept + [widget]) + suffix
+        if len(candidate) > MAX_LOG_WIDGET_NAME_LEN:
+            break
+        kept.append(widget)
+
+    if kept:
+        remaining = len(widgets) - len(kept)
+        return ",".join(kept) if remaining <= 0 else f"{','.join(kept)},...(+{remaining})"
+
+    suffix = ",...(+1)"
+    limit = max(1, MAX_LOG_WIDGET_NAME_LEN - len(suffix))
+    return f"{widgets[0][:limit]}{suffix}"
 
 
 async def execute_cards(
@@ -78,6 +118,7 @@ async def execute_cards(
                     "new_value": card.get("new_value"),
                 }
             ]
+        log_widget_name = _build_log_widget_name(change_items, widget_name)
         execute_status = "pending"
         resp: dict[str, Any] = {}
         if safety_status in {"rejected", "forbidden"}:
@@ -132,15 +173,15 @@ async def execute_cards(
                     resp = {"success": False, "detail": "missing customer_id for lookup relation"}
                     db.add(
                         OperationCardLog(
-                            transcript_id=transcript_id,
-                            card_index=idx,
-                            target_form=target_form,
-                            operation_type=op_type,
-                            widget_name=",".join(str(item.get("widget_name") or "") for item in change_items if item.get("widget_name")),
-                            old_value=str([{ "field_name": item.get("field_name"), "old_value": item.get("old_value")} for item in change_items]),
-                            new_value=str([{ "field_name": item.get("field_name"), "new_value": item.get("new_value")} for item in change_items]),
-                            safety_status=safety_status,
-                            execute_status=execute_status,
+                        transcript_id=transcript_id,
+                        card_index=idx,
+                        target_form=target_form,
+                        operation_type=op_type,
+                        widget_name=log_widget_name,
+                        old_value=str([{ "field_name": item.get("field_name"), "old_value": item.get("old_value")} for item in change_items]),
+                        new_value=str([{ "field_name": item.get("field_name"), "new_value": item.get("new_value")} for item in change_items]),
+                        safety_status=safety_status,
+                        execute_status=execute_status,
                             jiandaoyun_response=resp,
                             executed_at=now_utc(),
                         )
@@ -171,7 +212,7 @@ async def execute_cards(
                                 card_index=idx,
                                 target_form=target_form,
                                 operation_type=op_type,
-                                widget_name=",".join(str(item.get("widget_name") or "") for item in change_items if item.get("widget_name")),
+                                widget_name=log_widget_name,
                                 old_value=str([{ "field_name": item.get("field_name"), "old_value": item.get("old_value")} for item in change_items]),
                                 new_value=str([{ "field_name": item.get("field_name"), "new_value": item.get("new_value")} for item in change_items]),
                                 safety_status=safety_status,
@@ -209,7 +250,7 @@ async def execute_cards(
                 card_index=idx,
                 target_form=target_form,
                 operation_type=op_type,
-                widget_name=",".join(str(item.get("widget_name") or "") for item in change_items if item.get("widget_name")) or widget_name,
+                widget_name=log_widget_name,
                 old_value=str([{ "field_name": item.get("field_name"), "old_value": item.get("old_value")} for item in change_items]) if change_items else (None if card.get("old_value") is None else str(card.get("old_value"))),
                 new_value=str([{ "field_name": item.get("field_name"), "new_value": item.get("new_value")} for item in change_items]) if change_items else (None if card.get("new_value") is None else str(card.get("new_value"))),
                 safety_status=safety_status,

@@ -69,6 +69,25 @@ def normalize_expectation_status_value(value: Any) -> str:
 
 def normalize_chat_tool_input(tool_input: dict[str, Any]) -> dict[str, Any]:
     normalized_tool_input = dict(tool_input or {})
+
+    raw_data_ids = normalized_tool_input.get("data_ids")
+    normalized_data_ids: list[str] = []
+    if isinstance(raw_data_ids, (list, tuple)):
+        for item in raw_data_ids:
+            value = str(item or "").strip()
+            if value and value not in normalized_data_ids:
+                normalized_data_ids.append(value)
+
+    single_data_id = str(normalized_tool_input.get("data_id") or "").strip()
+    if single_data_id and single_data_id not in normalized_data_ids:
+        normalized_data_ids.insert(0, single_data_id)
+
+    if normalized_data_ids:
+        normalized_tool_input["data_ids"] = normalized_data_ids
+        normalized_tool_input["data_id"] = normalized_data_ids[0]
+    else:
+        normalized_tool_input.pop("data_ids", None)
+
     raw_fields = normalized_tool_input.get("fields", {}) or {}
     normalized_fields: dict[str, Any] = {}
     for field_name, value in raw_fields.items():
@@ -126,11 +145,13 @@ def build_jiandaoyun_payload(tool_input: dict[str, Any], form_config: dict[str, 
 def build_preview_text(tool_name: str, tool_input: dict[str, Any]) -> str:
     normalized_tool_input = normalize_chat_tool_input(tool_input)
     target_form = str(normalized_tool_input.get("target_form") or "未知表单")
+    target_ids = list(normalized_tool_input.get("data_ids") or [])
     fields = normalized_tool_input.get("fields", {}) or {}
     primary_label = "预期简述" if target_form == "预期表" else ("场景标题" if target_form == "场景表" else "")
     primary_value = str(fields.get(primary_label) or "").strip()
     status_value = str(fields.get(EXPECTATION_STATUS_FIELD) or "").strip()
     changed_lines = [f"- **{field_name}**：{value}" for field_name, value in fields.items() if str(value).strip()]
+
     if tool_name == "create_customer_record":
         lines = [f"准备新增一条{target_form}记录。"]
         if primary_label and primary_value:
@@ -138,8 +159,15 @@ def build_preview_text(tool_name: str, tool_input: dict[str, Any]) -> str:
         lines.extend(changed_lines[:6] if not primary_value else [line for line in changed_lines if primary_label not in line][:5])
         lines.append("请确认是否执行？")
         return "\n".join(lines)
+
     if tool_name == "update_customer_record":
         lines = [f"已找到目标{target_form}记录："]
+        if target_ids:
+            lines.append(f"- **目标记录数**：{len(target_ids)}")
+            if len(target_ids) == 1:
+                lines.append(f"- **记录ID**：{target_ids[0]}")
+            else:
+                lines.append(f"- **记录ID**：{', '.join(target_ids)}")
         if primary_label and primary_value:
             lines.append(f"- **{primary_label}**：{primary_value}")
         if status_value:
@@ -152,8 +180,14 @@ def build_preview_text(tool_name: str, tool_input: dict[str, Any]) -> str:
             lines.append(line)
         lines.append("请确认是否执行？")
         return "\n".join(lines)
+
     if tool_name == "delete_customer_record":
+        if target_ids:
+            if len(target_ids) == 1:
+                return f"准备删除 {target_form} 记录 {target_ids[0]}。\n请确认是否执行？"
+            return f"准备删除 {target_form} 共 {len(target_ids)} 条记录：{', '.join(target_ids)}。\n请确认是否执行？"
         return f"准备删除 {target_form} 记录 {normalized_tool_input.get('data_id')}。\n请确认是否执行？"
+
     return "操作已准备好，等待用户确认执行"
 
 

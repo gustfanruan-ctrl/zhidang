@@ -724,7 +724,10 @@ async function generateReview() {
     showMessage('跟进记录生成成功，请审核后提交', 'success')
   } catch (error) {
     console.error('生成失败', error)
-    showMessage('生成失败：' + (error.response?.data?.detail || error.message), 'error')
+    const detail = error.response?.status === 413
+      ? '上传图片过大，请压缩图片或减少张数后重试'
+      : (error.response?.data?.detail || error.message)
+    showMessage('生成失败：' + detail, 'error')
     currentStep.value = 1
   } finally {
     generating.value = false

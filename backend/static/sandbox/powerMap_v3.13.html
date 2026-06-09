@@ -23,7 +23,8 @@ window.__SANDBOX_READY__ = false;
 (function() {
     var checkReady = function() {
         var svg = document.querySelector('.x6-graph-svg');
-        if (svg && svg.querySelectorAll('g.x6-node').length > 0) {
+        var container = document.getElementById('graphContainer');
+        if (svg && container && container.querySelectorAll('.x6-node').length > 0) {
             window.__SANDBOX_READY__ = true;
             window.dispatchEvent(new Event('sandbox-ready'));
             return true;

@@ -5187,10 +5187,12 @@ def _normalize_edges(ctx: MergeContext) -> None:
             src.department = tgt.name
             continue
 
-        # Container → container line edge: convert to nesting (smaller inside larger).
+        # Department-to-department edges are real visual relationships in BI.
+        # Do not rewrite them into nesting during load, otherwise commits will
+        # silently drop the line and later layout steps may wrongly re-parent
+        # aligned sibling departments as containers.
         if src.node_type == "dept" and tgt.node_type == "dept":
-            # Heuristic: line direction implies child → parent (source is inside target).
-            src.parent_dept_id = tgt.id
+            remaining.append(e)
             continue
 
         remaining.append(e)
@@ -8844,10 +8846,16 @@ async def _fetch_from_external(
                     result[key] = meta[key]
 
         ver_id = version
+        if not ver_id and isinstance(meta, dict):
+            vi = meta.get("version_info") or []
+            if isinstance(vi, list) and vi:
+                ver_id = vi[0].get("value") if isinstance(vi[0], dict) else vi[0]
+
         if not ver_id:
-            # Try prj_type=opp first for version info (customer success / opportunity view).
-            # The company-level version_info may only contain the main version,
-            # while opp versions carry the actual power map data.
+            # Fallback only when company-level version_info is missing.
+            # Some customers expose stale versions from the opp view; if the
+            # frontend did not explicitly choose a version, prefer the company
+            # version list as the single source of truth.
             try:
                 params_opp = {"prj_type": "opp", "prj_id": company_id}
                 opp_meta = await _bi_get(client, url1, params=params_opp, allow_com_id_fallback=True)
@@ -8855,18 +8863,11 @@ async def _fetch_from_external(
                     vi = opp_meta.get("version_info") or []
                     if isinstance(vi, list) and vi:
                         ver_id = vi[0].get("value") if isinstance(vi[0], dict) else vi[0]
-                if ver_id:
-                    # Also merge opp metadata into result
-                    for key in ("version_info", "contact_info", "company_name", "owner_info", "opp_info"):
+                    for key in ("contact_info", "company_name", "owner_info", "opp_info"):
                         if key in opp_meta and key not in result:
                             result[key] = opp_meta[key]
             except Exception:
-                logger.debug("prj_type=opp version lookup failed, falling back to company version_info")
-
-        if not ver_id and isinstance(meta, dict):
-            vi = meta.get("version_info") or []
-            if isinstance(vi, list) and vi:
-                ver_id = vi[0].get("value") if isinstance(vi[0], dict) else vi[0]
+                logger.debug("prj_type=opp version lookup failed after company version_info was empty")
 
         logger.info(
             "BI getInfo resolved version: prj_id=%s requested=%s resolved=%s meta_keys=%s",

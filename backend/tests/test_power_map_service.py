@@ -57,6 +57,7 @@ from app.services.power_map_service import (
     _build_rigid_groups_v2,
     _check_collision,
     _mark_geometry_anomalies,
+    _normalize_edges,
     _push_group_right,
     _find_safe_position,
     _post_submit_verify,
@@ -128,6 +129,25 @@ def sample_edges():
             "edge_remark": "",
         },
     ]
+
+
+def test_normalize_edges_preserves_department_relationship_lines():
+    left = PowerNode(id="dept-left", node_type="dept", name="市场部", x=0, y=0, w=700, h=350)
+    right = PowerNode(id="dept-right", node_type="dept", name="销售部", x=900, y=0, w=700, h=350)
+    ctx = MergeContext(
+        nodes_by_id={left.id: left, right.id: right},
+        nodes_by_name={left.name: left, right.name: right},
+        depts_by_name={left.name: left, right.name: right},
+        all_nodes=[left, right],
+        edges=[{"id": "edge-1", "source_id": left.id, "target_id": right.id, "edge_type": ""}],
+    )
+
+    _normalize_edges(ctx)
+
+    assert len(ctx.edges) == 1
+    assert ctx.edges[0]["id"] == "edge-1"
+    assert left.parent_dept_id == ""
+    assert right.parent_dept_id == ""
 
 
 # ═══════════════════════════════════════════════════
