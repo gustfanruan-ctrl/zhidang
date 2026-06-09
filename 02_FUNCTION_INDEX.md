@@ -1,0 +1,412 @@
+# 02_FUNCTION_INDEX
+
+> 说明：以下按 Step 1 的 Top 10 高频文件整理，优先列公开函数/方法与高频调用入口。
+
+## `backend/app/main.py`
+- `now_utc` L287
+  - body: return `datetime.now(timezone.utc)`
+  - calls: 本文件内广泛复用
+- `hash_company_id` L291
+  - body: `sha256(company_id or "")`
+  - calls: 本文件内复用
+- `prompt_version` L297
+  - body: `sha256(text)[:8]`
+  - calls: 本文件内复用
+- `fetch_customers_for_user` L355
+  - body: 通过 `_allowed_transcript_stmt(user)` 拉取客户
+  - calls: `customers_list`, `search_customers`, `company_search`
+- `build_raw_transcript_payload` L372
+  - body: 清理文本并生成转写 payload
+  - calls: `transcript_dingtalk_fetch`, `transcript_upload`
+- `ensure_system_config` L379
+  - body: 获取或创建 `SystemConfig(id=1)`
+  - calls: `on_startup`, `get_admin_config`, `save_admin_config`, `get_llm_config`, `save_llm_config`
+- `seed_jiandaoyun_mapping_if_missing` L399
+  - body: 补种简道云映射配置
+  - calls: `on_startup`
+- `get_jiandaoyun_runtime_config` L414
+  - body: 读取运行时简道云配置
+  - calls: `get_admin_config`, `admin_maintenance_health`, `admin_refresh_cache`
+- `refresh_customer_index_cache` L640
+  - body: 刷新客户索引缓存
+  - calls: `admin_refresh_cache`, `customers_list`
+- `sync_prompt_defaults` L760
+  - body: 同步 prompt 默认值
+  - calls: `on_startup`, `save_admin_config`
+- `render_prompt_template` L784
+  - body: 字符串变量替换渲染
+  - calls: `run_extraction_task`, `comparison_task`, `followup_service` 相关流程
+- `emit_event` L791
+  - body: 写审计/埋点事件
+  - calls: `review_action`, `review_session`, `customer_switch`, `transcript_*`, `analytics_*`
+- `require_auth` L811
+  - body: `Depends(get_current_user)` 包装
+  - calls: 大量 API 路由
+- `on_startup` L816
+  - body: 建表、补配置、同步 prompt、恢复操作卡
+  - calls: FastAPI startup
+- `health` L884
+  - body: 基础健康检查
+  - calls: `/api/v1/health`
+- `system_init` L890
+  - body: 系统初始化
+  - calls: `/api/v1/system/init`
+- `system_status` L905
+  - body: 返回是否已初始化
+  - calls: `/api/v1/system/status`
+- `login` L911
+  - body: JWT 登录
+  - calls: `/api/v1/auth/login`
+- `sso_generate` L941
+  - body: 生成 SSO token
+  - calls: `/api/v1/sso/generate`
+- `sso_entry` L947
+  - body: SSO 入口
+  - calls: `/api/v1/sso/entry`
+- `sso_cas_callback` L972
+  - doc: CAS SSO 回调 —— 验证 ST 并返回 JWT
+  - calls: `CAS` 流程入口
+- `sso_bi_callback` L1027
+  - doc: BI 登录链路回调：CAS验证 → 创建JWT → 经BI设cookie → 回到智档
+  - calls: `BI` 登录链路
+- `me` L1057
+  - body: 当前用户信息
+  - calls: `/api/v1/me`
+- `change_password` L1065
+  - body: 修改密码
+  - calls: `/api/v1/me/password`
+- `update_onboarding` L1089
+  - body: 更新引导状态
+  - calls: `/api/v1/me/onboarding`
+- `get_followup_review_template` L1100
+  - body: 读跟进审核模板
+  - calls: `/api/v1/me/followup-review-template`
+- `update_followup_review_template` L1105
+  - body: 写跟进审核模板
+  - calls: `/api/v1/me/followup-review-template`
+- `admin_users` L1113
+  - body: 用户列表
+  - calls: `/api/v1/admin/users`
+- `admin_user_create` L1123
+  - body: 创建用户
+  - calls: `/api/v1/admin/users`
+- `admin_user_update` L1136
+  - body: 更新用户
+  - calls: `/api/v1/admin/users/{id}`
+- `admin_user_patch` L1147
+  - body: 局部更新用户
+  - calls: `/api/v1/admin/users/{id}`
+- `admin_user_reset_pw` L1156
+  - body: 重置密码
+  - calls: `/api/v1/admin/users/{id}/reset-password`
+- `get_admin_config` L1168
+  - body: 读取管理配置
+  - calls: `/api/v1/admin/config`
+- `save_admin_config` L1194
+  - body: 保存管理配置
+  - calls: `/api/v1/admin/config`
+- `test_admin_config` L1229
+  - body: 测试管理配置
+  - calls: `/api/v1/admin/config/test`
+- `get_llm_config` L1234
+  - body: 读取 LLM 配置
+  - calls: `/api/v1/admin/llm-config`
+- `save_llm_config` L1255
+  - body: 保存 LLM 配置
+  - calls: `/api/v1/admin/llm-config`
+- `test_llm_config` L1274
+  - body: 测试 LLM 连通性
+  - calls: `/api/v1/admin/llm-config/test`
+- `admin_maintenance_health` L1380
+  - body: 维护健康检查
+  - calls: `/api/v1/admin/maintenance/health`
+- `admin_refresh_cache` L1424
+  - body: 强制刷新客户缓存
+  - calls: `/api/v1/admin/cache/refresh`
+- `admin_fetch_jiandaoyun_widgets` L1442
+  - body: 拉取简道云控件
+  - calls: `/api/v1/admin/jiandaoyun/widgets`
+- `root` L1487
+  - body: 前端入口
+  - calls: `/`
+- `spa_fallback_preview` L1495
+  - body: SPA preview fallback
+  - calls: `/_spa_fallback/*`
+- `transcript_upload` L1506
+  - body: 上传转写文件
+  - calls: `/api/v1/transcripts/upload`
+- `transcript_dingtalk_fetch` L1585
+  - body: 钉钉转写抓取
+  - calls: `/api/v1/transcripts/dingtalk/fetch`
+- `list_transcripts` L1617
+  - body: 转写列表
+  - calls: `/api/v1/transcripts`
+- `get_transcript` L1656
+  - body: 转写详情
+  - calls: `/api/v1/transcripts/{id}`
+- `list_followup_records` L1674
+  - body: 跟进记录列表
+  - calls: `/api/v1/followup-records`
+- `get_followup_record` L1711
+  - body: 跟进记录详情
+  - calls: `/api/v1/followup-records/{id}`
+- `fetch_followup_records` L1738
+  - body: 抓取并落库跟进记录
+  - calls: `/api/v1/followup-records/fetch`
+- `start_transcript_analysis` L1756
+  - body: 启动分析任务
+  - calls: `/api/v1/transcripts/{id}/analyze`
+- `customers_list` L1792
+  - doc: 获取客户列表，支持关键字搜索、分页和刷新缓存
+  - calls: `/api/v1/customers/list`
+- `company_search` L1965
+  - body: 公司搜索
+  - calls: `/api/v1/company/search`
+- `search_customers` L1983
+  - doc: 从本地缓存索引中模糊搜索客户，不再直查简道云
+  - calls: `/api/v1/customers/search`
+- `customer_profile` L2030
+  - body: 客户档案
+  - calls: `/api/v1/customers/profile`
+- `customer_yuqi` L2071
+  - body: 客户预期
+  - calls: `/api/v1/customers/yuqi`
+- `customer_changjing` L2093
+  - body: 客户场景
+  - calls: `/api/v1/customers/changjing`
+- `customer_contacts` L2115
+  - doc: Proxy CRM contact list for the customer's com_id.
+  - calls: `/api/v1/customers/contacts`
+- `customer_tasks` L2139
+  - doc: Proxy CRM task list for the customer's com_id.
+  - calls: `/api/v1/customers/tasks`
+- `customer_switch` L2165
+  - body: 切换当前客户
+  - calls: `/api/v1/customer/switch`
+- `agent_a_mock` L2176
+  - body: Agent-A mock
+  - calls: 本地调试/回退
+- `agent_b_mock` L2181
+  - body: Agent-B mock
+  - calls: 本地调试/回退
+- `build_user_message` L2218
+  - body: 组装多模态 user message
+  - calls: `run_extraction_task`
+- `run_extraction_task` L2308
+  - body: Agent-A 抽取任务
+  - calls: `extraction_task`
+- `extraction_task` L2431
+  - body: 抽取 API
+  - calls: `/api/v1/agent/extraction`
+- `comparison_task` L2456
+  - body: Agent-B 对比任务
+  - calls: `/api/v1/agent/comparison`
+- `review_action` L2513
+  - body: 审核动作埋点
+  - calls: `/api/v1/review/action`
+- `review_session` L2519
+  - body: 审核会话埋点
+  - calls: `/api/v1/review/session`
+- `operations_add` L2525
+  - doc: 手动新增操作卡片到审核队列。
+  - calls: `/api/v1/operations/add`
+- `operations_review` L2540
+  - body: 审核操作卡片
+  - calls: `/api/v1/operations/review`
+- `execute_operations` L2572
+  - body: 执行已通过操作卡片
+  - calls: `/api/v1/operations/execute`
+- `operations_status` L2677
+  - body: 操作状态查询
+  - calls: `/api/v1/operations/status`
+- `sandbox_render` L3257
+  - body: sandbox 页面渲染
+  - calls: `/sandbox/render`
+- `mock_bi_get_info` L3309
+  - body: mock BI 接口
+  - calls: sandbox mock
+- `mock_bi_update_expect` L3336
+  - body: mock BI 接口
+  - calls: sandbox mock
+- `mock_bi_update_scene` L3341
+  - body: mock BI 接口
+  - calls: sandbox mock
+- `mock_bi_judge_phone` L3346
+  - body: mock BI 接口
+  - calls: sandbox mock
+- `mock_bi_get_archive_jdy_id` L3356
+  - body: mock BI 接口
+  - calls: sandbox mock
+- `mock_bi_position_tree_combo` L3361
+  - body: mock BI 接口
+  - calls: sandbox mock
+- `mock_sandbox_watermark` L3373
+  - body: 生成水印
+  - calls: sandbox mock
+- `analytics_business_overview` L3410
+  - body: 业务概览
+  - calls: `/api/v1/analytics/business-overview`
+- `analytics_system_accuracy` L3416
+  - body: 系统准确率
+  - calls: `/api/v1/analytics/system-accuracy`
+- `analytics_prompt_compare` L3422
+  - body: prompt 对比
+  - calls: `/api/v1/analytics/prompt-compare`
+- `transcript_progress` L3427
+  - body: 转写进度
+  - calls: `/api/v1/transcripts/{id}/progress`
+- `analytics_export` L3520
+  - body: 导出分析数据
+  - calls: `/api/v1/analytics/export`
+- `api_health` L3526
+  - body: API 健康检查
+  - calls: `/api/health`
+- `spa_fallback` L3913
+  - body: SPA fallback
+  - calls: 前端路由兜底
+
+## `backend/app/services/followup_service.py`
+- `now_utc` L79
+  - body: `datetime.now(timezone.utc)`
+- `FollowupService` L167
+  - 角色: 跟进记录生成/提交的服务类
+  - calls: `followup` 流程主线
+
+## `frontend/src/stores/customer.js`
+- `cacheKey` L6
+  - body: 基于 token 生成缓存 key
+- `readStoredCustomer` L15
+  - body: 读取当前客户缓存
+- `normalizeCustomer` L24
+  - body: 归一化单个客户
+- `normalizeCustomers` L47
+  - body: 归一化客户列表
+- `persistLegacyCustomerId` L51
+  - body: 兼容写入旧客户 ID
+
+## `frontend/src/pages/TranscriptsPage.vue`
+- `toggleSourceMode` L601
+- `selectionKey` L609
+- `parseSelectionKey` L613
+- `toggleRowSelected` L618
+- `isRowSelected` L625
+- `onToggleSelectAll` L627
+- `triggerFileSelect` L664
+- `handleFileSelect` L666
+- `handleDrop` L671
+- `addFiles` L677
+- `removeFile` L693
+- `isImageFile` L695
+- `goPage` L740
+- `startPollIfNeeded` L847
+- `statusLabel` L873
+- `typeLabel` L878
+- `summaryText` L880
+- `formatDate` L885
+- `truncateLabel` L979
+- `yuqiSummary` L984
+- `scenarioRelatedValue` L1006
+- `findRelatedOption` L1012
+- `hasRelatedOption` L1016
+- `updateScenarioRelatedYuqi` L1020
+- `findSelectedCard` L1043
+- `upsertChangeItem` L1047
+- `splitScenarioDescription` L1061
+- `updateExpectationField` L1071
+- `updateScenarioField` L1086
+- `safeUUID` L1144
+- `loadCardsFromTranscript` L1148
+- `switchCardType` L1213
+- `isEditing` L1252
+- `toggleEdit` L1254
+- `showMessage` L1388
+- `formatFileSize` L1394
+
+## `frontend/src/pages/ReviewPage.vue`
+- `toggleSourceSelected` L441
+- `clearSourceSelection` L446
+- `switchSourceType` L476
+- `formatSourceDate` L485
+- `triggerFileInput` L510
+- `onDragOver` L511
+- `onDragLeave` L512
+- `onFileDrop` L513
+- `onFileSelect` L518
+- `validateFile` L523
+- `getFileType` L528
+- `handleFile` L532
+- `removeFile` L558
+- `truncateLabel` L566
+- `yuqiSummary` L570
+- `hasReviewYuqiOption` L573
+- `onContactChange` L615
+- `filterContacts` L624
+- `getLevel2Options` L635
+- `getLevel3Options` L639
+- `findTagId` L645
+- `updateTagLevel2` L651
+- `updateTagLevel3` L656
+- `addTag` L661
+- `removeTag` L666
+- `onTemplateSaved` L680
+- `showMessage` L754
+
+## `frontend/src/App.vue`
+- `logout` L240
+- `filterCustomers` L257
+- `onCustomerSelect` L265
+- `applyTheme` L351
+- `toggleTheme` L357
+
+## `frontend/src/pages/ChatPage.vue`
+- `safeUUID` L225
+- `formatValue` L246
+- `formatUserName` L252
+- `formatDateTime` L258
+
+## `frontend/src/pages/PowerMapPage.vue`
+- `formatHarnessArgValue` L479
+- `formatHarnessArgs` L495
+- `harnessOpCount` L502
+- `harnessDurationLabel` L508
+- `autoScrollHarness` L517
+- `startHarnessStream` L528
+- `ensureRound` L574
+- `finishStream` L582
+- `openBiLogin` L726
+- `onIframeLoad` L731
+- `onIframeError` L735
+- `onSandboxLoad` L768
+- `refreshSandbox` L772
+- `relayoutSiblings` L1051
+- `layoutSubtree` L1076
+- `resolveCollisions` L1121
+- `getDescendants` L1222
+- `getChildCount` L1237
+- `getDescendantCount` L1241
+- `nodeDims` L1264
+- `smartPorts` L1272
+- `getNodePort` L1287
+- `offsetPoint` L1301
+- `smoothPath` L1311
+- `getEdgePath` L1370
+- `getEdgeMidpoint` L1380
+- `toggleCollapse` L1414
+- `handleNodeClick` L1419
+- `setupZoom` L1424
+- `scrollChatToBottom` L1436
+- `switchVersion` L1483
+
+## `frontend/src/pages/PowerMapV2Page.vue`
+- `openBiLogin` L201
+- `onIframeLoad` L206
+- `onIframeError` L210
+- `switchVersion` L251
+
+## `frontend/src/pages/ChatV2Panel.vue`
+- `messageSummary` L272
+- `focusInput` L280
+- `formatJson` L288
+- `openImage` L297
+- `onTextareaKeydown` L301
+- `handleBeforeUnload` L349
