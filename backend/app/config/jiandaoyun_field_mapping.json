@@ -74,6 +74,7 @@
     },
     "预期表": {
       "entry_id": "69e836f10bc8756eea476a1f",
+      "business_id_widget": "yuqi_id",
       "lookup_customer": {
         "widget": "relation",
         "resolve_by": "comname_01"
@@ -135,6 +136,7 @@
         "widget": "_widget_1751435602563",
         "resolve_by": "_id"
       },
+      "related_business_id_widget": "expect_id",
       "field_mapping": {
         "场景标题": {
           "widget": "title",

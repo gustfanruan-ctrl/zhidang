@@ -842,6 +842,7 @@ class MergeContext:
     harness_cookies: dict[str, str] | None = None
     harness_headers: dict[str, str] | None = None
     last_screenshot_url: str = ""
+    last_layout_digest: dict[str, Any] | None = None
     # auto_fix_collisions call counter (spec caps at 2 per session).
     auto_fix_calls: int = 0
     # Repeated-failed-call detection: deque of (tool_name, frozenset(args items)) keys.
@@ -3702,16 +3703,57 @@ def _tool_check_geometry(ctx: MergeContext, node_ids: list[str]) -> dict[str, An
 
     data = {"nodes": ctx_nodes, "edges": ctx_edges}
     bboxes, _ = parse_ctx(data)
-    touched = set(node_ids)
+    requested = [str(nid).strip() for nid in node_ids if str(nid or "").strip()]
+
+    def _resolve_geometry_node(ref: str) -> tuple[str | None, dict[str, Any]]:
+        if ref in ctx.nodes_by_id:
+            n = ctx.nodes_by_id[ref]
+            return n.id, {"input": ref, "id": n.id, "name": n.name, "method": "id"}
+        if ref in ctx.nodes_by_name:
+            n = ctx.nodes_by_name[ref]
+            return n.id, {"input": ref, "id": n.id, "name": n.name, "method": "name"}
+        m = re.fullmatch(r"[nN](\d+)", ref)
+        if m:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < len(ctx.all_nodes):
+                n = ctx.all_nodes[idx]
+                return n.id, {"input": ref, "id": n.id, "name": n.name, "method": "ordinal"}
+        return None, {"input": ref, "method": "unresolved"}
+
+    resolved_node_ids: list[str] = []
+    resolved_refs: list[dict[str, Any]] = []
+    unknown_ids: list[str] = []
+    seen_resolved: set[str] = set()
+    for ref in requested:
+        resolved_id, meta = _resolve_geometry_node(ref)
+        resolved_refs.append(meta)
+        if not resolved_id:
+            unknown_ids.append(ref)
+            continue
+        if resolved_id not in seen_resolved:
+            resolved_node_ids.append(resolved_id)
+            seen_resolved.add(resolved_id)
+
+    if requested and not resolved_node_ids:
+        available = [
+            {"id": n.id, "name": n.name, "type": n.node_type}
+            for n in ctx.all_nodes[:40]
+        ]
+        return {
+            "ok": False,
+            "error": "unknown_node_ids",
+            "unknown_node_ids": unknown_ids[:40],
+            "hint": "node_ids 可使用真实节点 id、节点名称，或 n1/n2 这类按当前图结构顺序的一基序号。",
+            "available_nodes": available,
+            "resolved_node_refs": resolved_refs[:80],
+        }
+    touched = set(resolved_node_ids)
     report = find_conflicts(bboxes, ctx_edges, touched_ids=touched)
 
     conflicts = report.get("conflicts", [])
 
     # Detect zero-dimension nodes (BI data bug, rendering mismatch)
-    target_nodes = [
-        ctx.nodes_by_id.get(str(nid)) or ctx.nodes_by_name.get(str(nid))
-        for nid in node_ids
-    ]
+    target_nodes = [ctx.nodes_by_id.get(str(nid)) for nid in resolved_node_ids]
     for n in target_nodes:
         if n is None:
             continue
@@ -3732,10 +3774,25 @@ def _tool_check_geometry(ctx: MergeContext, node_ids: list[str]) -> dict[str, An
     }
 
     if not conflicts:
-        return {"ok": True, "conflicts": [], "summary": summary, "message": "检测通过，无冲突"}
-    return {"ok": True, "conflicts": conflicts, "summary": summary}
-
-
+        result = {
+            "ok": True,
+            "conflicts": [],
+            "summary": summary,
+            "message": "检测通过，无冲突；如果结构、连线和布局已满足用户要求，请直接结束，不要再次调用 check_geometry。",
+            "action": "finalize_if_user_request_satisfied",
+            "checked_node_count": len(resolved_node_ids),
+        }
+    else:
+        result = {"ok": True, "conflicts": conflicts, "summary": summary}
+    if unknown_ids:
+        result["ignored_unknown_node_ids"] = unknown_ids[:40]
+    if resolved_refs:
+        if conflicts:
+            result["resolved_node_refs"] = resolved_refs[:80]
+        else:
+            result["resolved_node_ref_sample"] = resolved_refs[:10]
+            result["resolved_node_ref_count"] = len(resolved_refs)
+    return result
 def _tool_auto_fix_collisions(ctx: MergeContext) -> dict[str, Any]:
     """Iteratively push overlapping nodes apart along the minimum separation vector.
     geometry_locked nodes never move. Runs up to 3 internal passes per call.
@@ -7668,6 +7725,534 @@ def _looks_like_tools_unsupported(exc: Exception) -> bool:
     )
 
 
+_SANDBOX_LAYOUT_DIGEST_JS = r"""
+() => {
+  const g = typeof graph !== 'undefined' ? graph : (window.graph || null);
+  if (!g || typeof g.getNodes !== 'function') {
+    return {ok: false, error: 'x6 graph unavailable'};
+  }
+  const readText = (node, selector) => {
+    try {
+      const v = node.attr(selector);
+      if (v && typeof v === 'object' && 'text' in v) return String(v.text || '');
+      if (typeof v === 'string') return v;
+    } catch (e) {}
+    return '';
+  };
+  const readCard = (node) => {
+    try {
+      return node.attr('.card') || {};
+    } catch (e) {
+      return {};
+    }
+  };
+  const toBox = (bbox) => ({
+    x: Math.round(Number(bbox.x || 0)),
+    y: Math.round(Number(bbox.y || 0)),
+    w: Math.round(Number(bbox.width || 0)),
+    h: Math.round(Number(bbox.height || 0)),
+  });
+  const nodes = g.getNodes().map((node) => {
+    const card = readCard(node);
+    const parent = typeof node.getParent === 'function' ? node.getParent() : null;
+    const parentCard = parent ? readCard(parent) : {};
+    return {
+      runtime_id: String(node.id || ''),
+      db_id: String(card.id || ''),
+      name: readText(node, '.name'),
+      rank: readText(node, '.rank'),
+      department: readText(node, '.dept_'),
+      type: String(card.card_type || ''),
+      box: toBox(node.getBBox()),
+      parent_runtime_id: parent ? String(parent.id || '') : '',
+      parent_db_id: String(parentCard.id || ''),
+      parent_name: parent ? readText(parent, '.name') : '',
+      combine_dept: String(card.combine_dept || ''),
+      visible: node.visible !== false,
+      z_index: typeof node.getZIndex === 'function' ? node.getZIndex() : null,
+    };
+  });
+  const nodesByRuntime = new Map(nodes.map((n) => [n.runtime_id, n]));
+  const edges = g.getEdges().map((edge) => {
+    let source = {};
+    let target = {};
+    try { source = edge.getSource() || {}; } catch (e) {}
+    try { target = edge.getTarget() || {}; } catch (e) {}
+    const sourceNode = nodesByRuntime.get(String(source.cell || '')) || {};
+    const targetNode = nodesByRuntime.get(String(target.cell || '')) || {};
+    let labels = [];
+    try { labels = edge.prop('labels') || []; } catch (e) {}
+    const remark = labels && labels[0] && labels[0].attrs && labels[0].attrs.label
+      ? String(labels[0].attrs.label.text || '')
+      : '';
+    return {
+      runtime_id: String(edge.id || ''),
+      source_runtime_id: String(source.cell || ''),
+      target_runtime_id: String(target.cell || ''),
+      source_db_id: sourceNode.db_id || '',
+      target_db_id: targetNode.db_id || '',
+      source_name: sourceNode.name || '',
+      target_name: targetNode.name || '',
+      source_port: String(source.port || ''),
+      target_port: String(target.port || ''),
+      edge_type: String(edge.prop('router') || ''),
+      remark,
+    };
+  });
+  const svg = document.querySelector('#graphContainer .x6-graph-svg');
+  let viewport = {};
+  if (svg && typeof svg.getBBox === 'function') {
+    try { viewport = toBox(svg.getBBox()); } catch (e) {}
+  }
+  return {ok: true, source: 'sandbox_x6', viewport, nodes, edges};
+}
+"""
+
+
+def _rect_overlap_area(a: dict[str, Any], b: dict[str, Any]) -> float:
+    ax1, ay1 = float(a.get("x") or 0), float(a.get("y") or 0)
+    ax2, ay2 = ax1 + float(a.get("w") or 0), ay1 + float(a.get("h") or 0)
+    bx1, by1 = float(b.get("x") or 0), float(b.get("y") or 0)
+    bx2, by2 = bx1 + float(b.get("w") or 0), by1 + float(b.get("h") or 0)
+    return max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
+
+
+def _rect_edges(box: dict[str, Any]) -> dict[str, float]:
+    x = float(box.get("x") or 0)
+    y = float(box.get("y") or 0)
+    w = float(box.get("w") or 0)
+    h = float(box.get("h") or 0)
+    return {
+        "left": x,
+        "top": y,
+        "right": x + w,
+        "bottom": y + h,
+        "w": w,
+        "h": h,
+        "cx": x + w / 2,
+        "cy": y + h / 2,
+    }
+
+
+def _axis_overlap_ratio(a1: float, a2: float, b1: float, b2: float) -> float:
+    overlap = max(0.0, min(a2, b2) - max(a1, b1))
+    denominator = max(1.0, min(abs(a2 - a1), abs(b2 - b1)))
+    return overlap / denominator
+
+
+def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
+
+
+def _rect_contains(outer: dict[str, Any], inner: dict[str, Any], *, tolerance: float = 2.0) -> bool:
+    ox, oy = float(outer.get("x") or 0), float(outer.get("y") or 0)
+    ow, oh = float(outer.get("w") or 0), float(outer.get("h") or 0)
+    ix, iy = float(inner.get("x") or 0), float(inner.get("y") or 0)
+    iw, ih = float(inner.get("w") or 0), float(inner.get("h") or 0)
+    return (
+        ix >= ox - tolerance
+        and iy >= oy - tolerance
+        and ix + iw <= ox + ow + tolerance
+        and iy + ih <= oy + oh + tolerance
+    )
+
+
+def _rect_overflow(outer: dict[str, Any], inner: dict[str, Any], *, tolerance: float = 2.0) -> dict[str, int]:
+    o = _rect_edges(outer)
+    i = _rect_edges(inner)
+    overflow = {
+        "left": max(0.0, o["left"] - i["left"]),
+        "right": max(0.0, i["right"] - o["right"]),
+        "top": max(0.0, o["top"] - i["top"]),
+        "bottom": max(0.0, i["bottom"] - o["bottom"]),
+    }
+    return {k: int(round(v)) for k, v in overflow.items() if v > tolerance}
+
+
+def _node_label(node: dict[str, Any]) -> str:
+    return str(node.get("name") or node.get("db_id") or node.get("runtime_id") or "")
+
+
+def _relative_zone(child: dict[str, Any], parent: dict[str, Any]) -> dict[str, Any]:
+    c = _rect_edges(child.get("box") or {})
+    p = _rect_edges(parent.get("box") or {})
+    parent_w = max(1.0, p["w"])
+    parent_h = max(1.0, p["h"])
+    xr = _clamp((c["cx"] - p["left"]) / parent_w)
+    yr = _clamp((c["cy"] - p["top"]) / parent_h)
+    horizontal = "left" if xr < 0.33 else ("right" if xr > 0.67 else "center")
+    vertical = "top" if yr < 0.33 else ("bottom" if yr > 0.67 else "middle")
+    return {
+        "horizontal": horizontal,
+        "vertical": vertical,
+        "center_ratio": [round(xr, 3), round(yr, 3)],
+        "margins": {
+            "left": int(round(c["left"] - p["left"])),
+            "right": int(round(p["right"] - c["right"])),
+            "top": int(round(c["top"] - p["top"])),
+            "bottom": int(round(p["bottom"] - c["bottom"])),
+        },
+        "overflow": _rect_overflow(parent.get("box") or {}, child.get("box") or {}),
+    }
+
+
+def _classify_spatial_relation(subject: dict[str, Any], reference: dict[str, Any]) -> dict[str, Any] | None:
+    """Classify subject's visual position relative to reference using box projections.
+
+    Cardinal relations are emitted only when the orthogonal projections overlap
+    enough to be trustworthy. Diagonal relations are explicit instead of forcing
+    a weak left/right/top/bottom label from center points.
+    """
+    s_box = subject.get("box") or {}
+    r_box = reference.get("box") or {}
+    s = _rect_edges(s_box)
+    r = _rect_edges(r_box)
+    if s["w"] <= 0 or s["h"] <= 0 or r["w"] <= 0 or r["h"] <= 0:
+        return None
+
+    if _rect_contains(r_box, s_box):
+        return {
+            "relation": "inside",
+            "confidence": 1.0,
+            "basis": {"container": _node_label(reference), "contained": _node_label(subject)},
+        }
+    if _rect_contains(s_box, r_box):
+        return {
+            "relation": "contains",
+            "confidence": 1.0,
+            "basis": {"container": _node_label(subject), "contained": _node_label(reference)},
+        }
+
+    overlap = _rect_overlap_area(s_box, r_box)
+    if overlap > 0:
+        min_area = max(1.0, min(s["w"] * s["h"], r["w"] * r["h"]))
+        return {
+            "relation": "overlaps",
+            "confidence": 1.0,
+            "basis": {"overlap_ratio": round(overlap / min_area, 3), "overlap_px": int(round(overlap))},
+        }
+
+    x_overlap_ratio = _axis_overlap_ratio(s["left"], s["right"], r["left"], r["right"])
+    y_overlap_ratio = _axis_overlap_ratio(s["top"], s["bottom"], r["top"], r["bottom"])
+    x_gap = max(s["left"] - r["right"], r["left"] - s["right"], 0.0)
+    y_gap = max(s["top"] - r["bottom"], r["top"] - s["bottom"], 0.0)
+    x_dir = "right_of" if s["left"] >= r["right"] else ("left_of" if s["right"] <= r["left"] else "")
+    y_dir = "below" if s["top"] >= r["bottom"] else ("above" if s["bottom"] <= r["top"] else "")
+    dx = s["cx"] - r["cx"]
+    dy = s["cy"] - r["cy"]
+
+    if x_dir and y_overlap_ratio >= 0.35:
+        confidence = _clamp(0.62 + y_overlap_ratio * 0.28 + min(x_gap / 400.0, 0.1))
+        return {
+            "relation": x_dir,
+            "confidence": round(confidence, 3),
+            "basis": {
+                "x_gap": int(round(x_gap)),
+                "orthogonal_overlap_ratio": round(y_overlap_ratio, 3),
+                "centers_delta": [int(round(dx)), int(round(dy))],
+            },
+        }
+    if y_dir and x_overlap_ratio >= 0.35:
+        confidence = _clamp(0.62 + x_overlap_ratio * 0.28 + min(y_gap / 400.0, 0.1))
+        return {
+            "relation": y_dir,
+            "confidence": round(confidence, 3),
+            "basis": {
+                "y_gap": int(round(y_gap)),
+                "orthogonal_overlap_ratio": round(x_overlap_ratio, 3),
+                "centers_delta": [int(round(dx)), int(round(dy))],
+            },
+        }
+
+    if x_dir and y_dir:
+        vertical = "upper" if y_dir == "above" else "lower"
+        horizontal = "right" if x_dir == "right_of" else "left"
+        primary = x_dir if x_gap > y_gap * 1.35 else (y_dir if y_gap > x_gap * 1.35 else "diagonal")
+        confidence = _clamp(0.45 + min(max(x_gap, y_gap) / 500.0, 0.25))
+        return {
+            "relation": f"{vertical}_{horizontal}_of",
+            "primary_axis": primary,
+            "confidence": round(confidence, 3),
+            "basis": {
+                "x_gap": int(round(x_gap)),
+                "y_gap": int(round(y_gap)),
+                "x_overlap_ratio": round(x_overlap_ratio, 3),
+                "y_overlap_ratio": round(y_overlap_ratio, 3),
+                "centers_delta": [int(round(dx)), int(round(dy))],
+            },
+        }
+
+    if x_dir or y_dir:
+        relation = x_dir or y_dir
+        confidence = 0.45 if max(x_overlap_ratio, y_overlap_ratio) < 0.2 else 0.55
+        return {
+            "relation": relation,
+            "confidence": confidence,
+            "basis": {
+                "x_gap": int(round(x_gap)),
+                "y_gap": int(round(y_gap)),
+                "x_overlap_ratio": round(x_overlap_ratio, 3),
+                "y_overlap_ratio": round(y_overlap_ratio, 3),
+                "centers_delta": [int(round(dx)), int(round(dy))],
+            },
+        }
+
+    return None
+
+
+def _augment_layout_digest(raw: dict[str, Any]) -> dict[str, Any]:
+    if not raw.get("ok"):
+        return raw
+
+    nodes = [n for n in raw.get("nodes", []) if isinstance(n, dict) and n.get("visible", True)]
+    edges = [e for e in raw.get("edges", []) if isinstance(e, dict)]
+    by_runtime = {str(n.get("runtime_id") or ""): n for n in nodes}
+    by_db = {str(n.get("db_id") or ""): n for n in nodes if n.get("db_id")}
+    child_names_by_parent: dict[str, list[str]] = {}
+    sibling_depts_by_parent: dict[str, list[dict[str, Any]]] = {}
+    problems: list[dict[str, Any]] = []
+    relations: list[dict[str, Any]] = []
+
+    for n in nodes:
+        n["anchors"] = {
+            "center": [
+                int(round(_rect_edges(n.get("box") or {})["cx"])),
+                int(round(_rect_edges(n.get("box") or {})["cy"])),
+            ],
+            "top_left": [
+                int(round(_rect_edges(n.get("box") or {})["left"])),
+                int(round(_rect_edges(n.get("box") or {})["top"])),
+            ],
+            "bottom_right": [
+                int(round(_rect_edges(n.get("box") or {})["right"])),
+                int(round(_rect_edges(n.get("box") or {})["bottom"])),
+            ],
+        }
+        parent_key = str(n.get("parent_runtime_id") or "")
+        if parent_key:
+            child_names_by_parent.setdefault(parent_key, []).append(str(n.get("name") or n.get("db_id") or ""))
+            parent = by_runtime.get(parent_key)
+            if parent:
+                n["zone_in_parent"] = _relative_zone(n, parent)
+            if parent and not _rect_contains(parent.get("box") or {}, n.get("box") or {}):
+                overflow = _rect_overflow(parent.get("box") or {}, n.get("box") or {})
+                problems.append({
+                    "level": "HIGH",
+                    "type": "child_outside_parent",
+                    "node": _node_label(n),
+                    "parent": _node_label(parent),
+                    "overflow": overflow,
+                    "zone_in_parent": n.get("zone_in_parent"),
+                })
+        elif str(n.get("type") or "") == "user":
+            problems.append({
+                "level": "MEDIUM",
+                "type": "user_without_visual_parent",
+                "node": _node_label(n),
+            })
+        if str(n.get("type") or "") == "dept":
+            sibling_key = parent_key or "root"
+            sibling_depts_by_parent.setdefault(sibling_key, []).append(n)
+
+    depts = [n for n in nodes if str(n.get("type") or "") == "dept"]
+    for sibling_key, sibling_depts in sibling_depts_by_parent.items():
+        sibling_parent_name = "root"
+        if sibling_key != "root":
+            sibling_parent_name = _node_label(by_runtime.get(sibling_key, {"runtime_id": sibling_key}))
+        for i, reference in enumerate(sibling_depts):
+            ref_box = reference.get("box") or {}
+            ref_area = max(1.0, float(ref_box.get("w") or 0) * float(ref_box.get("h") or 0))
+            for subject in sibling_depts[i + 1:]:
+                subject_box = subject.get("box") or {}
+                subject_area = max(1.0, float(subject_box.get("w") or 0) * float(subject_box.get("h") or 0))
+                relation_info = _classify_spatial_relation(subject, reference)
+                if not relation_info:
+                    continue
+                if relation_info.get("relation") == "overlaps":
+                    ratio = float((relation_info.get("basis") or {}).get("overlap_ratio") or 0)
+                    problems.append({
+                        "level": "CRITICAL" if ratio > 0.05 else "HIGH",
+                        "type": "dept_partial_overlap",
+                        "nodes": [_node_label(reference), _node_label(subject)],
+                        "overlap_ratio": ratio,
+                        "overlap_of_smaller_px": int(round(ratio * min(ref_area, subject_area))),
+                        "same_visual_parent": sibling_key,
+                        "same_visual_parent_name": sibling_parent_name,
+                    })
+                    continue
+                if relation_info.get("relation") in {"inside", "contains"}:
+                    problems.append({
+                        "level": "HIGH",
+                        "type": "dept_sibling_containment",
+                        "nodes": [_node_label(reference), _node_label(subject)],
+                        "relation": relation_info.get("relation"),
+                        "same_visual_parent": sibling_key,
+                        "same_visual_parent_name": sibling_parent_name,
+                    })
+                    continue
+                relations.append({
+                    "a": _node_label(subject),
+                    "relation": relation_info.get("relation"),
+                    "b": _node_label(reference),
+                    "same_visual_parent": sibling_key,
+                    "same_visual_parent_name": sibling_parent_name,
+                    "confidence": relation_info.get("confidence"),
+                    "primary_axis": relation_info.get("primary_axis"),
+                    "basis": relation_info.get("basis"),
+                })
+                if len(relations) >= 60:
+                    break
+            if len(relations) >= 60:
+                break
+        if len(relations) >= 60:
+            break
+
+    for n in nodes:
+        runtime_id = str(n.get("runtime_id") or "")
+        n["children"] = child_names_by_parent.get(runtime_id, [])[:40]
+        if n.get("combine_dept") and not n.get("parent_db_id"):
+            parent = by_db.get(str(n.get("combine_dept") or ""))
+            if parent:
+                n["declared_parent_name"] = parent.get("name") or parent.get("db_id")
+                problems.append({
+                    "level": "MEDIUM",
+                    "type": "declared_parent_not_rendered",
+                    "node": _node_label(n),
+                    "declared_parent": _node_label(parent),
+                })
+        elif n.get("combine_dept") and n.get("parent_db_id") and str(n.get("combine_dept")) != str(n.get("parent_db_id")):
+            declared = by_db.get(str(n.get("combine_dept") or ""))
+            problems.append({
+                "level": "HIGH",
+                "type": "declared_parent_mismatch",
+                "node": _node_label(n),
+                "visual_parent": str(n.get("parent_name") or n.get("parent_db_id") or ""),
+                "declared_parent": _node_label(declared or {"db_id": n.get("combine_dept")}),
+            })
+
+    raw["nodes"] = nodes
+    raw["edges"] = edges
+    raw["visual_problems"] = problems[:80]
+    raw["spatial_relations"] = relations
+    raw["summary"] = {
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "dept_count": len(depts),
+        "user_count": len([n for n in nodes if str(n.get("type") or "") == "user"]),
+        "problem_count": len(problems),
+    }
+    return raw
+
+
+async def _extract_sandbox_layout_digest(page: Any) -> dict[str, Any]:
+    raw = await page.evaluate(_SANDBOX_LAYOUT_DIGEST_JS)
+    if not isinstance(raw, dict):
+        return {"ok": False, "error": "layout digest returned non-object"}
+    return _augment_layout_digest(raw)
+
+
+def _ctx_layout_digest(ctx: MergeContext, *, source: str = "ctx_fallback") -> dict[str, Any]:
+    raw_nodes: list[dict[str, Any]] = []
+    for n in ctx.all_nodes:
+        parent = ctx.nodes_by_id.get(n.parent_dept_id or "")
+        raw_nodes.append({
+            "runtime_id": n.id,
+            "db_id": n.id,
+            "name": n.name,
+            "rank": getattr(n, "position", "") or "",
+            "department": getattr(n, "department", "") or "",
+            "type": "dept" if n.node_type == "dept" else "user",
+            "box": {"x": round(n.x), "y": round(n.y), "w": round(n.w), "h": round(n.h)},
+            "parent_runtime_id": parent.id if parent else "",
+            "parent_db_id": parent.id if parent else "",
+            "parent_name": parent.name if parent else "",
+            "combine_dept": n.parent_dept_id or "",
+            "visible": True,
+            "z_index": None,
+        })
+    raw_edges: list[dict[str, Any]] = []
+    for e in ctx.edges:
+        sid = str(e.get("source_id") or "")
+        tid = str(e.get("target_id") or "")
+        src = ctx.nodes_by_id.get(sid)
+        tgt = ctx.nodes_by_id.get(tid)
+        raw_edges.append({
+            "runtime_id": str(e.get("id") or ""),
+            "source_runtime_id": sid,
+            "target_runtime_id": tid,
+            "source_db_id": sid,
+            "target_db_id": tid,
+            "source_name": src.name if src else "",
+            "target_name": tgt.name if tgt else "",
+            "source_port": str(e.get("source_port") or ""),
+            "target_port": str(e.get("target_port") or ""),
+            "edge_type": str(e.get("edge_type") or ""),
+            "remark": str(e.get("edge_remark") or ""),
+        })
+    return _augment_layout_digest({
+        "ok": True,
+        "source": source,
+        "viewport": {},
+        "nodes": raw_nodes,
+        "edges": raw_edges,
+    })
+def _layout_digest_to_text(digest: dict[str, Any] | None) -> str:
+    if not digest or not digest.get("ok"):
+        return ""
+    summary = digest.get("summary") or {}
+    lines = [
+        "## 当前沙箱视觉摘要",
+        "来源: sandbox_x6_layout_digest",
+        (
+            f"节点={summary.get('node_count', 0)} 部门={summary.get('dept_count', 0)} "
+            f"人员={summary.get('user_count', 0)} 连线={summary.get('edge_count', 0)} "
+            f"问题={summary.get('problem_count', 0)}"
+        ),
+    ]
+    problems = digest.get("visual_problems") or []
+    if problems:
+        lines.append("视觉/几何问题:")
+        for p in problems[:20]:
+            lines.append("  " + json.dumps(p, ensure_ascii=False, separators=(",", ":")))
+
+    nodes = digest.get("nodes") or []
+    if nodes:
+        lines.append("渲染节点:")
+        for n in nodes[:80]:
+            box = n.get("box") or {}
+            parent = n.get("parent_name") or n.get("declared_parent_name") or "root"
+            children = n.get("children") or []
+            child_suffix = f" children={children[:12]}" if children else ""
+            zone = n.get("zone_in_parent") or {}
+            zone_suffix = ""
+            if zone:
+                overflow = zone.get("overflow") or {}
+                zone_suffix = (
+                    f" zone={zone.get('vertical')}/{zone.get('horizontal')}"
+                    f" margins={zone.get('margins')}"
+                )
+                if overflow:
+                    zone_suffix += f" overflow={overflow}"
+            lines.append(
+                f"  {n.get('name') or n.get('db_id')}({n.get('type')}) "
+                f"box=[{box.get('x')},{box.get('y')},{box.get('w')},{box.get('h')}] "
+                f"visual_parent={parent}{zone_suffix}{child_suffix}"
+            )
+
+    relations = digest.get("spatial_relations") or []
+    if relations:
+        lines.append("部门相对位置:")
+        for r in relations[:20]:
+            confidence = r.get("confidence")
+            primary = f" primary={r.get('primary_axis')}" if r.get("primary_axis") else ""
+            basis = r.get("basis")
+            basis_text = f" basis={json.dumps(basis, ensure_ascii=False, separators=(',', ':'))}" if basis else ""
+            lines.append(
+                f"  {r.get('a')} {r.get('relation')} {r.get('b')}"
+                f" confidence={confidence}{primary}{basis_text}"
+            )
+    return "\n".join(lines)
+
 def _build_graph_state_text(ctx: MergeContext) -> str:
     """Build a compact text summary of the graph for LLM consumption."""
     node_name_map = {n.id: n.name for n in ctx.all_nodes}
@@ -7710,6 +8295,9 @@ def _build_graph_state_text(ctx: MergeContext) -> str:
     if edge_lines:
         parts.append(f"连线 ({len(ctx.edges)}):")
         parts.extend(edge_lines)
+    layout_text = _layout_digest_to_text(ctx.last_layout_digest)
+    if layout_text:
+        parts.append(layout_text)
     return "\n".join(parts)
 
 
@@ -8118,6 +8706,14 @@ async def _run_llm_tool_loop(
         return
 
     model = _get_power_map_llm_model(cfg)
+    llm_profile = _power_map_llm_profile(model)
+    kimi_mode = _power_map_kimi_mode()
+    screenshot_policy = _power_map_screenshot_policy(llm_profile)
+    system_prompt = _augment_power_map_system_prompt(
+        system_prompt,
+        profile=llm_profile,
+        screenshot_policy=screenshot_policy,
+    )
     executed = 0
     rounds_completed = 0
     use_native_tools = True
@@ -8127,6 +8723,19 @@ async def _run_llm_tool_loop(
 
     round_idx = 0
     consecutive_no_tool_rounds = 0
+    batch_execution_streaks = {
+        "single_create_node": 0,
+        "single_set_parent": 0,
+        "single_fit_container": 0,
+        "single_create_edge": 0,
+        "single_arrange": 0,
+        "single_move_dept": 0,
+    }
+    repeated_tool_signature = ""
+    repeated_tool_signature_count = 0
+    visual_phase_seen = False
+    kimi_execution_plan_text = ""
+    direct_execution_user_text = user_text
 
     async def _maybe_queue_review(exit_reason: str) -> None:
         """Fire-and-forget 异步效率评审，不阻塞主流程。"""
@@ -8145,6 +8754,221 @@ async def _run_llm_tool_loop(
                 logger.info("[DEBUG-J review] queued review for session=%s rounds=%d", session_id, rounds_completed)
         except Exception as exc:
             logger.warning("[DEBUG-J review] failed to queue: %s", exc)
+
+    if llm_profile == "kimi" and kimi_mode == "auto":
+        planning_graph_state = _build_graph_state_text(ctx)
+        kimi_cleaned_instruction_text = ""
+        async for cleaning_event in _run_power_map_semantic_cleaning_round(
+            client=client,
+            model=model,
+            user_text=user_text,
+            graph_state_text=planning_graph_state,
+            session_id=session_id,
+        ):
+            if cleaning_event.get("type") == "progress":
+                yield HarnessEvent(
+                    type="thinking",
+                    data={"text_chunk": str(cleaning_event.get("text") or "")},
+                )
+            elif cleaning_event.get("type") == "done":
+                kimi_cleaned_instruction_text = str(cleaning_event.get("cleaned_text") or "")
+        if not kimi_cleaned_instruction_text:
+            logger.warning(
+                "[DEBUG-J] KIMI_CLEAN_FALLBACK session=%s reason=empty_or_failed_cleaning",
+                session_id,
+            )
+        planning_instruction_text = kimi_cleaned_instruction_text or user_text
+        planning_instruction_label = (
+            "用户语义清洗后指令" if kimi_cleaned_instruction_text else "用户原始指令"
+        )
+        planning_kimi_thinking = _should_use_kimi_planning_thinking(mode=kimi_mode)
+        async for planning_event in _run_kimi_planning_round(
+            client=client,
+            model=model,
+            instruction_text=planning_instruction_text,
+            instruction_label=planning_instruction_label,
+            graph_state_text=planning_graph_state,
+            session_id=session_id,
+            kimi_thinking=planning_kimi_thinking,
+        ):
+            if planning_event.get("type") == "progress":
+                yield HarnessEvent(
+                    type="thinking",
+                    data={"text_chunk": str(planning_event.get("text") or "")},
+                )
+            elif planning_event.get("type") == "done":
+                kimi_execution_plan_text = str(planning_event.get("plan_text") or "")
+        if not kimi_execution_plan_text:
+            logger.warning(
+                "[DEBUG-J] KIMI_PLAN_FALLBACK session=%s reason=empty_or_failed_plan",
+                session_id,
+            )
+            if kimi_cleaned_instruction_text:
+                direct_execution_user_text = kimi_cleaned_instruction_text
+        elif _power_map_radial_fast_path_enabled():
+            radial_intent: PowerMapIntent | None = None
+            radial_fallback_reason = ""
+            radial_intent_source = "planning"
+            try:
+                radial_intent = _parse_power_map_intent(kimi_execution_plan_text)
+                validation = _validate_power_map_intent(radial_intent, ctx)
+                if not validation.get("ok"):
+                    radial_fallback_reason = "intent_validation_failed: " + "; ".join(
+                        str(e) for e in validation.get("errors", [])[:5]
+                    )
+                else:
+                    plan_errors = _validate_power_map_plan_against_instruction(
+                        instruction_text=planning_instruction_text,
+                        intent=radial_intent,
+                    )
+                    if plan_errors:
+                        radial_fallback_reason = "plan_consistency_failed: " + "; ".join(
+                            str(e) for e in plan_errors[:5]
+                        )
+                    elif not _should_try_radial_fast_path(radial_intent, ctx):
+                        radial_fallback_reason = "intent_not_large_or_structural_enough"
+            except Exception as exc:
+                radial_fallback_reason = f"intent_parse_failed: {exc}"
+
+            if radial_fallback_reason:
+                recovery_candidates: list[tuple[str, str]] = []
+                if kimi_cleaned_instruction_text:
+                    recovery_candidates.append(("cleaned_instruction", kimi_cleaned_instruction_text))
+                if (
+                    user_text
+                    and "{" in user_text
+                    and user_text != kimi_cleaned_instruction_text
+                    and user_text != kimi_execution_plan_text
+                ):
+                    recovery_candidates.append(("raw_user_json", user_text))
+
+                for candidate_label, candidate_text in recovery_candidates:
+                    if not candidate_text or candidate_text == kimi_execution_plan_text:
+                        continue
+                    candidate_reason = ""
+                    candidate_intent: PowerMapIntent | None = None
+                    try:
+                        candidate_intent = _parse_power_map_intent(candidate_text)
+                        candidate_validation = _validate_power_map_intent(candidate_intent, ctx)
+                        if not candidate_validation.get("ok"):
+                            candidate_reason = "intent_validation_failed: " + "; ".join(
+                                str(e) for e in candidate_validation.get("errors", [])[:5]
+                            )
+                        else:
+                            candidate_plan_errors = _validate_power_map_plan_against_instruction(
+                                instruction_text=candidate_text,
+                                intent=candidate_intent,
+                            )
+                            if candidate_plan_errors:
+                                candidate_reason = "plan_consistency_failed: " + "; ".join(
+                                    str(e) for e in candidate_plan_errors[:5]
+                                )
+                            elif not _should_try_radial_fast_path(candidate_intent, ctx):
+                                candidate_reason = "intent_not_large_or_structural_enough"
+                    except Exception as exc:
+                        candidate_reason = f"intent_parse_failed: {exc}"
+
+                    if candidate_intent is not None and not candidate_reason:
+                        logger.warning(
+                            "[DEBUG-J] RADIAL_FAST_PATH_RECOVER session=%s source=%s previous_reason=%s",
+                            session_id,
+                            candidate_label,
+                            radial_fallback_reason[:300],
+                        )
+                        radial_intent = candidate_intent
+                        radial_fallback_reason = ""
+                        radial_intent_source = candidate_label
+                        break
+                    logger.info(
+                        "[DEBUG-J] RADIAL_FAST_PATH_RECOVER_REJECT session=%s source=%s reason=%s",
+                        session_id,
+                        candidate_label,
+                        candidate_reason[:300],
+                    )
+
+            if radial_intent is not None and not radial_fallback_reason:
+                logger.info(
+                    "[DEBUG-J] RADIAL_FAST_PATH_REQ session=%s source=%s planned_departments=%d planned_people=%d planned_edges=%d",
+                    session_id,
+                    radial_intent_source,
+                    len(radial_intent.departments),
+                    len(radial_intent.people),
+                    len(radial_intent.report_edges),
+                )
+                yield HarnessEvent(
+                    type="round_start",
+                    data=_attach_sandbox_url({"round": 1, "session_id": session_id, "radial_fast_path": True}),
+                )
+                yield HarnessEvent(
+                    type="thinking",
+                    data={"text_chunk": "执行阶段：结构计划已通过校验，正在批量生成部门、人员、树状辐射布局和汇报连线...\n"},
+                )
+                radial_result = _apply_power_map_intent_to_context(ctx, radial_intent)
+                if radial_result.get("ok"):
+                    try:
+                        screenshot_url = await screenshot_fn(ctx)
+                        ctx.last_screenshot_url = screenshot_url
+                    except Exception as exc:
+                        logger.warning("llm-loop: radial fast path screenshot failed: %s", exc)
+                    graph_state_payload = _tool_get_graph_state(ctx)
+                    graph_state_payload["session_id"] = session_id
+                    graph_state_payload["radial_fast_path"] = True
+                    yield HarnessEvent(type="graph_state", data=graph_state_payload)
+                    ctx.harness_can_commit = True
+                    ctx.harness_last_error = ""
+                    logger.info(
+                        "[DEBUG-J] RADIAL_FAST_PATH_RESP session=%s ok=true nodes=%d edges=%d estimated_dept_sizes=%s",
+                        session_id,
+                        len(ctx.all_nodes),
+                        len(ctx.edges),
+                        json.dumps(radial_result.get("estimated_dept_sizes", {}), ensure_ascii=False)[:1000],
+                    )
+                    logger.info(
+                        "[DEBUG-J] 12.EXIT total_rounds=%d total_tool_calls=%d converged=%s total_ms=%d final_nodes=%d final_edges=%d exit_reason=%s",
+                        1,
+                        0,
+                        "true",
+                        int((time.time() - _loop_start_ms) * 1000),
+                        len(ctx.all_nodes),
+                        len(ctx.edges),
+                        "radial_fast_path",
+                    )
+                    yield HarnessEvent(
+                        type="done",
+                        data=_attach_sandbox_url({
+                            "rounds": 1,
+                            "executed": int(radial_result.get("created", 0)) + int(radial_result.get("edge_created", 0)),
+                            "session_id": session_id,
+                            "converged": True,
+                            "exit_reason": "radial_fast_path",
+                            "radial_fast_path": True,
+                            "radial_layout_used": True,
+                            "relayout_called": False,
+                        }),
+                    )
+                    return
+                radial_fallback_reason = str(radial_result.get("fallback_reason") or "apply_failed")
+
+            logger.warning(
+                "[DEBUG-J] RADIAL_FAST_PATH_FALLBACK session=%s reason=%s",
+                session_id,
+                radial_fallback_reason,
+            )
+            plan_looks_like_structured_intent = "{" in (kimi_execution_plan_text or "")
+            should_discard_plan = radial_fallback_reason.startswith(
+                ("intent_validation_failed", "plan_consistency_failed")
+            ) or (
+                radial_fallback_reason.startswith("intent_parse_failed")
+                and plan_looks_like_structured_intent
+            )
+            if should_discard_plan:
+                logger.warning(
+                    "[DEBUG-J] KIMI_PLAN_DISCARD session=%s reason=%s",
+                    session_id,
+                    radial_fallback_reason,
+                )
+                kimi_execution_plan_text = ""
+                direct_execution_user_text = kimi_cleaned_instruction_text or user_text
 
     while round_idx < max_rounds:
         rounds_completed = round_idx + 1
@@ -8174,13 +8998,27 @@ async def _run_llm_tool_loop(
                 "[DEBUG-J] 10.GRAPH_STATE round=%d text_chars=%d preview=%s",
                 rounds_completed, len(gs_text), gs_text[:500],
             )
+            if llm_profile == "kimi" and kimi_execution_plan_text:
+                first_round_content = _build_kimi_execution_seed(
+                    graph_state_text=gs_text,
+                    plan_text=kimi_execution_plan_text,
+                )
+            else:
+                first_round_content = [
+                    {"type": "text", "text": direct_execution_user_text},
+                    {"type": "text", "text": gs_text},
+                ]
+                if _should_attach_screenshot(
+                    policy=screenshot_policy,
+                    rounds_completed=rounds_completed,
+                    initial=True,
+                ):
+                    first_round_content.append(
+                        {"type": "image_url", "image_url": {"url": ctx.last_screenshot_url}}
+                    )
             accumulated_messages.append({
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {"type": "text", "text": gs_text},
-                    {"type": "image_url", "image_url": {"url": ctx.last_screenshot_url}},
-                ],
+                "content": first_round_content,
             })
 
         active_system_prompt = system_prompt if use_native_tools else (
@@ -8191,6 +9029,8 @@ async def _run_llm_tool_loop(
         tool_calls: list[tuple[str, dict[str, Any]]] = []
         partial_tool_calls: dict[int, dict[str, Any]] = {}
         assistant_text = ""
+        assistant_reasoning = ""
+        response_usage: dict[str, Any] | None = None
         assistant_tool_calls: list[dict[str, Any]] = []
 
         llm_messages = _build_llm_messages(accumulated_messages, rounds_completed)
@@ -8224,9 +9064,21 @@ async def _run_llm_tool_loop(
             _last_msg_preview = " ".join(_parts)[:500]
         else:
             _last_msg_preview = str(_last_content or "")[:500]
+        kimi_thinking = _should_enable_kimi_thinking(
+            profile=llm_profile,
+            mode=kimi_mode,
+            rounds_completed=rounds_completed,
+            batch_execution_streaks=batch_execution_streaks,
+            visual_phase_seen=visual_phase_seen,
+        )
+        request_max_tokens = _power_map_request_max_tokens(
+            profile=llm_profile,
+            kimi_thinking=kimi_thinking,
+        )
         logger.info(
-            "[DEBUG-J] 4.LLM_REQ round=%d model=%s msg_count=%d total_chars=%d est_tokens=%d max_tokens=%d last_msg_role=%s last_msg_preview=%s",
-            rounds_completed, model, len(llm_messages), text_chars, approx_tokens, 8192,
+            "[DEBUG-J] 4.LLM_REQ round=%d model=%s profile=%s kimi_mode=%s thinking_enabled=%s screenshot_policy=%s msg_count=%d total_chars=%d est_tokens=%d max_tokens=%d last_msg_role=%s last_msg_preview=%s",
+            rounds_completed, model, llm_profile, kimi_mode, kimi_thinking,
+            screenshot_policy, len(llm_messages), text_chars, approx_tokens, request_max_tokens,
             _last_msg_role, _last_msg_preview,
         )
         _llm_req_start = time.time()
@@ -8235,7 +9087,8 @@ async def _run_llm_tool_loop(
                 "model": model,
                 "system": active_system_prompt,
                 "messages": llm_messages,
-                "max_tokens": 32768,
+                "max_tokens": request_max_tokens,
+                "kimi_thinking": kimi_thinking,
             }
             if use_native_tools:
                 stream_kwargs["tools"] = tools
@@ -8243,7 +9096,13 @@ async def _run_llm_tool_loop(
             async for chunk in client.messages_create_with_history_stream(**stream_kwargs):
                 if use_native_tools and isinstance(chunk, dict):
                     ctype = chunk.get("type")
-                    if ctype == "content":
+                    if ctype == "reasoning":
+                        assistant_reasoning += str(chunk.get("text") or "")
+                    elif ctype == "usage":
+                        usage = chunk.get("usage")
+                        if isinstance(usage, dict):
+                            response_usage = usage
+                    elif ctype == "content":
                         text_piece = str(chunk.get("text") or "")
                         if text_piece:
                             assistant_text += text_piece
@@ -8294,7 +9153,8 @@ async def _run_llm_tool_loop(
             logger.info(
                 "[DEBUG-J] 5.LLM_RESP round=%d status=%s latency_ms=%d finish_reason=%s thinking_preview=%s tool_calls_summary=%s token_usage=%s",
                 rounds_completed, "ok", _llm_latency_ms, _finish_reason,
-                _thinking_preview, _tool_calls_summary, "unknown",
+                _thinking_preview, _tool_calls_summary,
+                json.dumps(response_usage, ensure_ascii=False) if response_usage else "unknown",
             )
         except Exception as exc:
             _llm_latency_ms = int((time.time() - _llm_req_start) * 1000)
@@ -8303,6 +9163,13 @@ async def _run_llm_tool_loop(
                 rounds_completed, "error", _llm_latency_ms, "exception",
                 str(exc)[:500], "0: []", "unknown",
             )
+            if llm_profile == "kimi" and kimi_thinking and _looks_like_kimi_adapter_error(exc):
+                logger.warning(
+                    "[DEBUG-J] kimi fallback: disabling thinking after adapter error round=%d error=%s",
+                    rounds_completed, str(exc)[:300],
+                )
+                kimi_mode = "instant"
+                continue
             if use_native_tools and _looks_like_tools_unsupported(exc):
                 logger.warning(
                     "llm-loop: tools param unsupported, falling back to text protocol: %s",
@@ -8378,6 +9245,8 @@ async def _run_llm_tool_loop(
             "role": "assistant",
             "content": assistant_text or None,
         }
+        if assistant_reasoning:
+            assistant_msg["reasoning_content"] = assistant_reasoning
         if assistant_tool_calls:
             assistant_msg["tool_calls"] = assistant_tool_calls
         accumulated_messages.append(assistant_msg)
@@ -8389,8 +9258,53 @@ async def _run_llm_tool_loop(
 
         if not tool_calls:
             consecutive_no_tool_rounds += 1
-            if consecutive_no_tool_rounds == 1:
+            requires_more_tools = _assistant_text_requires_more_tools(assistant_text)
+            required_edge_source_text = f"{user_text}\n{kimi_execution_plan_text}"
+            missing_required_edges = (
+                "汇报" in required_edge_source_text
+                and len(ctx.edges) == 0
+                and len(ctx.all_nodes) > 1
+            )
+            if (requires_more_tools or missing_required_edges) and consecutive_no_tool_rounds <= 2:
+                logger.info(
+                    "[DEBUG-J] 5b.NO_TOOL_CONTINUE round=%d consecutive_no_tool=%d missing_required_edges=%s preview=%s",
+                    rounds_completed, consecutive_no_tool_rounds, missing_required_edges,
+                    (assistant_text or "")[:300],
+                )
+                accumulated_messages.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "你刚才说明还要继续执行下一步，但本轮没有发出任何工具调用。"
+                            "如果仍需创建汇报关系、调整布局、fit 容器或继续完善组织架构，"
+                            "下一轮必须直接调用对应工具；只有确认结构、连线和布局都完成时，才可以不调用工具。"
+                            "当前用户请求包含汇报关系时，edges=0 不能视为完成。"
+                        ),
+                    }],
+                })
+                round_idx += 1
+                continue
+            if consecutive_no_tool_rounds == 1 or not (requires_more_tools or missing_required_edges):
                 exit_reason = "natural_converge"
+                if _should_attach_screenshot(
+                    policy=screenshot_policy,
+                    rounds_completed=rounds_completed,
+                    final_check=True,
+                ):
+                    _ss_start = time.time()
+                    try:
+                        final_screenshot = await screenshot_fn(ctx)
+                        ctx.last_screenshot_url = final_screenshot
+                        logger.info(
+                            "[DEBUG-J] 11.SCREENSHOT round=%d ok=%s base64_len=%d render_ms=%d policy=%s final_check=%s",
+                            rounds_completed, True,
+                            len(final_screenshot) if isinstance(final_screenshot, str) else 0,
+                            int((time.time() - _ss_start) * 1000),
+                            screenshot_policy, True,
+                        )
+                    except Exception as exc:
+                        logger.warning("llm-loop: final screenshot check failed: %s", exc)
                 logger.info(
                     "[DEBUG-J] 12.EXIT total_rounds=%d total_tool_calls=%d converged=%s total_ms=%d final_nodes=%d final_edges=%d exit_reason=%s",
                     rounds_completed, _total_tool_invocations, "true",
@@ -8443,10 +9357,28 @@ async def _run_llm_tool_loop(
 
         _total_tool_invocations += len(tool_calls)
         consecutive_no_tool_rounds = 0
+        batch_execution_streaks = _update_batch_execution_streaks(
+            batch_execution_streaks,
+            tool_calls,
+        )
+        current_tool_signature = ""
+        if len(tool_calls) == 1:
+            current_tool_signature = _tool_call_signature(tool_calls[0][0], tool_calls[0][1])
+            if current_tool_signature == repeated_tool_signature:
+                repeated_tool_signature_count += 1
+            else:
+                repeated_tool_signature = current_tool_signature
+                repeated_tool_signature_count = 1
+        else:
+            repeated_tool_signature = ""
+            repeated_tool_signature_count = 0
+        if _tool_calls_need_visual_feedback(tool_calls):
+            visual_phase_seen = True
         for name, args in tool_calls:
             yield HarnessEvent(type="tool_call", data={"tool": name, "args": args})
 
         tool_results: list[dict[str, Any]] = []
+        relayout_executed_ok = False
         for i, (name, args) in enumerate(tool_calls):
             _args_str = json.dumps(args, ensure_ascii=False)
             if len(_args_str) > 500:
@@ -8479,11 +9411,15 @@ async def _run_llm_tool_loop(
             ok = bool(result.get("ok"))
             if ok:
                 executed += 1
+                if name == "relayout":
+                    relayout_executed_ok = True
             tc_id = assistant_tool_calls[i]["id"] if i < len(assistant_tool_calls) else ""
             llm_content = (
                 json.dumps(result, ensure_ascii=False)
                 if isinstance(result, dict) else str(result)
             )
+            if name == "relayout":
+                llm_content = _compress_tool_result_content(name, llm_content)
             tool_results.append({
                 "role": "tool",
                 "tool_call_id": tc_id,
@@ -8522,6 +9458,92 @@ async def _run_llm_tool_loop(
                 result.get("error", "") if isinstance(result, dict) else "",
             )
 
+            no_op = isinstance(result, dict) and bool(result.get("no_op"))
+            if no_op and repeated_tool_signature_count >= 2:
+                ctx.harness_can_commit = False
+                ctx.harness_last_error = "repeated_noop_tool_call"
+                logger.warning(
+                    "[DEBUG-J] 9.REPEATED_NOOP_STOP round=%d count=%d signature=%s",
+                    rounds_completed, repeated_tool_signature_count, current_tool_signature[:300],
+                )
+                logger.info(
+                    "[DEBUG-J] 12.EXIT total_rounds=%d total_tool_calls=%d converged=%s total_ms=%d final_nodes=%d final_edges=%d exit_reason=%s",
+                    rounds_completed, _total_tool_invocations, "false",
+                    int((time.time() - _loop_start_ms) * 1000),
+                    len(ctx.all_nodes), len(ctx.edges), "repeated_noop_tool_call",
+                )
+                yield HarnessEvent(
+                    type="done",
+                    data=_attach_sandbox_url({
+                        "skipped": False,
+                        "error": "repeated_noop_tool_call",
+                        "message": "模型重复执行已完成的工具操作，已提前停止以避免空转。",
+                        "rounds": rounds_completed,
+                        "executed": executed,
+                        "session_id": session_id,
+                        "exit_reason": "repeated_noop_tool_call",
+                    }),
+                )
+                return
+            geometry_clean = (
+                name == "check_geometry"
+                and ok
+                and isinstance(result, dict)
+                and int((result.get("summary") or {}).get("total") or 0) == 0
+            )
+            if geometry_clean and repeated_tool_signature_count >= 2:
+                ctx.harness_can_commit = True
+                ctx.harness_last_error = ""
+                exit_reason = "geometry_check_converged"
+                logger.info(
+                    "[DEBUG-J] 9.REPEATED_GEOMETRY_CLEAN_STOP round=%d count=%d signature=%s",
+                    rounds_completed, repeated_tool_signature_count, current_tool_signature[:300],
+                )
+                logger.info(
+                    "[DEBUG-J] 12.EXIT total_rounds=%d total_tool_calls=%d converged=%s total_ms=%d final_nodes=%d final_edges=%d exit_reason=%s",
+                    rounds_completed, _total_tool_invocations, "true",
+                    int((time.time() - _loop_start_ms) * 1000),
+                    len(ctx.all_nodes), len(ctx.edges), exit_reason,
+                )
+                await _maybe_queue_review(exit_reason)
+                yield HarnessEvent(
+                    type="done",
+                    data=_attach_sandbox_url({
+                        "rounds": rounds_completed,
+                        "executed": executed,
+                        "session_id": session_id,
+                        "converged": True,
+                        "exit_reason": exit_reason,
+                    }),
+                )
+                return
+            if repeated_tool_signature_count >= 5:
+                ctx.harness_can_commit = False
+                ctx.harness_last_error = "repeated_tool_call"
+                logger.warning(
+                    "[DEBUG-J] 9.REPEATED_TOOL_STOP round=%d count=%d signature=%s",
+                    rounds_completed, repeated_tool_signature_count, current_tool_signature[:300],
+                )
+                logger.info(
+                    "[DEBUG-J] 12.EXIT total_rounds=%d total_tool_calls=%d converged=%s total_ms=%d final_nodes=%d final_edges=%d exit_reason=%s",
+                    rounds_completed, _total_tool_invocations, "false",
+                    int((time.time() - _loop_start_ms) * 1000),
+                    len(ctx.all_nodes), len(ctx.edges), "repeated_tool_call",
+                )
+                yield HarnessEvent(
+                    type="done",
+                    data=_attach_sandbox_url({
+                        "skipped": False,
+                        "error": "repeated_tool_call",
+                        "message": "模型连续重复相同工具操作，已提前停止以避免空转。",
+                        "rounds": rounds_completed,
+                        "executed": executed,
+                        "session_id": session_id,
+                        "exit_reason": "repeated_tool_call",
+                    }),
+                )
+                return
+
         for tr in tool_results:
             accumulated_messages.append(tr)
 
@@ -8556,57 +9578,107 @@ async def _run_llm_tool_loop(
         graph_state_payload["session_id"] = session_id
         yield HarnessEvent(type="graph_state", data=graph_state_payload)
 
-        _ss_start = time.time()
-        try:
-            screenshot_url = await screenshot_fn(ctx)
-            ctx.last_screenshot_url = screenshot_url
+        include_next_screenshot = _should_attach_screenshot(
+            policy=screenshot_policy,
+            rounds_completed=rounds_completed,
+            tool_calls=tool_calls,
+        )
+        screenshot_url = ctx.last_screenshot_url
+        if include_next_screenshot:
+            _ss_start = time.time()
+            try:
+                screenshot_url = await screenshot_fn(ctx)
+                ctx.last_screenshot_url = screenshot_url
+                logger.info(
+                    "[DEBUG-J] 11.SCREENSHOT round=%d ok=%s base64_len=%d render_ms=%d policy=%s",
+                    rounds_completed, True,
+                    len(screenshot_url) if isinstance(screenshot_url, str) else 0,
+                    int((time.time() - _ss_start) * 1000),
+                    screenshot_policy,
+                )
+            except Exception as exc:
+                logger.info(
+                    "[DEBUG-J] 11.SCREENSHOT round=%d ok=%s base64_len=%d render_ms=%d policy=%s",
+                    rounds_completed, False, 0,
+                    int((time.time() - _ss_start) * 1000),
+                    screenshot_policy,
+                )
+                logger.warning(
+                    "llm-loop: screenshot refresh failed before round %d: %s",
+                    rounds_completed + 1, exc,
+                )
+                ctx.harness_can_commit = False
+                ctx.harness_last_error = "screenshot_failed"
+                logger.info(
+                    "[DEBUG-J] 12.EXIT total_rounds=%d total_tool_calls=%d converged=%s total_ms=%d final_nodes=%d final_edges=%d exit_reason=%s",
+                    rounds_completed, _total_tool_invocations, "false",
+                    int((time.time() - _loop_start_ms) * 1000),
+                    len(ctx.all_nodes), len(ctx.edges), "error",
+                )
+                yield HarnessEvent(
+                    type="done",
+                    data=_attach_sandbox_url({
+                        "rounds": rounds_completed,
+                        "executed": executed,
+                        "session_id": session_id,
+                        "exit_reason": "error",
+                    }),
+                )
+                return
+        else:
             logger.info(
-                "[DEBUG-J] 11.SCREENSHOT round=%d ok=%s base64_len=%d render_ms=%d",
-                rounds_completed, True,
-                len(screenshot_url) if isinstance(screenshot_url, str) else 0,
-                int((time.time() - _ss_start) * 1000),
+                "[DEBUG-J] 11.SCREENSHOT round=%d ok=%s base64_len=%d render_ms=%d policy=%s",
+                rounds_completed, "skipped", 0, 0, screenshot_policy,
             )
-        except Exception as exc:
-            logger.info(
-                "[DEBUG-J] 11.SCREENSHOT round=%d ok=%s base64_len=%d render_ms=%d",
-                rounds_completed, False, 0,
-                int((time.time() - _ss_start) * 1000),
-            )
-            logger.warning(
-                "llm-loop: screenshot refresh failed before round %d: %s",
-                rounds_completed + 1, exc,
-            )
-            ctx.harness_can_commit = False
-            ctx.harness_last_error = "screenshot_failed"
-            logger.info(
-                "[DEBUG-J] 12.EXIT total_rounds=%d total_tool_calls=%d converged=%s total_ms=%d final_nodes=%d final_edges=%d exit_reason=%s",
-                rounds_completed, _total_tool_invocations, "false",
-                int((time.time() - _loop_start_ms) * 1000),
-                len(ctx.all_nodes), len(ctx.edges), "error",
-            )
-            yield HarnessEvent(
-                type="done",
-                data=_attach_sandbox_url({
-                    "rounds": rounds_completed,
-                    "executed": executed,
-                    "session_id": session_id,
-                    "exit_reason": "error",
-                }),
-            )
-            return
 
         gs_text = _build_graph_state_text(ctx)
         logger.info(
             "[DEBUG-J] 10.GRAPH_STATE round=%d text_chars=%d preview=%s",
             rounds_completed, len(gs_text), gs_text[:500],
         )
-        accumulated_messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": gs_text},
-                {"type": "image_url", "image_url": {"url": screenshot_url}},
-            ],
-        })
+        batch_nudge = _build_batch_execution_nudge(batch_execution_streaks)
+        if batch_nudge:
+            logger.info(
+                "[DEBUG-J] 10b.BATCH_NUDGE round=%d create_streak=%d set_parent_streak=%d fit_streak=%d edge_streak=%d arrange_streak=%d move_streak=%d preview=%s",
+                rounds_completed,
+                int(batch_execution_streaks.get("single_create_node", 0)),
+                int(batch_execution_streaks.get("single_set_parent", 0)),
+                int(batch_execution_streaks.get("single_fit_container", 0)),
+                int(batch_execution_streaks.get("single_create_edge", 0)),
+                int(batch_execution_streaks.get("single_arrange", 0)),
+                int(batch_execution_streaks.get("single_move_dept", 0)),
+                batch_nudge[:300],
+            )
+        next_round_content: list[dict[str, Any]] = []
+        if batch_nudge:
+            next_round_content.append({"type": "text", "text": batch_nudge})
+        next_round_content.append({"type": "text", "text": gs_text})
+        if include_next_screenshot and screenshot_url:
+            next_round_content.append({"type": "image_url", "image_url": {"url": screenshot_url}})
+        if relayout_executed_ok:
+            before_count = len(accumulated_messages)
+            before_chars = sum(len(str(m.get("content", ""))) for m in accumulated_messages)
+            accumulated_messages = _build_post_relayout_compacted_messages(
+                graph_state_text=gs_text,
+                plan_text=kimi_execution_plan_text,
+                batch_nudge=batch_nudge,
+                screenshot_url=screenshot_url if include_next_screenshot else "",
+            )
+            after_chars = sum(len(str(m.get("content", ""))) for m in accumulated_messages)
+            logger.info(
+                "[DEBUG-J] 10c.POST_RELAYOUT_COMPACT round=%d before_msgs=%d after_msgs=%d before_chars=%d after_chars=%d screenshot=%s",
+                rounds_completed,
+                before_count,
+                len(accumulated_messages),
+                before_chars,
+                after_chars,
+                bool(screenshot_url if include_next_screenshot else ""),
+            )
+        else:
+            accumulated_messages.append({
+                "role": "user",
+                "content": next_round_content,
+            })
 
         round_idx += 1
 
@@ -8633,8 +9705,6 @@ async def _run_llm_tool_loop(
             ),
         }),
     )
-
-
 async def _execute_harness_stream(
     company_id: str,
     prj_id: str,
@@ -9832,6 +10902,37 @@ async def _sandbox_screenshot(
         "[screenshot] ready=%s svg_count=%d node_count=%d session=%s",
         ready_result, svg_count, node_count, session_id,
     )
+    try:
+        digest = await _extract_sandbox_layout_digest(page)
+        if isinstance(digest, dict) and not digest.get("ok"):
+            logger.warning("layout digest extraction returned non-ok: %s", digest.get("error") or digest)
+            digest = _ctx_layout_digest(ctx)
+        ctx.last_layout_digest = digest
+        summary = digest.get("summary") if isinstance(digest, dict) else {}
+        logger.info(
+            "[layout-digest] ok=%s nodes=%s edges=%s problems=%s session=%s",
+            bool(digest.get("ok")) if isinstance(digest, dict) else False,
+            (summary or {}).get("node_count"),
+            (summary or {}).get("edge_count"),
+            (summary or {}).get("problem_count"),
+            session_id,
+        )
+    except Exception as exc:
+        logger.warning("layout digest extraction failed, using ctx fallback: %s", exc)
+        try:
+            digest = _ctx_layout_digest(ctx)
+            ctx.last_layout_digest = digest
+            summary = digest.get("summary") if isinstance(digest, dict) else {}
+            logger.info(
+                "[layout-digest] ok=%s nodes=%s edges=%s problems=%s session=%s fallback=ctx",
+                bool(digest.get("ok")) if isinstance(digest, dict) else False,
+                (summary or {}).get("node_count"),
+                (summary or {}).get("edge_count"),
+                (summary or {}).get("problem_count"),
+                session_id,
+            )
+        except Exception:
+            logger.exception("layout digest ctx fallback failed")
     svg_el = page.locator("#graphContainer .x6-graph-svg").first
     svg_box = await svg_el.bounding_box()
     logger.info(
@@ -9841,8 +10942,6 @@ async def _sandbox_screenshot(
     )
     png_bytes = await svg_el.screenshot(type="png")
     return "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
-
-
 async def chat_power_map_v2(
     db: Session,
     company_id: str,

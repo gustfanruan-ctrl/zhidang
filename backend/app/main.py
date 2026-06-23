@@ -28,7 +28,7 @@ from .database import Base, engine, get_db
 from .models import AnalyticsEvent, ConfigChangeLog, FollowupRecord, OperationLog, Superadmin, SystemConfig, Transcript, User
 from .progress import build_progress
 from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, PowerMapChatPayload, PowerMapConfirmPayload, PowerMapRelayoutPayload, PowerMapPreviewPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptAnalyzeResponse, TranscriptUploadResponse
-from .schemas.operation import OperationExecuteRequest, ReviewAction
+from .schemas.operation import OperationExecuteRequest, OperationTypeCalibrationRequest, ReviewAction
 from .schemas.agent_output import validate_comparison_output, validate_extraction_output
 from .services.agent_runner import AgentPhase, AgentRunner
 from .services.field_safety import check_operation_cards
@@ -1152,6 +1152,38 @@ def _restore_operation_cards_from_db(transcript_id: str, db: Session) -> list[di
         OPERATION_CARD_STORE[transcript_id] = restored
     return restored
 
+
+def _get_allowed_operation_record(
+    transcript_id: str,
+    db: Session,
+    user: dict[str, Any],
+) -> Transcript | FollowupRecord | None:
+    transcript = db.scalar(_allowed_transcript_stmt(user).where(Transcript.id == transcript_id))
+    if transcript:
+        return transcript
+    return db.scalar(_allowed_followup_stmt(user).where(FollowupRecord.id == transcript_id))
+
+
+def _calibrate_operation_card_type(card: dict[str, Any], operation_type: str) -> tuple[str, str]:
+    requested = str(operation_type or "").strip().lower()
+    if requested not in {"create", "update", "skip"}:
+        raise ValueError("operation_type 仅支持 create、update、skip")
+    if requested == "update" and not str(card.get("data_id") or "").strip():
+        raise ValueError("该卡片没有匹配记录，不能校准为更新")
+
+    current = str(card.get("operation_type") or "create").strip().lower()
+    original = str(card.get("original_operation_type") or current).strip().lower()
+    card["original_operation_type"] = original
+    card["operation_type"] = requested
+    card["operation_type_calibrated"] = requested != original
+    return current, requested
+
+
+def _persist_operation_cards(record: Transcript | FollowupRecord, cards: list[dict[str, Any]]) -> None:
+    agent_b_result = dict(record.agent_b_result or {})
+    result = dict(agent_b_result.get("result", {}) or {})
+    result["operation_cards"] = cards
+    record.agent_b_result = {**agent_b_result, "result": result}
 
 def _resolve_requested_operation_cards(cards: list[dict[str, Any]], requested_ids: set[str]) -> list[dict[str, Any]]:
     """优先取已审批卡片；若运行态缺失审批态，则对本次明确提交的卡片做兜底批准。"""
@@ -2903,6 +2935,64 @@ def operations_review(payload: ReviewAction, db: Session = Depends(get_db), user
     )
     return {"success": updated}
 
+
+@app.patch("/api/v1/operations/{transcript_id}/cards/{card_id}/operation-type")
+def calibrate_operation_type(
+    transcript_id: str,
+    card_id: str,
+    payload: OperationTypeCalibrationRequest,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    record = _get_allowed_operation_record(transcript_id, db, user)
+    if not record:
+        raise HTTPException(status_code=404, detail="转写或跟进记录不存在")
+
+    cards = OPERATION_CARD_STORE.get(transcript_id, [])
+    if not cards:
+        cards = _restore_operation_cards_from_db(transcript_id, db)
+    card = next((item for item in cards if str(item.get("card_id") or "") == card_id), None)
+    if not card:
+        raise HTTPException(status_code=404, detail="操作卡片不存在")
+
+    try:
+        previous_type, calibrated_type = _calibrate_operation_card_type(card, payload.operation_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    OPERATION_CARD_STORE[transcript_id] = cards
+    _persist_operation_cards(record, cards)
+    db.commit()
+    emit_event(
+        db,
+        "card.operation_type_calibrated",
+        {
+            "user_name": user.get("username", "demo"),
+            "user_id": user.get("user_id") or user.get("username", "demo"),
+            "source": user.get("source", "superadmin"),
+        },
+        {
+            "transcript_id": transcript_id,
+            "company_id_hash": hash_company_id(record.company_id or transcript_id),
+            "session_id": str(uuid4()),
+        },
+        {
+            "card_id": card_id,
+            "previous_operation_type": previous_type,
+            "operation_type": calibrated_type,
+            "original_operation_type": card.get("original_operation_type"),
+            "operation_type_calibrated": bool(card.get("operation_type_calibrated")),
+        },
+        op_type="operation_type",
+        action="calibrate",
+    )
+    return {
+        "success": True,
+        "card_id": card_id,
+        "operation_type": calibrated_type,
+        "original_operation_type": card.get("original_operation_type"),
+        "operation_type_calibrated": bool(card.get("operation_type_calibrated")),
+    }
 
 @app.post("/api/v1/operations/execute")
 async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):

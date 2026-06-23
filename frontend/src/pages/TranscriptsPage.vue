@@ -341,11 +341,21 @@
                     <Badge v-else-if="item.rejected" variant="outline" class="text-[10px] bg-red-50 text-red-700 border-red-200">已拒绝</Badge>
                     <Badge v-else variant="outline" class="text-[10px] bg-amber-50 text-amber-700 border-amber-200">待审核</Badge>
                     <Badge v-if="item.confidence" variant="outline" class="text-[10px] bg-purple-50 text-purple-700 border-purple-200">置信度 {{ (item.confidence * 100).toFixed(0) }}%</Badge>
-                    <Badge variant="outline" class="text-[10px]" :class="{
-                      'bg-emerald-50 text-emerald-700 border-emerald-200': item.operationType === 'create',
-                      'bg-amber-50 text-amber-700 border-amber-200': item.operationType === 'update',
-                      'bg-red-50 text-red-700 border-red-200': item.operationType === 'skip',
-                    }">{{ item.operationType === 'create' ? '新增' : item.operationType === 'update' ? '更新' : item.operationType === 'skip' ? '跳过' : '手动' }}</Badge>
+                    <div class="inline-flex items-center gap-1">
+                      <SelectNative
+                        :model-value="item.operationType"
+                        class="h-7 px-2 py-0 text-xs w-auto"
+                        :class="operationTypeClass(item.operationType)"
+                        :disabled="operationTypeSaving.has(item.operationId)"
+                        @update:model-value="(v) => calibrateCardOperationType(item, v)"
+                      >
+                        <option value="create">新增</option>
+                        <option v-if="item.dataId" value="update">更新</option>
+                        <option value="skip">跳过</option>
+                      </SelectNative>
+                      <Loader2 v-if="operationTypeSaving.has(item.operationId)" class="h-3 w-3 animate-spin text-muted-foreground" />
+                      <Badge v-else-if="item.operationTypeCalibrated" variant="outline" class="text-[10px] bg-blue-50 text-blue-700 border-blue-200">人工校准</Badge>
+                    </div>
                   </div>
                   <div class="flex gap-1 shrink-0">
                     <Button variant="outline" size="sm" class="h-7 text-xs" @click="toggleEdit('expectation', index)">编辑</Button>
@@ -417,11 +427,21 @@
                     <Badge v-else-if="item.rejected" variant="outline" class="text-[10px] bg-red-50 text-red-700 border-red-200">已拒绝</Badge>
                     <Badge v-else variant="outline" class="text-[10px] bg-amber-50 text-amber-700 border-amber-200">待审核</Badge>
                     <Badge v-if="item.confidence" variant="outline" class="text-[10px] bg-purple-50 text-purple-700 border-purple-200">置信度 {{ (item.confidence * 100).toFixed(0) }}%</Badge>
-                    <Badge variant="outline" class="text-[10px]" :class="{
-                      'bg-emerald-50 text-emerald-700 border-emerald-200': item.operationType === 'create',
-                      'bg-amber-50 text-amber-700 border-amber-200': item.operationType === 'update',
-                      'bg-red-50 text-red-700 border-red-200': item.operationType === 'skip',
-                    }">{{ item.operationType === 'create' ? '新增' : item.operationType === 'update' ? '更新' : item.operationType === 'skip' ? '跳过' : '手动' }}</Badge>
+                    <div class="inline-flex items-center gap-1">
+                      <SelectNative
+                        :model-value="item.operationType"
+                        class="h-7 px-2 py-0 text-xs w-auto"
+                        :class="operationTypeClass(item.operationType)"
+                        :disabled="operationTypeSaving.has(item.operationId)"
+                        @update:model-value="(v) => calibrateCardOperationType(item, v)"
+                      >
+                        <option value="create">新增</option>
+                        <option v-if="item.dataId" value="update">更新</option>
+                        <option value="skip">跳过</option>
+                      </SelectNative>
+                      <Loader2 v-if="operationTypeSaving.has(item.operationId)" class="h-3 w-3 animate-spin text-muted-foreground" />
+                      <Badge v-else-if="item.operationTypeCalibrated" variant="outline" class="text-[10px] bg-blue-50 text-blue-700 border-blue-200">人工校准</Badge>
+                    </div>
                   </div>
                   <div class="flex gap-1 shrink-0">
                     <Button variant="outline" size="sm" class="h-7 text-xs" @click="toggleEdit('scenario', index)">编辑</Button>
@@ -630,7 +650,7 @@ import { api } from '../api'
 import { useCustomerStore } from '../stores/customer'
 import { uploadTranscript, startTranscriptAnalysis, fetchTranscripts, fetchTranscriptDetail } from '../api/operation'
 import { fetchFollowupRecords, triggerFollowupFetch, fetchFollowupRecordDetail, startFollowupAnalysis } from '../api/followup-records'
-import { reviewCard, executeCards } from '../api/operation'
+import { calibrateOperationType, reviewCard, executeCards } from '../api/operation'
 import Card from '../components/ui/Card.vue'
 import CardHeader from '../components/ui/CardHeader.vue'
 import CardTitle from '../components/ui/CardTitle.vue'
@@ -721,6 +741,7 @@ const uploading = ref(false)
 const analyzingIds = ref(new Set())
 const submitting = ref(false)
 const cardMarking = ref(new Set())
+const operationTypeSaving = ref(new Set())
 
 const canUpload = computed(() => (selectedFiles.value.length > 0 || manualText.value.trim()) && !!customerStore.currentCustomer && !uploading.value)
 
@@ -998,6 +1019,9 @@ const cardGroups = computed(() => {
       source_quote: card.source_quote || '',
       operationId: card.card_id,
       operationType: card.operation_type || 'create',
+      originalOperationType: card.original_operation_type || card.operation_type || 'create',
+      operationTypeCalibrated: !!card.operation_type_calibrated,
+      dataId: card.data_id || '',
       approved: reviewState.get(card.card_id) === 'approved',
       rejected: reviewState.get(card.card_id) === 'rejected',
       customerId: card.customer_id || '',
@@ -1120,6 +1144,54 @@ function updateScenarioRelatedYuqi(index, value) {
 
 function findSelectedCard(cardId) {
   return selectedCards.value.find(c => c.card_id === cardId)
+}
+
+function operationTypeClass(operationType) {
+  return {
+    'bg-emerald-50 text-emerald-700 border-emerald-200': operationType === 'create',
+    'bg-amber-50 text-amber-700 border-amber-200': operationType === 'update',
+    'bg-red-50 text-red-700 border-red-200': operationType === 'skip',
+  }
+}
+
+function setOperationTypeSaving(cardId, saving) {
+  const next = new Set(operationTypeSaving.value)
+  if (saving) next.add(cardId)
+  else next.delete(cardId)
+  operationTypeSaving.value = next
+}
+
+async function calibrateCardOperationType(item, operationType) {
+  const card = findSelectedCard(item.operationId)
+  if (!card || operationTypeSaving.value.has(item.operationId)) return
+  const nextType = String(operationType || '')
+  if (nextType === card.operation_type) return
+  if (nextType === 'update' && !card.data_id) {
+    showMessage('该卡片没有匹配记录，不能校准为更新', 'error')
+    return
+  }
+
+  const previous = {
+    operation_type: card.operation_type,
+    original_operation_type: card.original_operation_type,
+    operation_type_calibrated: card.operation_type_calibrated,
+  }
+  card.operation_type = nextType
+  setOperationTypeSaving(item.operationId, true)
+  try {
+    const result = await calibrateOperationType(selectedId.value, item.operationId, nextType)
+    card.operation_type = result.operation_type
+    card.original_operation_type = result.original_operation_type
+    card.operation_type_calibrated = !!result.operation_type_calibrated
+    showMessage('操作类型已保存', 'success')
+  } catch (e) {
+    card.operation_type = previous.operation_type
+    card.original_operation_type = previous.original_operation_type
+    card.operation_type_calibrated = previous.operation_type_calibrated
+    showMessage(e?.response?.data?.detail || '操作类型保存失败', 'error')
+  } finally {
+    setOperationTypeSaving(item.operationId, false)
+  }
 }
 
 function upsertChangeItem(card, fieldName, widgetName, value) {
@@ -1311,6 +1383,8 @@ async function addManualCard(targetForm) {
     target_form: targetForm,
     _targetForm: targetForm,
     operation_type: 'create',
+    original_operation_type: 'create',
+    operation_type_calibrated: false,
     operationType: 'create',
     change_items: changeItems,
     confidence: 0,
@@ -1471,8 +1545,9 @@ async function submitCards() {
     )
     const results = resp.results || []
     const ok = results.filter(r => r.execute_status === 'success').length
-    const fail = results.length - ok
-    showMessage(`提交完成：成功 ${ok}，失败 ${fail}`, ok > 0 ? 'success' : 'error')
+    const skipped = results.filter(r => r.execute_status === 'skipped').length
+    const fail = results.filter(r => r.execute_status === 'failed').length
+    showMessage(`提交完成：成功 ${ok}，跳过 ${skipped}，失败 ${fail}`, fail === 0 ? 'success' : 'error')
   } catch (e) {
     showMessage(e?.response?.data?.detail || '提交失败', 'error')
   } finally {

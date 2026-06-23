@@ -12,6 +12,10 @@ class ReviewAction(BaseModel):
     reason: str | None = None
 
 
+class OperationTypeCalibrationRequest(BaseModel):
+    operation_type: Literal["create", "update", "skip"]
+
+
 class OperationExecuteRequest(BaseModel):
     transcript_id: str
     card_ids: list[str] = Field(default_factory=list)
