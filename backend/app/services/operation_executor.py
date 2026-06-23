@@ -258,6 +258,17 @@ async def execute_cards(
                     payload[expectation_business_id_widget] = _wrap_value(str(uuid4()))
 
             if target_form == "场景表":
+                scene_business_id_widget = str(form_cfg.get("business_id_widget") or "scene_id")
+                if (
+                    op_type == "create"
+                    and scene_business_id_widget
+                    and not _extract_record_value(
+                        {"data": payload},
+                        scene_business_id_widget,
+                    )
+                ):
+                    payload[scene_business_id_widget] = _wrap_value(str(uuid4()))
+
                 customer_com_id = str(card.get("customer_com_id") or "").strip()
                 customer_com_name = str(card.get("customer_com_name") or card.get("customer_name") or "").strip()
                 if customer_com_id:

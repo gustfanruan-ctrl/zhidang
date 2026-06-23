@@ -15,6 +15,7 @@ MAPPING_FORMS = {
     },
     "场景表": {
         "entry_id": "scene-entry",
+        "business_id_widget": "scene_id",
         "lookup_yuqi": {"widget": "_widget_1751435602563"},
         "related_business_id_widget": "expect_id",
     },
@@ -58,6 +59,7 @@ async def test_new_expectation_and_scene_share_generated_business_id():
             "change_items": [
                 _change("title", "scene"),
                 _change("expect_id", ""),
+                _change("scene_id", ""),
             ],
         },
         {
@@ -83,7 +85,9 @@ async def test_new_expectation_and_scene_share_generated_business_id():
     expectation_payload = writer.create_record.await_args_list[0].args[1]
     scene_payload = writer.create_record.await_args_list[1].args[1]
     business_id = expectation_payload["yuqi_id"]["value"]
+    scene_id = scene_payload["scene_id"]["value"]
     UUID(business_id)
+    UUID(scene_id)
     assert scene_payload["_widget_1751435602563"] == {"value": "expectation-row-1"}
     assert scene_payload["expect_id"] == {"value": business_id}
     assert [item["execute_status"] for item in results] == ["success", "success"]
