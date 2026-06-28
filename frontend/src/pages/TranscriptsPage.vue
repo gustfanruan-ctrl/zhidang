@@ -1324,6 +1324,17 @@ function upsertChangeItem(card, fieldName, widgetName, value) {
   card.change_items = items
 }
 
+function serializableChangeItems(card) {
+  return (card?.change_items || [])
+    .filter(item => item && item.field_name && item.widget_name)
+    .map(item => ({
+      field_name: item.field_name,
+      widget_name: item.widget_name,
+      old_value: item.old_value ?? null,
+      new_value: item.new_value ?? '',
+    }))
+}
+
 function splitScenarioDescription(value) {
   const text = String(value ?? '').trim()
   const marker = ' — '
@@ -1703,6 +1714,9 @@ async function submitCards() {
     if (Object.keys(up).length) fieldUpdates[item.operationId] = up
     // 始终带 target_form，后端用它覆盖 OPERATION_CARD_STORE 中的旧值
     const override = { target_form: item._targetForm }
+    const sourceCard = findSelectedCard(item.operationId)
+    const changeItems = serializableChangeItems(sourceCard)
+    if (changeItems.length) override.change_items = changeItems
     if (item._targetForm === '预期表') {
       override.stakeholder_contact_names = item.stakeholderContactNames.join('，')
       override.stakeholder_contact_ids = item.stakeholderContactIds.join(',')

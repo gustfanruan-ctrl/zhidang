@@ -904,6 +904,140 @@ EXPECTATION_STAKEHOLDER_OVERRIDE_FIELDS = {
     "stakeholder_contacts_touched",
 }
 
+EXPECTATION_TO_SCENE_FIELD_MAP = {
+    "预期简述": "场景标题",
+    "预期详情": "业务诉求/痛点分析",
+    "是否第一价值实现预期": "是否第一价值实现场景",
+    "推进想法": "核心指标&解决方案",
+}
+
+SCENE_TO_EXPECTATION_FIELD_MAP = {
+    "场景标题": "预期简述",
+    "是否第一价值实现场景": "是否第一价值实现预期",
+}
+
+
+def _operation_card_change_value(card: dict[str, Any], *field_or_widget_names: str) -> str:
+    wanted = {str(name or "").strip() for name in field_or_widget_names if str(name or "").strip()}
+    for item in card.get("change_items") or []:
+        if str(item.get("field_name") or "").strip() in wanted or str(item.get("widget_name") or "").strip() in wanted:
+            value = item.get("new_value")
+            return "" if value is None else str(value).strip()
+    return ""
+
+
+def _operation_card_mapped_item(field_name: str, value: Any, forms_cfg: dict[str, Any], target_form: str) -> dict[str, Any] | None:
+    mapped = (((forms_cfg.get(target_form) or {}).get("field_mapping") or {}).get(field_name) or {})
+    widget_name = str(mapped.get("widget") or "").strip()
+    if not widget_name:
+        return None
+    return {
+        "field_name": field_name,
+        "widget_name": widget_name,
+        "old_value": None,
+        "new_value": "" if value is None else str(value),
+    }
+
+
+def _convert_operation_card_change_items(
+    card: dict[str, Any],
+    source_form: str,
+    target_form: str,
+    forms_cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Translate review-card fields when a human switches expectation/scenario."""
+    source_items = list(card.get("change_items") or [])
+    target_mapping = ((forms_cfg.get(target_form) or {}).get("field_mapping") or {})
+
+    def item_value(field_name: str, widget_name: str = "") -> str:
+        return _operation_card_change_value(card, field_name, widget_name)
+
+    converted: list[dict[str, Any]] = []
+    if source_form == "预期表" and target_form == "场景表":
+        for old_field, new_field in EXPECTATION_TO_SCENE_FIELD_MAP.items():
+            value = item_value(old_field)
+            if value:
+                mapped = _operation_card_mapped_item(new_field, value, forms_cfg, target_form)
+                if mapped:
+                    converted.append(mapped)
+        return converted
+
+    if source_form == "场景表" and target_form == "预期表":
+        title = item_value("场景标题", "title")
+        if title:
+            mapped = _operation_card_mapped_item("预期简述", title, forms_cfg, target_form)
+            if mapped:
+                converted.append(mapped)
+
+        detail_parts: list[str] = []
+        for label, field_name, widget_name in [
+            ("业务诉求/痛点分析", "业务诉求/痛点分析", "solve_what_ques"),
+            ("核心指标&解决方案", "核心指标&解决方案", "solve_what_ans"),
+            ("价值量化", "价值量化", "_widget_1773296816191"),
+            ("总结沉淀", "总结沉淀", "_widget_1773296816192"),
+            ("成果应用方式", "成果应用方式", "_widget_1737340360281"),
+        ]:
+            value = item_value(field_name, widget_name)
+            if value:
+                detail_parts.append(f"【{label}】{value}")
+        if detail_parts:
+            mapped = _operation_card_mapped_item("预期详情", "\n".join(detail_parts), forms_cfg, target_form)
+            if mapped:
+                converted.append(mapped)
+
+        first_value = item_value("是否第一价值实现场景", "_widget_1744337240628")
+        if first_value:
+            mapped = _operation_card_mapped_item("是否第一价值实现预期", first_value, forms_cfg, target_form)
+            if mapped:
+                converted.append(mapped)
+        return converted
+
+    normalized: list[dict[str, Any]] = []
+    for item in source_items:
+        field_name = str(item.get("field_name") or "").strip()
+        if field_name not in target_mapping:
+            continue
+        normalized_item = _operation_card_mapped_item(field_name, item.get("new_value"), forms_cfg, target_form)
+        if normalized_item:
+            normalized_item["old_value"] = item.get("old_value")
+            normalized.append(normalized_item)
+    return normalized
+
+
+def _apply_operation_card_change_items_override(
+    card: dict[str, Any],
+    raw_items: Any,
+    target_form: str,
+    forms_cfg: dict[str, Any],
+) -> None:
+    if not isinstance(raw_items, list):
+        return
+    target_mapping = (forms_cfg.get(target_form) or {}).get("field_mapping") or {}
+    normalized: list[dict[str, Any]] = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        field_name = str(raw.get("field_name") or "").strip()
+        if field_name not in target_mapping:
+            continue
+        item = _operation_card_mapped_item(field_name, raw.get("new_value"), forms_cfg, target_form)
+        if item:
+            item["old_value"] = raw.get("old_value")
+            normalized.append(item)
+    if normalized:
+        card["change_items"] = normalized
+
+
+def _refresh_operation_card_safety(card: dict[str, Any], forms_cfg: dict[str, Any]) -> None:
+    target_form = str(card.get("target_form") or "")
+    form_cfg = forms_cfg.get(target_form) or {}
+    if not form_cfg:
+        card["safety_status"] = "rejected"
+        card["safety_reason"] = f"form mapping missing: {target_form}"
+        return
+    safe = check_operation_cards([card], form_cfg)[0]
+    card.update(safe)
+
 
 def _join_operation_card_stakeholder_values(value: Any, *, name_key: str, fallback_key: str = "") -> str:
     if value is None:
@@ -984,11 +1118,33 @@ def _apply_operation_card_field_updates(
 def _apply_operation_card_override(card: dict[str, Any], override: dict[str, Any], forms_cfg: dict[str, Any]) -> None:
     if not override:
         return
+    old_target_form = str(card.get("target_form") or "").strip()
     target_form = str(override.get("target_form") or "").strip()
-    if target_form:
+    if target_form and target_form != old_target_form:
         card["target_form"] = target_form
         new_fc = forms_cfg.get(target_form, {})
         card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
+        card["change_items"] = _convert_operation_card_change_items(
+            card=card,
+            source_form=old_target_form,
+            target_form=target_form,
+            forms_cfg=forms_cfg,
+        )
+        card["data_id"] = None
+        card["operation_type"] = "create"
+        card["operation_type_calibrated"] = True
+    elif target_form:
+        card["target_form"] = target_form
+        new_fc = forms_cfg.get(target_form, {})
+        card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
+
+    if "change_items" in override:
+        _apply_operation_card_change_items_override(
+            card=card,
+            raw_items=override.get("change_items"),
+            target_form=str(card.get("target_form") or ""),
+            forms_cfg=forms_cfg,
+        )
 
     for key in RELATED_YUQI_OVERRIDE_FIELDS:
         if key not in override:
@@ -3116,6 +3272,7 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
             cid = card.get("card_id")
             _apply_operation_card_override(card, req.card_overrides.get(cid, {}), forms_cfg)
             _apply_operation_card_field_updates(card, req.field_updates.get(cid, {}), forms_cfg)
+            _refresh_operation_card_safety(card, forms_cfg)
 
         # ── 全部覆写落盘到 OPERATION_CARD_STORE + DB ──
         for card in cards:
@@ -3123,6 +3280,7 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
                 _apply_customer_write_context(card, req.company_id, customer_write_context)
             cid = card.get("card_id")
             _apply_operation_card_override(card, req.card_overrides.get(cid, {}), forms_cfg)
+            _refresh_operation_card_safety(card, forms_cfg)
         t = db.get(Transcript, req.transcript_id) or db.get(FollowupRecord, req.transcript_id)
         if t and t.agent_b_result:
             result = dict(t.agent_b_result.get("result", {}) or {})
