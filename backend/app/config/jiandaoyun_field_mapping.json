@@ -156,8 +156,12 @@
         },
         "是否第一价值实现场景": {
           "widget": "_widget_1744337240628",
-          "type": "text",
-          "safety": "writable"
+          "type": "radiogroup",
+          "safety": "restricted",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
         },
         "业务诉求/痛点分析": {
           "widget": "solve_what_ques",
@@ -181,8 +185,14 @@
         },
         "成果应用方式": {
           "widget": "_widget_1737340360281",
-          "type": "text",
-          "safety": "writable"
+          "type": "radiogroup",
+          "safety": "restricted",
+          "allowed_values": [
+            "挂载平台或其它系统",
+            "其他途径分享（如定时调度邮件、人工导出）",
+            "个人自己使用",
+            "其他"
+          ]
         }
       },
       "forbidden_fields": []

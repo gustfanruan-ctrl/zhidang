@@ -22,12 +22,25 @@ FORMS_CFG = {
     "场景表": {
         "field_mapping": {
             "场景标题": {"widget": "title", "safety": "writable"},
-            "是否第一价值实现场景": {"widget": "_widget_1744337240628", "safety": "writable"},
+            "是否第一价值实现场景": {
+                "widget": "_widget_1744337240628",
+                "safety": "restricted",
+                "allowed_values": ["是", "否"],
+            },
             "业务诉求/痛点分析": {"widget": "solve_what_ques", "safety": "writable"},
             "核心指标&解决方案": {"widget": "solve_what_ans", "safety": "writable"},
             "价值量化": {"widget": "_widget_1773296816191", "safety": "writable"},
             "总结沉淀": {"widget": "_widget_1773296816192", "safety": "writable"},
-            "成果应用方式": {"widget": "_widget_1737340360281", "safety": "writable"},
+            "成果应用方式": {
+                "widget": "_widget_1737340360281",
+                "safety": "restricted",
+                "allowed_values": [
+                    "挂载平台或其它系统",
+                    "其他途径分享（如定时调度邮件、人工导出）",
+                    "个人自己使用",
+                    "其他",
+                ],
+            },
         },
         "lookup_customer": {"widget": "_widget_1737335801798"},
     },
@@ -58,10 +71,34 @@ def test_expectation_card_converts_to_scene_fields_before_write():
     assert card["target_form"] == "场景表"
     assert card["operation_type"] == "create"
     assert card["data_id"] is None
+    assert card["converted_from_form"] == "预期表"
     assert set(fields) == {"场景标题", "业务诉求/痛点分析", "是否第一价值实现场景"}
     assert fields["场景标题"]["widget_name"] == "title"
     assert fields["场景标题"]["new_value"] == "建设经营分析能力"
     assert fields["业务诉求/痛点分析"]["widget_name"] == "solve_what_ques"
+    assert card["safety_status"] == "restricted"
+
+
+def test_expectation_to_scene_derives_title_from_detail_when_brief_is_empty():
+    card = {
+        "card_id": "card-brief-empty",
+        "target_form": "预期表",
+        "operation_type": "create",
+        "change_items": [
+            {
+                "field_name": "预期详情",
+                "widget_name": "detail",
+                "new_value": "希望统一经营分析指标。后续用于管理层看板。",
+            },
+        ],
+    }
+
+    _apply_operation_card_override(card, {"target_form": "场景表"}, FORMS_CFG)
+    _refresh_operation_card_safety(card, FORMS_CFG)
+
+    fields = _by_field(card)
+    assert fields["场景标题"]["new_value"] == "希望统一经营分析指标"
+    assert fields["业务诉求/痛点分析"]["new_value"] == "希望统一经营分析指标。后续用于管理层看板。"
     assert card["safety_status"] == "writable"
 
 

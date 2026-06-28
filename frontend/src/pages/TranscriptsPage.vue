@@ -368,6 +368,9 @@
                   </div>
                 </div>
                 <div class="text-sm">
+                  <p v-if="item.convertedFrom" class="text-[10px] text-amber-600 mb-2">
+                    已由{{ item.convertedFrom === '预期表' ? '预期' : '场景' }}转换，请重点检查标题、详情和解决方案。
+                  </p>
                   <div v-if="isEditing('expectation', index)" class="mb-2">
                     <Label class="text-xs">标题</Label>
                     <Input
@@ -505,6 +508,9 @@
                   </div>
                 </div>
                 <div class="text-sm">
+                  <p v-if="item.convertedFrom" class="text-[10px] text-amber-600 mb-2">
+                    已由{{ item.convertedFrom === '预期表' ? '预期' : '场景' }}转换，请重点检查标题、详情和解决方案。
+                  </p>
                   <div v-if="isEditing('scenario', index)" class="mb-2">
                     <Label class="text-xs">标题</Label>
                     <Input
@@ -1082,6 +1088,7 @@ const cardGroups = computed(() => {
       stakeholderContactNames: stakeholderNames(stakeholders),
       stakeholderContactIds: stakeholderIds(stakeholders),
       stakeholderTouched: !!card.stakeholder_contacts_touched,
+      convertedFrom: card.converted_from_form || '',
       relatedYuqiId: card.related_yuqi_id || '',
       relatedYuqiCardId: card.related_yuqi_card_id || '',
       relatedYuqiSource: card.related_yuqi_card_id ? 'generated' : (card.related_yuqi_id ? 'existing' : ''),
@@ -1333,6 +1340,20 @@ function serializableChangeItems(card) {
       old_value: item.old_value ?? null,
       new_value: item.new_value ?? '',
     }))
+}
+
+function deriveReviewCardTitle(value, maxLen = 30) {
+  let text = String(value ?? '').trim()
+  if (!text) return ''
+  for (const marker of ['\n', '。', '；', ';', '，', ',']) {
+    const index = text.indexOf(marker)
+    if (index >= 0) {
+      text = text.slice(0, index).trim()
+      break
+    }
+  }
+  text = text.replace(/^[【\[\(（:：\s]+|[】\]\)）:：\s]+$/g, '')
+  return text.length > maxLen ? text.slice(0, maxLen).trim() : text
 }
 
 function splitScenarioDescription(value) {
@@ -1623,7 +1644,8 @@ function switchCardType(type, index, event) {
       } else if (oldTarget === '预期表' && newTarget === '场景表') {
         const brief = getVal('预期简述') || getVal('detail_brief')
         const detail = getVal('预期详情') || getVal('detail')
-        if (brief) newItems.push({ field_name: '场景标题', widget_name: 'title', new_value: brief })
+        const title = brief || deriveReviewCardTitle(detail)
+        if (title) newItems.push({ field_name: '场景标题', widget_name: 'title', new_value: title })
         if (detail) newItems.push({ field_name: '业务诉求/痛点分析', widget_name: 'solve_what_ques', new_value: detail })
         newItems.push({ field_name: '是否第一价值实现场景', widget_name: '_widget_1744337240628', new_value: '' })
         newItems.push({ field_name: '价值量化', widget_name: '_widget_1773296816191', new_value: '' })
@@ -1631,6 +1653,7 @@ function switchCardType(type, index, event) {
         newItems.push({ field_name: '成果应用方式', widget_name: '_widget_1737340360281', new_value: '' })
       }
       card.change_items = newItems
+      card.converted_from_form = oldTarget
       break
     }
   }

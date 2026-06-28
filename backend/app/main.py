@@ -712,16 +712,66 @@ def get_jiandaoyun_runtime_config(cfg: SystemConfig) -> dict[str, Any]:
 _REFRESH_LOCK = asyncio.Lock()
 
 
-def _extract_csm_name(success_val: Any) -> str:
-    """从简道云成员(user)字段中提取显示名称用于CSM匹配。
+SERVICE_MANYI_FIELD_CANDIDATES = (
+    "服务侧满一",
+    "service_manyi",
+    "service_side_manyi",
+    "service_full_one",
+)
 
-    success 字段在简道云 API 返回中是 user 类型的对象：
-        {"name": "Gust-张小洋", "username": "Gust.Zhang", ...}
-    也可能为 None 或空。
-    """
-    if isinstance(success_val, dict):
-        return success_val.get("name", success_val.get("username", "")) or ""
-    return str(success_val or "")
+
+def _extract_user_names(value: Any) -> list[str]:
+    """Extract comparable names from Jiandaoyun user fields."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        names = [
+            str(value.get(key) or "").strip()
+            for key in ("name", "username", "nickname", "display_name")
+        ]
+        return [name for name in names if name]
+    if isinstance(value, list):
+        names: list[str] = []
+        for item in value:
+            names.extend(_extract_user_names(item))
+        return names
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _extract_csm_name(success_val: Any) -> str:
+    """从简道云成员(user)字段中提取显示名称用于CSM匹配。"""
+    names = _extract_user_names(success_val)
+    return names[0] if names else ""
+
+
+def _extract_customer_user_names(row: dict[str, Any], *field_names: str) -> list[str]:
+    names: list[str] = []
+    for field_name in field_names:
+        names.extend(_extract_user_names(row.get(field_name)))
+    return list(dict.fromkeys(names))
+
+
+def _customer_visible_to_user(customer: dict[str, Any], user_name: str) -> bool:
+    if not user_name:
+        return True
+    allowed_names = _extract_customer_user_names(customer, "csm", "service_manyi")
+    raw = customer.get("raw")
+    if isinstance(raw, dict):
+        allowed_names.extend(_extract_customer_user_names(raw, "success", *SERVICE_MANYI_FIELD_CANDIDATES))
+    return user_name in set(allowed_names)
+
+
+def _filter_customers_for_user_scope(customers: list[dict[str, Any]], user: dict[str, Any]) -> list[dict[str, Any]]:
+    if user.get("source") == "sso":
+        user_name = str(user.get("user_name") or "").strip()
+    elif user.get("source") == "user":
+        user_name = str(user.get("display_name") or "").strip()
+    else:
+        return customers
+    if not user_name:
+        return customers
+    return [customer for customer in customers if _customer_visible_to_user(customer, user_name)]
 
 
 GENJIN_TAG_META: dict[tuple[str, str, str], dict[str, str]] = {
@@ -939,6 +989,20 @@ def _operation_card_mapped_item(field_name: str, value: Any, forms_cfg: dict[str
     }
 
 
+def _derive_review_card_title(value: Any, *, max_len: int = 30) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for marker in ["\n", "。", "；", ";", "，", ","]:
+        if marker in text:
+            text = text.split(marker, 1)[0].strip()
+            break
+    text = text.strip("【】[]()（）:： ")
+    if len(text) <= max_len:
+        return text
+    return text[:max_len].rstrip()
+
+
 def _convert_operation_card_change_items(
     card: dict[str, Any],
     source_form: str,
@@ -954,12 +1018,20 @@ def _convert_operation_card_change_items(
 
     converted: list[dict[str, Any]] = []
     if source_form == "预期表" and target_form == "场景表":
+        converted_fields: set[str] = set()
         for old_field, new_field in EXPECTATION_TO_SCENE_FIELD_MAP.items():
             value = item_value(old_field)
             if value:
                 mapped = _operation_card_mapped_item(new_field, value, forms_cfg, target_form)
                 if mapped:
                     converted.append(mapped)
+                    converted_fields.add(new_field)
+        if "场景标题" not in converted_fields:
+            title = _derive_review_card_title(item_value("预期详情", "detail"))
+            if title:
+                mapped = _operation_card_mapped_item("场景标题", title, forms_cfg, target_form)
+                if mapped:
+                    converted.insert(0, mapped)
         return converted
 
     if source_form == "场景表" and target_form == "预期表":
@@ -1122,6 +1194,7 @@ def _apply_operation_card_override(card: dict[str, Any], override: dict[str, Any
     target_form = str(override.get("target_form") or "").strip()
     if target_form and target_form != old_target_form:
         card["target_form"] = target_form
+        card["converted_from_form"] = old_target_form
         new_fc = forms_cfg.get(target_form, {})
         card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
         card["change_items"] = _convert_operation_card_change_items(
@@ -1180,7 +1253,17 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
         return CUSTOMER_INDEX_CACHE
 
     display_fields = list(main_form.get("display_fields", []) or [])
-    for required_field in ["comname_01", "com_name", "com_type", "revenue_level", "if_access", "follow_form", "success", "com_id"]:
+    for required_field in [
+        "comname_01",
+        "com_name",
+        "com_type",
+        "revenue_level",
+        "if_access",
+        "follow_form",
+        "success",
+        *SERVICE_MANYI_FIELD_CANDIDATES,
+        "com_id",
+    ]:
         if required_field not in display_fields:
             display_fields.append(required_field)
     
@@ -1269,6 +1352,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
             "if_access": row.get("if_access"),
             "follow_form": row.get("follow_form"),
             "csm": _extract_csm_name(row.get("success")),
+            "service_manyi": _extract_customer_user_names(row, *SERVICE_MANYI_FIELD_CANDIDATES),
             "com_id": row.get("com_id", ""),
             "raw": row,
         }
@@ -2465,6 +2549,9 @@ async def customers_list(
                 display_fields.append("comname_01")
             if "com_name" not in display_fields:
                 display_fields.append("com_name")
+            for required_field in ["success", *SERVICE_MANYI_FIELD_CANDIDATES]:
+                if required_field not in display_fields:
+                    display_fields.append(required_field)
             client = JiandaoyunClient(api_key=runtime_cfg.get("api_key", ""))
             one_page = await client.query_data_list(
                 app_id=runtime_cfg.get("app_id", ""),
@@ -2479,6 +2566,7 @@ async def customers_list(
                     "comname_01": row.get("comname_01"),
                     "com_name": row.get("com_name"),
                     "csm": _extract_csm_name(row.get("success")),
+                    "service_manyi": _extract_customer_user_names(row, *SERVICE_MANYI_FIELD_CANDIDATES),
                     "com_id": row.get("com_id", ""),
                     "raw": row,
                 }
@@ -2501,6 +2589,7 @@ async def customers_list(
                     "comname_01": item.get("company_name"),
                     "com_name": item.get("company_name"),
                     "csm": "",
+                    "service_manyi": [],
                     "com_id": "",
                     "raw": item,
                 }
@@ -2510,15 +2599,8 @@ async def customers_list(
             if warning is None:
                 warning = "简道云客户索引拉取失败，已回退本地转写客户列表"
 
-    # 多租户：SSO / user 用户只显示自己负责的客户
-    if user.get("source") == "sso":
-        user_name = user.get("user_name", "")
-        if user_name:
-            cached_items = [c for c in cached_items if c.get("csm") == user_name]
-    elif user.get("source") == "user":
-        display_name = user.get("display_name", "")
-        if display_name:
-            cached_items = [c for c in cached_items if c.get("csm") == display_name]
+    # 多租户：SSO / user 用户可见责任客户成功或服务侧满一命中的客户
+    cached_items = _filter_customers_for_user_scope(cached_items, user)
 
     keyword_norm = keyword.strip().lower()
     if keyword_norm:
@@ -2575,15 +2657,7 @@ async def customers_list(
 async def company_search(query: CompanySearchQuery = Depends(), db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     keyword = query.q.strip().lower()
     customers = CUSTOMER_INDEX_CACHE.get("items", []) or fetch_customers_for_user(db, user)
-    # 多租户过滤
-    if user.get("source") == "sso":
-        user_name = user.get("user_name", "")
-        if user_name:
-            customers = [c for c in customers if c.get("csm") == user_name]
-    elif user.get("source") == "user":
-        display_name = user.get("display_name", "")
-        if display_name:
-            customers = [c for c in customers if c.get("csm") == display_name]
+    customers = _filter_customers_for_user_scope(customers, user)
     if keyword:
         customers = [item for item in customers if keyword in item["company_name"].lower()]
     return {"items": customers[:50], "status": "cache" if CUSTOMER_INDEX_CACHE.get("items") else "mock"}
@@ -2601,15 +2675,7 @@ async def search_customers(
     keyword_norm = keyword.strip().lower()
     cached_items = CUSTOMER_INDEX_CACHE.get("items", []) or []
 
-    # 多租户过滤
-    if user.get("source") == "sso":
-        user_name = user.get("user_name", "")
-        if user_name:
-            cached_items = [c for c in cached_items if c.get("csm") == user_name]
-    elif user.get("source") == "user":
-        display_name = user.get("display_name", "")
-        if display_name:
-            cached_items = [c for c in cached_items if c.get("csm") == display_name]
+    cached_items = _filter_customers_for_user_scope(cached_items, user)
 
     if not cached_items:
         # 缓存为空时回退到 customers_list 的逻辑刷新一次
