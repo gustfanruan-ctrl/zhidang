@@ -24,6 +24,7 @@ from ..schemas.followup import (
 )
 from .jiandaoyun_client import JiandaoyunClient, JiandaoyunClientError
 from .jiandaoyun_writer import JiandaoyunWriter
+from .followup_yuqi import apply_followup_yuqi_fields
 
 logger = logging.getLogger("zhidang.followup")
 
@@ -253,7 +254,11 @@ class FollowupService:
 
         # 关联预期（可选）
         if payload.yuqi_id:
-            data["review_yuqi_id"] = {"value": payload.yuqi_id}
+            apply_followup_yuqi_fields(
+                data,
+                field_mappings=None,
+                yuqi_id=payload.yuqi_id,
+            )
 
         # 写入
         try:

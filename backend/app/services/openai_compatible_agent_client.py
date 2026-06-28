@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
@@ -62,6 +63,46 @@ class OpenAICompatibleAgentClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
             self._client = None
+
+    @staticmethod
+    def _model_profile(model: str | None) -> str:
+        rollback = (os.getenv("POWER_MAP_ROLLBACK_PROVIDER") or "").strip().lower()
+        if rollback == "sonnet":
+            return "sonnet"
+        name = (model or "").strip().lower()
+        override = (os.getenv("POWER_MAP_LLM_PROFILE") or "").strip().lower()
+        if override in {"kimi", "sonnet", "openai"}:
+            return override
+        if "kimi" in name:
+            return "kimi"
+        if "claude" in name or "sonnet" in name or "haiku" in name:
+            return "sonnet"
+        return "openai"
+
+    @classmethod
+    def _is_kimi_model(cls, model: str | None) -> bool:
+        return cls._model_profile(model) == "kimi"
+
+    @staticmethod
+    def _normalize_kimi_thinking(enabled: bool | None) -> dict[str, str]:
+        return {"type": "enabled" if enabled else "disabled"}
+
+    @classmethod
+    def _apply_model_payload_options(
+        cls,
+        payload: dict[str, Any],
+        *,
+        model: str | None,
+        kimi_thinking: bool | None = None,
+    ) -> None:
+        if cls._is_kimi_model(model):
+            payload["thinking"] = cls._normalize_kimi_thinking(bool(kimi_thinking))
+
+    @classmethod
+    def _tool_choice_for_model(cls, model: str | None, tool_choice: Any, *, has_tools: bool) -> Any:
+        if cls._is_kimi_model(model):
+            return "auto" if has_tools else "none"
+        return cls._to_openai_tool_choice(tool_choice) if tool_choice else "auto"
 
     @staticmethod
     def _to_openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -177,6 +218,7 @@ class OpenAICompatibleAgentClient:
         temperature: float = 0.1,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any = None,
+        kimi_thinking: bool | None = None,
     ) -> OpenAICompatibleResponse:
         """Multimodal call: `content` is a list of OpenAI-style content blocks,
         e.g. [{"type": "text", "text": "..."},
@@ -205,7 +247,8 @@ class OpenAICompatibleAgentClient:
         }
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = self._to_openai_tool_choice(tool_choice) if tool_choice else "auto"
+            payload["tool_choice"] = self._tool_choice_for_model(model, tool_choice, has_tools=True)
+        self._apply_model_payload_options(payload, model=model, kimi_thinking=kimi_thinking)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
         client = await self._get_client()
@@ -281,7 +324,8 @@ class OpenAICompatibleAgentClient:
         }
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = self._to_openai_tool_choice(tool_choice) if tool_choice else "auto"
+            payload["tool_choice"] = self._tool_choice_for_model(model, tool_choice, has_tools=True)
+        self._apply_model_payload_options(payload, model=model, kimi_thinking=kimi_thinking)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
         use_structured = bool(tools)
@@ -314,8 +358,11 @@ class OpenAICompatibleAgentClient:
                             continue
                         delta = (choices[0] or {}).get("delta") or {}
                         chunk = delta.get("content")
+                        reasoning_chunk = delta.get("reasoning_content")
 
                         if use_structured:
+                            if isinstance(reasoning_chunk, str) and reasoning_chunk:
+                                yield {"type": "reasoning", "text": reasoning_chunk}
                             if isinstance(chunk, str) and chunk:
                                 yield {"type": "content", "text": chunk}
                             tool_call_deltas = delta.get("tool_calls") or []
@@ -343,8 +390,13 @@ class OpenAICompatibleAgentClient:
                                         "arguments": args_chunk,
                                     }
                         else:
+                            if isinstance(reasoning_chunk, str) and reasoning_chunk:
+                                yield {"type": "reasoning", "text": reasoning_chunk}
                             if isinstance(chunk, str) and chunk:
                                 yield chunk
+                        usage = event.get("usage")
+                        if isinstance(usage, dict):
+                            yield {"type": "usage", "usage": usage}
                 return
             except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
                 last_exc = exc
@@ -369,6 +421,7 @@ class OpenAICompatibleAgentClient:
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.1,
+        kimi_thinking: bool | None = None,
     ) -> AsyncGenerator[str | dict[str, Any], None]:
         """Streaming call with full message history.
 
@@ -399,7 +452,8 @@ class OpenAICompatibleAgentClient:
         }
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = self._tool_choice_for_model(model, None, has_tools=True)
+        self._apply_model_payload_options(payload, model=model, kimi_thinking=kimi_thinking)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
         use_structured = bool(tools)
@@ -489,8 +543,11 @@ class OpenAICompatibleAgentClient:
                             continue
                         delta = (choices[0] or {}).get("delta") or {}
                         chunk = delta.get("content")
+                        reasoning_chunk = delta.get("reasoning_content")
 
                         if use_structured:
+                            if isinstance(reasoning_chunk, str) and reasoning_chunk:
+                                yield {"type": "reasoning", "text": reasoning_chunk}
                             if isinstance(chunk, str) and chunk:
                                 yield {"type": "content", "text": chunk}
                             tool_call_deltas = delta.get("tool_calls") or []
@@ -521,8 +578,13 @@ class OpenAICompatibleAgentClient:
                                         "arguments": args_chunk,
                                     }
                         else:
+                            if isinstance(reasoning_chunk, str) and reasoning_chunk:
+                                yield {"type": "reasoning", "text": reasoning_chunk}
                             if isinstance(chunk, str) and chunk:
                                 yield chunk
+                        usage = event.get("usage")
+                        if isinstance(usage, dict):
+                            yield {"type": "usage", "usage": usage}
                 return
             except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
                 last_exc = exc
@@ -553,9 +615,14 @@ class OpenAICompatibleAgentClient:
         tools = self._to_openai_tools(kwargs.get("tools") or [])
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = self._to_openai_tool_choice(kwargs.get("tool_choice"))
+            payload["tool_choice"] = self._tool_choice_for_model(payload.get("model"), kwargs.get("tool_choice"), has_tools=True)
         elif kwargs.get("tool_choice") is not None:
-            payload["tool_choice"] = self._to_openai_tool_choice(kwargs["tool_choice"])
+            payload["tool_choice"] = self._tool_choice_for_model(payload.get("model"), kwargs["tool_choice"], has_tools=False)
+        self._apply_model_payload_options(
+            payload,
+            model=str(payload.get("model") or ""),
+            kimi_thinking=kwargs.get("kimi_thinking"),
+        )
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
         client = await self._get_client()

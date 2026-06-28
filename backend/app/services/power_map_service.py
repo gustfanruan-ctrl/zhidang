@@ -43,6 +43,817 @@ def _get_power_map_llm_model(cfg: SystemConfig) -> str:
         return model
     return (cfg.nl_chat_model or "qwen-plus").strip()
 
+
+def _power_map_llm_profile(model: str) -> str:
+    rollback = (os.getenv("POWER_MAP_ROLLBACK_PROVIDER") or "").strip().lower()
+    if rollback == "sonnet":
+        return "sonnet"
+    override = (os.getenv("POWER_MAP_LLM_PROFILE") or "").strip().lower()
+    if override in {"kimi", "sonnet", "openai"}:
+        return override
+    name = (model or "").strip().lower()
+    if "kimi" in name:
+        return "kimi"
+    if "claude" in name or "sonnet" in name or "haiku" in name:
+        return "sonnet"
+    return "openai"
+
+
+def _power_map_kimi_mode() -> str:
+    mode = (os.getenv("POWER_MAP_KIMI_MODE") or "auto").strip().lower()
+    return mode if mode in {"auto", "instant", "thinking"} else "auto"
+
+
+def _power_map_screenshot_policy(profile: str) -> str:
+    policy = (os.getenv("POWER_MAP_SCREENSHOT_POLICY") or "").strip().lower()
+    if policy in {"stage", "legacy", "off"}:
+        return policy
+    return "stage" if profile == "kimi" else "legacy"
+
+
+def _power_map_radial_fast_path_enabled() -> bool:
+    raw = (os.getenv("POWER_MAP_RADIAL_FAST_PATH") or "1").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+_VISUAL_TOOL_NAMES = {
+    "arrange_horizontally",
+    "center_above",
+    "fit_container_to_children",
+    "move_dept_with_children",
+    "place_node",
+    "relayout",
+    "render_screenshot",
+    "render_preview",
+}
+_SCREENSHOT_AFTER_LARGE_BATCH = 8
+_CLEANED_TEXT_MAX_CHARS = 1600
+_CLEANED_TEXT_MAX_RATIO = 0.6
+_POWER_MAP_CLEAN_RAW_OK = "__RAW_OK__"
+_COMPACT_PERSON_ENDPOINT_MARKERS = (
+    "本人",
+    "领导",
+    "负责人",
+    "联系人",
+    "总监",
+    "经理",
+    "组长",
+    "助理",
+    "专员",
+    "外包",
+    "顾问",
+    "工程师",
+)
+_COMPACT_DEPARTMENT_ENDPOINT_MARKERS = (
+    "集团",
+    "公司",
+    "总部",
+    "部门",
+    "部",
+    "中心",
+    "板块",
+    "事业部",
+    "院",
+    "分部",
+    "基地",
+    "子公司",
+    "门店",
+    "小组",
+    "班组",
+    "ITC",
+)
+
+
+def _tool_calls_need_visual_feedback(tool_calls: list[tuple[str, dict[str, Any]]]) -> bool:
+    return any(str(name or "") in _VISUAL_TOOL_NAMES for name, _ in tool_calls)
+
+
+def _tool_calls_are_large_batch(tool_calls: list[tuple[str, dict[str, Any]]]) -> bool:
+    return len(tool_calls) >= _SCREENSHOT_AFTER_LARGE_BATCH
+
+
+def _should_enable_kimi_thinking(
+    *,
+    profile: str,
+    mode: str,
+    rounds_completed: int,
+    batch_execution_streaks: dict[str, int],
+    visual_phase_seen: bool,
+    phase: str = "execution",
+) -> bool | None:
+    if profile != "kimi":
+        return None
+    if phase == "planning":
+        return True
+    if mode == "instant":
+        return False
+    if mode == "thinking":
+        return True
+    # Auto mode now reserves Kimi thinking for the distilled planning call only.
+    # Execution rounds should be decisive tool-calling rounds, not re-planning.
+    return False
+
+
+def _should_use_kimi_planning_thinking(*, mode: str) -> bool:
+    """In auto mode, planning should be concise and non-thinking after cleaning.
+
+    Kimi thinking is still available as an explicit operator override, but auto
+    should not turn a short or already-clean instruction into a long reasoning
+    loop just because the cleaner failed or passed the raw text through.
+    """
+    return mode == "thinking"
+
+
+def _looks_like_compact_person_endpoint(name: str) -> bool:
+    normalized = _name(name)
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in _COMPACT_PERSON_ENDPOINT_MARKERS):
+        return True
+    if any(marker in normalized for marker in _COMPACT_DEPARTMENT_ENDPOINT_MARKERS):
+        return False
+    return bool(re.fullmatch(r"[\u4e00-\u9fff]{2,4}", normalized))
+
+
+def _infer_compact_person_parent(parsed: dict[str, Any], compact_dept_names: set[str]) -> str:
+    root_name = ""
+    for row in parsed.get("d") or []:
+        if isinstance(row, list):
+            dept_name = _name(row[0] if len(row) > 0 else "")
+            parent_name = _name(row[1] if len(row) > 1 else "")
+            kind = _name(row[2] if len(row) > 2 else "").lower()
+        elif isinstance(row, dict):
+            dept_name = _name(row.get("name"))
+            parent_name = _name(row.get("parent") or row.get("parent_name"))
+            kind = _name(row.get("kind") or row.get("type")).lower()
+        else:
+            continue
+        if not dept_name:
+            continue
+        if not parent_name and not root_name:
+            root_name = dept_name
+        if kind in {"company", "department", "dept"}:
+            return dept_name
+    return root_name or next(iter(compact_dept_names), "")
+
+
+def _validate_power_map_cleaned_text(
+    *,
+    raw_text: str,
+    cleaned_text: str,
+    session_id: str,
+) -> str:
+    cleaned = (cleaned_text or "").strip()
+    raw = (raw_text or "").strip()
+    if not cleaned:
+        return ""
+    if cleaned == _POWER_MAP_CLEAN_RAW_OK:
+        logger.info(
+            "[DEBUG-J] KIMI_CLEAN_REJECT session=%s reason=raw_ok_sentinel raw_chars=%d",
+            session_id,
+            len(raw),
+        )
+        return ""
+    if cleaned == raw:
+        logger.info(
+            "[DEBUG-J] KIMI_CLEAN_REJECT session=%s reason=raw_passthrough raw_chars=%d cleaned_chars=%d",
+            session_id,
+            len(raw),
+            len(cleaned),
+        )
+        return ""
+
+    candidate = cleaned
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s*```$", "", candidate).strip()
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start < 0 or end <= start:
+        logger.warning(
+            "[DEBUG-J] KIMI_CLEAN_REJECT session=%s reason=invalid_json_object raw_chars=%d cleaned_chars=%d",
+            session_id,
+            len(raw),
+            len(cleaned),
+        )
+        return ""
+    candidate = candidate[start : end + 1]
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        logger.warning(
+            "[DEBUG-J] KIMI_CLEAN_REJECT session=%s reason=invalid_json_object raw_chars=%d cleaned_chars=%d",
+            session_id,
+            len(raw),
+            len(cleaned),
+        )
+        return ""
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "[DEBUG-J] KIMI_CLEAN_REJECT session=%s reason=invalid_json_object raw_chars=%d cleaned_chars=%d",
+            session_id,
+            len(raw),
+            len(cleaned),
+        )
+        return ""
+    if "d" in parsed or "p" in parsed or "e" in parsed:
+        compact_dept_names: set[str] = set()
+        compact_person_names: set[str] = set()
+        missing_dept_parents: set[str] = set()
+        missing_person_departments: set[str] = set()
+
+        for row in parsed.get("d") or []:
+            if isinstance(row, list):
+                dept_name = _name(row[0] if len(row) > 0 else "")
+                parent_name = _name(row[1] if len(row) > 1 else "")
+            elif isinstance(row, dict):
+                dept_name = _name(row.get("name"))
+                parent_name = _name(row.get("parent") or row.get("parent_name"))
+            else:
+                continue
+            if dept_name:
+                compact_dept_names.add(dept_name)
+            if parent_name:
+                missing_dept_parents.add(parent_name)
+
+        for parent_name in list(missing_dept_parents):
+            if parent_name in compact_dept_names:
+                missing_dept_parents.discard(parent_name)
+        if missing_dept_parents:
+            logger.warning(
+                "[DEBUG-J] KIMI_CLEAN_REJECT session=%s reason=missing_dept_parent raw_chars=%d cleaned_chars=%d parents=%s",
+                session_id,
+                len(raw),
+                len(cleaned),
+                ",".join(sorted(missing_dept_parents)),
+            )
+            return ""
+
+        for row in parsed.get("p") or []:
+            if isinstance(row, list):
+                person_name = _name(row[0] if len(row) > 0 else "")
+                dept_name = _name(row[2] if len(row) > 2 else "")
+            elif isinstance(row, dict):
+                person_name = _name(row.get("name"))
+                dept_name = _name(row.get("parent") or row.get("department") or row.get("parent_name"))
+            else:
+                continue
+            if person_name:
+                compact_person_names.add(person_name)
+            if dept_name and dept_name not in compact_dept_names:
+                missing_person_departments.add(dept_name)
+        if missing_person_departments:
+            logger.warning(
+                "[DEBUG-J] KIMI_CLEAN_REJECT session=%s reason=missing_person_department raw_chars=%d cleaned_chars=%d departments=%s",
+                session_id,
+                len(raw),
+                len(cleaned),
+                ",".join(sorted(missing_person_departments)),
+            )
+            return ""
+
+        compact_node_names = compact_dept_names | compact_person_names
+        missing_edge_endpoints: set[str] = set()
+        for row in parsed.get("e") or []:
+            if isinstance(row, list):
+                source = _name(row[0] if len(row) > 0 else "")
+                target = _name(row[1] if len(row) > 1 else "")
+            elif isinstance(row, dict):
+                source = _name(row.get("source"))
+                target = _name(row.get("target"))
+            else:
+                continue
+            for endpoint in (source, target):
+                if endpoint and endpoint not in compact_node_names:
+                    missing_edge_endpoints.add(endpoint)
+        if missing_edge_endpoints:
+            inferred_parent = _infer_compact_person_parent(parsed, compact_dept_names)
+            inferred_people = {
+                endpoint
+                for endpoint in missing_edge_endpoints
+                if inferred_parent and _looks_like_compact_person_endpoint(endpoint)
+            }
+            if inferred_people:
+                parsed.setdefault("p", [])
+                for endpoint in sorted(inferred_people):
+                    parsed["p"].append([endpoint, endpoint, inferred_parent])
+                    compact_person_names.add(endpoint)
+                    compact_node_names.add(endpoint)
+                missing_edge_endpoints -= inferred_people
+        if missing_edge_endpoints:
+            logger.warning(
+                "[DEBUG-J] KIMI_CLEAN_REJECT session=%s reason=missing_edge_endpoint raw_chars=%d cleaned_chars=%d endpoints=%s",
+                session_id,
+                len(raw),
+                len(cleaned),
+                ",".join(sorted(missing_edge_endpoints)),
+            )
+            return ""
+    cleaned = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+
+    raw_len = len(raw)
+    cleaned_len = len(cleaned)
+    max_by_ratio = max(1, int(raw_len * _CLEANED_TEXT_MAX_RATIO))
+    max_allowed = min(_CLEANED_TEXT_MAX_CHARS, max_by_ratio)
+    if cleaned_len > max_allowed:
+        logger.warning(
+            "[DEBUG-J] KIMI_CLEAN_REJECT session=%s reason=insufficient_compression raw_chars=%d cleaned_chars=%d max_allowed=%d ratio=%.2f",
+            session_id,
+            raw_len,
+            cleaned_len,
+            max_allowed,
+            (cleaned_len / raw_len) if raw_len else 0.0,
+        )
+        return ""
+    return cleaned
+
+
+def _should_attach_screenshot(
+    *,
+    policy: str,
+    rounds_completed: int,
+    tool_calls: list[tuple[str, dict[str, Any]]] | None = None,
+    initial: bool = False,
+    final_check: bool = False,
+) -> bool:
+    if policy == "off":
+        return False
+    if policy == "legacy":
+        return True
+    if final_check:
+        return True
+    if initial:
+        return False
+    if _tool_calls_are_large_batch(tool_calls or []):
+        return True
+    return _tool_calls_need_visual_feedback(tool_calls or [])
+
+
+def _assistant_text_requires_more_tools(text: str) -> bool:
+    normalized = (text or "").strip()
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in ("不需要", "无需", "全部完成", "整体完成", "已经完成")):
+        return False
+    unfinished_markers = (
+        "现在开始",
+        "开始 Step",
+        "开始 step",
+        "继续",
+        "下一步",
+        "还需要",
+        "需要调整",
+        "需要调用",
+        "准备",
+        "Step 3",
+        "Step 4",
+        "Step 5",
+        "Step 6",
+        "调整布局",
+        "创建汇报关系",
+        "建立汇报关系",
+    )
+    if any(marker in normalized for marker in unfinished_markers):
+        # "Step 2 完成。现在开始 Step 3" is not final.
+        return True
+    return False
+
+
+def _augment_power_map_system_prompt(system_prompt: str, *, profile: str, screenshot_policy: str) -> str:
+    if profile != "kimi":
+        return system_prompt
+    visual_rule = (
+        "截图不是每轮都会提供；结构编辑必须优先依据当前图结构 JSON，"
+        "只有布局、对齐、容器尺寸、视觉校验阶段才依赖截图。"
+        if screenshot_policy != "legacy"
+        else "当前请求可能包含截图；截图仅用于视觉布局判断，结构事实以当前图结构 JSON 为准。"
+    )
+    return (
+        system_prompt
+        + "\n\n## Kimi K2.6 工具执行约束\n"
+        + "- 不要输出长篇思考链路、步骤纠结或方案解释；除最终完成说明外，优先直接发 tool_calls。\n"
+        + "- 禁止只输出“开始 Step N / 现在开始 / 下一步 / 继续”而不调用工具；只要任务未完成，同轮必须带上对应 tool_calls。\n"
+        + "- 能在同一轮并行执行的同类独立操作，必须一次性发出多个 tool_calls，不要拆成多轮单个工具。\n"
+        + "- 如果上一轮工具返回 ok=true，不要重复执行相同目标的相同工具。\n"
+        + "- create_node / set_parent / create_edge 属于结构编辑，优先依赖当前图结构 JSON。\n"
+        + "- “层级、下设、包含、隶属、板块下属单位”优先用 create_node.parent_id 或 set_parent 表达；不要仅因组织包含关系创建 create_edge。\n"
+        + "- create_edge 只用于用户明确表达的汇报、分管、决策链、影响力或协作关系；从零创建组织架构时，只批量创建这些真实关系边。\n"
+        + "- 如果执行计划包含真实汇报/决策连线，创建完人员后必须继续批量创建这些连线；edges 为 0 时不能自然收敛。\n"
+        + "- 如果用户消息中包含“首轮执行计划”，执行轮禁止重新解读原始长指令，必须以该计划和当前图结构为准。\n"
+        + "- 如果首轮执行计划是 JSON 执行清单，必须按 update_nodes/create_departments/create_people/parent_links/report_edges 数组顺序批量消耗；不要逐条轮询数组项。\n"
+        + "- update_nodes 表示修改当前图中已有节点，必须调用 update_node；不要为了改名、改职级或改角色创建新节点。\n"
+        + f"- {visual_rule}\n"
+        + "- 如遇到大批量创建，先批量完成结构，再进入布局工具阶段。\n"
+        + "- 从零新建完整组织架构时，优先输出可被后端 radial layout 消费的结构意图；不要让模型用多轮 move_dept_with_children / fit_container_to_children 猜坐标。"
+    )
+
+
+def _looks_like_kimi_adapter_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "reasoning_content" in text
+        or "thinking" in text
+        or ("http 400" in text and "kimi" in text)
+    )
+
+
+def _power_map_request_max_tokens(*, profile: str, kimi_thinking: bool | None) -> int:
+    if profile == "kimi":
+        return 16384 if kimi_thinking else 8192
+    return 32768
+
+
+def _kimi_planning_progress_summary(reasoning_chars: int, plan_chars: int = 0) -> str:
+    """Return a safe user-facing summary of Kimi planning progress.
+
+    We intentionally do not expose raw reasoning_content. The UI only needs to
+    know the model is actively working and which planning phase it appears to
+    be in.
+    """
+    if plan_chars > 0:
+        return f"规划阶段：结构化执行清单正在输出，已生成约 {plan_chars} 字..."
+    if reasoning_chars < 4000:
+        phase = "正在识别组织实体、已有节点和用户目标"
+    elif reasoning_chars < 9000:
+        phase = "正在区分新增节点、层级归属和真实汇报关系"
+    elif reasoning_chars < 15000:
+        phase = "正在压缩为 JSON 执行清单，并按批次排序"
+    else:
+        phase = "正在校验执行清单，避免重复挂载和误建连线"
+    approx = max(1, reasoning_chars // 1000)
+    return f"规划阶段：{phase}，已处理约 {approx}k 字规划信号..."
+
+
+_KIMI_PLANNING_SYSTEM_PROMPT = """你是权力地图 radial intent 规划器。你的任务不是复述 SOP，也不是猜坐标，而是把已清洗的权力地图事实转成后端 deterministic radial layout 可以直接消费的结构意图 JSON。
+
+要求：
+- 只输出结构化执行清单，不调用工具，不写执行过程，不输出长篇思考链路。
+- 必须理解权力地图的数据模型：department 是容器节点，可嵌套；user 是人员叶子节点，必须挂到某个 department；reports_to/influences/collaborates 是连线，不等于组织层级。
+- 必须基于用户原始指令和当前图结构，分别提取要创建/修改的节点、层级归属、真实汇报/决策连线、布局步骤和完成条件。
+- “层级关系、下设、包含、隶属、板块下属单位”默认是 parent_id/set_parent 归属关系，不是 create_edge 汇报连线。
+- 业务层级词要按容器归属保留：集团/公司/总部/子公司/事业部/中心/部门/区域/城市组/门店/小组/班组都可以是 department 容器，并且可以形成 2-5 级嵌套。
+- 如果原文同时出现“总部部门”和“子公司”，它们通常是同一个集团/公司容器下的同级子容器，不要因为负责人都向同一人汇报就把它们挂到某个总部部门里。
+- 如果原文明确说 A 属于/下设/隶属/归属 B，必须优先保留 A.parent=B；汇报链只能生成 report_edges，不能覆盖明确的 parent 层级。
+- 如果清洗输入使用紧凑字段：g=goal，d=departments 数组 [name,parent,kind]，p=people 数组 [name,title,department]，e=report_edges 数组 [source,target,relation]，c=constraints；必须先还原语义再规划。
+- create_departments 中每个 parent 必须能在 create_departments 或当前图结构中找到；create_people 中每个 parent/department 也必须能找到，不能省略中间层容器。
+- “你本人”是一个需要原样保留的人员名称，不要改写成“本人”“我”或“用户本人”。
+- “信息化条线为：分管领导 → 科技信息部 → 研发中心 → ITC”这类组织/部门条线不能直接变成部门对部门的 reports_to；部门层级仍写 parent，只有明确人员关系才写 report_edges。
+- 只有用户明确表达“向谁汇报、分管、决策链、影响/协作关系、正式/非正式流程”等关系时，才列入 create_edge 连线。
+- 如果用户要求组织架构或汇报关系，执行清单里必须显式区分“parent_links”和“report_edges”。
+- report_edges 中每个 source/target 必须能在 create_people/create_departments 或当前图结构中找到；从零建图时，像“分管领导、负责人、联系人、外包人员”这类边端点必须先列入 create_people。
+- 后端会按 departments → people → parent_links → radial layout → report_edges 执行；你只负责把事实放进 schema。
+- 从零新建完整组织架构时，必须输出足以支持部门初始尺寸预估的信息：每个部门的直属人员、子部门、负责人/汇报中心。
+- 布局目标写成 radial 约束：权力中心在上，直属部门向下横向辐射，部门内负责人居中在下属上方，子部门递归扇出。
+- 不要把 CEO/总裁/负责人所在的“总裁办/领导办公室/管理层”误当成全公司根容器；如果原文是“总裁办有 CEO，另下设五个部门，部门负责人向 CEO 汇报”，则总裁办与五个部门是同级顶层容器，五个部门不是总裁办的子部门。只有原文明确说“总裁办下设某部门”时，才把该部门挂到总裁办下面。
+- create_departments / create_people / parent_links / report_edges 都必须是数组；同一数组里的彼此独立任务预期在 execution 阶段同轮批量执行。
+- 可选输出 tool_batches 仅用于说明执行批次，不要把它当主输出；主输出必须是 radial intent schema。
+- 可用核心语义：department/user 节点、parent_links 容器归属、report_edges 真实关系；坐标、容器宽高和微调由后端 radial layout 负责。
+- 不要纠结截图和视觉细节；布局只写必要步骤，结构事实以当前图结构为准。
+
+当用户要求“改名、改成、改为、重命名、改职级、改角色”且目标已存在于当前图结构时，必须输出 update_nodes，不要输出 create_departments/create_people 来表示同一个修改。
+输出格式必须是一个 JSON 对象，不要包 markdown 代码块，不要输出 JSON 之外的文本：
+{
+  "goal": "一句话目标",
+  "create_departments": [
+    {"name": "部门/公司/板块名", "parent": "父级名称或空字符串", "notes": "可选说明"}
+  ],
+  "create_people": [
+    {"name": "姓名", "title": "职务或空字符串", "parent": "所属部门名称"}
+  ],
+  "update_nodes": [
+    {"ref": "当前图中已有节点名称或 id", "name": "新名称，可空", "position": "新职务，可空", "role": "A|D|I|S，可空", "reason": "改名/改职级/改角色"}
+  ],
+  "parent_links": [
+    {"child": "子部门或人员名称", "parent": "父部门名称", "reason": "层级/下设/隶属"}
+  ],
+  "report_edges": [
+    {"source": "汇报人/发起方", "target": "被汇报人/决策方", "relation": "reports_to|influences", "reason": "原文明确依据"}
+  ],
+  "layout_roots": ["权力中心或最高负责人名称"],
+  "rank_groups": [["同层横向展开的部门或人员名称"]],
+  "constraints": ["radial: 权力中心在上，直属部门向下横向辐射；后端根据部门人员数和子部门数预估初始尺寸"],
+  "department_people_counts": {"部门名": 3},
+  "tool_batches": [
+    {
+      "phase": "create_departments|create_people|set_parent|radial_layout|create_edges|final_check",
+      "parallel": true,
+      "calls": [
+        {"tool": "backend_intent|radial_layout|create_edge", "args": {"name_ref": "可用名称引用待执行时解析"}}
+      ],
+      "why": "这一批解决什么"
+    }
+  ],
+  "done_when": ["完成条件"]
+}
+如果某类任务为空，输出空数组。不要把 parent_links 复制进 report_edges。不要输出像素坐标。
+"""
+
+
+_POWER_MAP_SEMANTIC_CLEAN_SYSTEM_PROMPT = """你是权力地图事实清洗器，只负责把用户原始表达压缩成后续建图和工具规划可用的事实清单。
+
+你只有两个合法输出：
+1. 如果原文已经是清晰、短小、可直接建图的指令，或者无法在不丢失建图事实的前提下显著压缩，只输出一行：__RAW_OK__
+2. 如果原文包含大量背景/废话/重复内容，输出一个紧凑 JSON 对象，且必须比原文至少减少 40%。
+
+硬性要求：
+- 不调用工具，不输出思考过程，不写寒暄。
+- 你必须理解权力地图怎么画：department 是容器节点，可代表公司/集团/板块/部门/小组并可嵌套；user 是人员叶子节点，必须挂到某个 department；reports_to/influences/collaborates 是连线，不等同于组织包含。
+- 只保留会影响权力地图结构和布局的内容：组织容器、人员、职务、人员所属容器、容器层级归属、真实汇报/分管/决策/协作关系、流程关系、明确的否定约束。
+- 删除低信号背景：公司宣传、业务介绍、历史沿革、技术科普、情绪词、重复描述、与建图无关的形容词。
+- 重复事实必须去重；同一个组织、人员或关系只保留一次。
+- 不要自行补充用户没有说的节点或关系；不确定的内容放入 constraints_or_notes。
+- 区分 parent_links 与 report_edges：下设、包含、隶属、板块下属默认是 parent_links；只有“向谁汇报、分管、决策链、抄报、正式/非正式流程、影响/协作”等才是 report_edges。
+- 区分 node 与 edge：CEO/总裁/负责人是人员节点，不是部门容器；“下设五个部门”是部门容器；“部门负责人都向黄宇汇报”是多条 reports_to 边。
+- 业务层级词要保留为容器归属：集团/公司/总部/子公司/事业部/中心/部门/区域/城市组/门店/小组/班组均可嵌套，不要把这些词压缩丢。
+- 原文明确 A 属于/下设/隶属/归属 B 时，必须保留为 parent_links；即使 A 的负责人向其他人汇报，也不能因此改变 A 的容器父级。
+- 不要把 CEO/总裁所在的“总裁办/领导办公室/管理层”默认当作全公司根容器；“总裁办有 CEO，另下设五个部门，负责人向 CEO 汇报”应清洗为总裁办与五个部门同级，五个部门通过 reports_to 连到 CEO。
+- “你本人”是原文里的人员名称，必须原样放入 p，不要改写成“本人”“我”或“用户本人”。
+- “信息化条线为：分管领导 → 科技信息部 → 研发中心 → ITC”这类组织/部门条线不要直接放入 e 形成部门对部门 reports_to；保留部门 parent 层级，结合关键人员时再输出人员边，例如“你本人→吕亚平”“刘墨林→分管领导”。
+- 短清单如果已经是可建图事实，只输出 __RAW_OK__；不要原样返回，更不要扩写成 JSON。
+- 长背景才清洗成 JSON。清洗 JSON 应该服务于建图，不是客户背景摘要。
+- 压缩率硬约束：输出必须比原文至少减少 40%，即输出字符数 <= 原文字符数的 60%，且最多 1600 个中文字符。
+- 如果无法在不丢失建图事实的前提下达到该压缩率，不要改写、不要 JSON 化、不要扩写，只输出 __RAW_OK__。
+- 短输入通常不需要清洗；如果原文已经是清晰的组织结构清单，只输出 __RAW_OK__。
+- 禁止为了满足 JSON 格式而扩写短输入；JSON 只用于确实能显著压缩的长背景文本。
+- JSON 必须极简：优先使用短字段 g/d/p/e/c，不要输出 evidence/reason/notes/background/ignored_background_summary 这类解释性字段；不要复制原文长句。
+- d 中每个父容器名必须也在 d 中出现，根容器父级填空字符串；p 中每个人的所属容器必须在 d 中出现。
+- e 中每个 source/target 都必须同时出现在 d 或 p；像“分管领导、负责人、联系人、外包人员”这类端点是人员时必须放入 p，不允许只在 e 里出现。
+- departments 最多 35 项，people 最多 25 项，report_edges 最多 30 条，constraints_or_notes 最多 6 条且每条不超过 18 个中文字符。
+- 如果信息很多，优先保留 departments.parent、people.department、report_edges、constraints_or_notes；可以省略空数组。
+
+当且仅当需要清洗长文本时，输出下面这种 compact JSON；否则只输出 __RAW_OK__。不要包 markdown 代码块，不要输出其它文本：
+{
+  "g": "30字内目标",
+  "d": [["容器名", "父容器名或空", "company|group|department|team|board|other"]],
+  "p": [["姓名", "职务或空", "所属容器名"]],
+  "e": [["发起方", "接收方", "reports_to|influences"]],
+  "c": ["不要混淆、待确认、已离开等重要约束"]
+}"""
+
+
+def _build_kimi_execution_seed(
+    *,
+    graph_state_text: str,
+    plan_text: str,
+) -> list[dict[str, Any]]:
+    return [
+        {"type": "text", "text": graph_state_text},
+        {"type": "text", "text": f"## 首轮执行计划\n{plan_text.strip()}"},
+        {
+            "type": "text",
+            "text": (
+                "## 执行约束\n"
+                "- 不要重新解读原始用户指令；本轮以后只以“首轮执行计划”和当前图结构为任务来源。\n"
+                "- 不要输出新的计划、Step 开始说明或长篇解释；未完成时必须直接调用工具。\n"
+                "- 结构编辑优先批量执行 create_node / set_parent / create_edge。\n"
+                "- 层级归属、下设、包含、隶属只用 parent_id / set_parent，不要为了组织层级额外创建 create_edge。\n"
+                "- create_edge 只用于计划中“汇报/决策连线（create_edge）”列出的真实关系；如果计划包含这些连线，edges=0 不能视为完成。\n"
+                "- 如果首轮执行计划是 JSON，必须按数组批量消耗：update_nodes → create_departments → create_people → parent_links → report_edges → layout_steps。\n"
+                "- update_nodes 表示修改当前图中已有节点，必须调用 update_node；不要为了改名/改职级/改角色创建新节点。\n"
+                "- 如果首轮执行计划包含 tool_batches，优先按 tool_batches 的 phase 顺序执行；parallel=true 的 calls 必须尽量同轮批量发出。\n"
+                "- tool_batches 是本次任务的具体执行蓝图，不是 SOP 文本；不要跳过其中尚未完成的结构批次。\n"
+                "- 同一数组中尚未完成的独立项必须尽量在同一轮发出多个 tool_calls；禁止把数组项逐条拆成多轮。\n"
+                "- 先完成节点和真实汇报/决策连线，再做必要布局。\n"
+                "- 后端会根据首轮执行计划尝试 radial layout：按部门人员数/子部门数预估初始尺寸，并自动计算树状辐射坐标。\n"
+                "- 你不要负责像素级坐标试错，也不要猜坐标；如果 fast path 未启用或校验失败，再按工具 loop 小步回退执行。"
+            ),
+        },
+    ]
+
+
+async def _run_power_map_semantic_cleaning_round(
+    *,
+    client: OpenAICompatibleAgentClient,
+    model: str,
+    user_text: str,
+    graph_state_text: str,
+    session_id: str,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Use a cheap non-thinking LLM pass to distill raw text before planning."""
+    raw_text = (user_text or "").strip()
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": f"## 用户原始指令\n{raw_text}"},
+            {"type": "text", "text": graph_state_text},
+        ],
+    }]
+    text_chars = sum(len(str(block.get("text", ""))) for block in messages[0]["content"])
+    logger.info(
+        "[DEBUG-J] KIMI_CLEAN_REQ session=%s model=%s thinking_enabled=%s msg_count=%d raw_chars=%d total_chars=%d",
+        session_id, model, False, len(messages), len(raw_text), text_chars,
+    )
+    yield {
+        "type": "progress",
+        "text": "清洗阶段：正在提取有效建图信息，过滤低信号背景...\n",
+    }
+
+    cleaned_parts: list[str] = []
+    response_usage: dict[str, Any] | None = None
+    started = time.time()
+    last_progress_at = started
+    next_chunk_task: asyncio.Task[Any] | None = None
+    try:
+        stream = client.messages_create_with_history_stream(
+            model=model,
+            system=_POWER_MAP_SEMANTIC_CLEAN_SYSTEM_PROMPT,
+            messages=messages,
+            max_tokens=1024,
+            kimi_thinking=False,
+        )
+        iterator = stream.__aiter__()
+        next_chunk_task = asyncio.create_task(iterator.__anext__())
+        while True:
+            try:
+                chunk = await asyncio.wait_for(asyncio.shield(next_chunk_task), timeout=8.0)
+            except TimeoutError:
+                now = time.time()
+                if now - last_progress_at >= 7.5:
+                    last_progress_at = now
+                    yield {
+                        "type": "progress",
+                        "text": "清洗阶段：模型仍在压缩长文本，正在提取组织实体和关系...\n",
+                    }
+                continue
+            except StopAsyncIteration:
+                break
+
+            next_chunk_task = asyncio.create_task(iterator.__anext__())
+            if isinstance(chunk, str) and chunk:
+                cleaned_parts.append(chunk)
+            elif isinstance(chunk, dict):
+                if chunk.get("type") == "content" and chunk.get("text"):
+                    cleaned_parts.append(str(chunk.get("text") or ""))
+                elif chunk.get("type") == "usage" and isinstance(chunk.get("usage"), dict):
+                    response_usage = chunk.get("usage")
+
+        cleaned_text = _validate_power_map_cleaned_text(
+            raw_text=raw_text,
+            cleaned_text="".join(cleaned_parts),
+            session_id=session_id,
+        )
+        logger.info(
+            "[DEBUG-J] KIMI_CLEAN_RESP session=%s status=ok latency_ms=%d raw_chars=%d cleaned_chars=%d token_usage=%s preview=%s",
+            session_id,
+            int((time.time() - started) * 1000),
+            len(raw_text),
+            len(cleaned_text),
+            json.dumps(response_usage, ensure_ascii=False) if response_usage else "unknown",
+            cleaned_text[:500],
+        )
+        if cleaned_text:
+            yield {
+                "type": "progress",
+                "text": "清洗阶段：已提取组织实体、归属和真实关系，开始规划...\n",
+            }
+        else:
+            yield {
+                "type": "progress",
+                "text": "清洗阶段：原文已经足够紧凑或清洗未达压缩要求，直接进入规划...\n",
+            }
+        yield {"type": "done", "cleaned_text": cleaned_text}
+    except Exception as exc:
+        if next_chunk_task is not None and not next_chunk_task.done():
+            next_chunk_task.cancel()
+        logger.warning(
+            "[DEBUG-J] KIMI_CLEAN_RESP session=%s status=error latency_ms=%d raw_chars=%d cleaned_chars=%d error=%s",
+            session_id,
+            int((time.time() - started) * 1000),
+            len(raw_text),
+            sum(len(p) for p in cleaned_parts),
+            str(exc)[:300],
+        )
+        yield {
+            "type": "progress",
+            "text": "清洗阶段：清洗失败，已切换为直接规划...\n",
+        }
+        yield {"type": "done", "cleaned_text": ""}
+
+
+async def _run_kimi_planning_round(
+    *,
+    client: OpenAICompatibleAgentClient,
+    model: str,
+    instruction_text: str,
+    instruction_label: str,
+    graph_state_text: str,
+    session_id: str,
+    kimi_thinking: bool = True,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Stream a Kimi-only thinking pass that turns cleaned instructions into a plan."""
+    planning_text = (instruction_text or "").strip()
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": f"## {instruction_label}\n{planning_text}"},
+            {"type": "text", "text": graph_state_text},
+        ],
+    }]
+    text_chars = sum(len(str(block.get("text", ""))) for block in messages[0]["content"])
+    logger.info(
+        "[DEBUG-J] KIMI_PLAN_REQ session=%s model=%s thinking_enabled=%s msg_count=%d instruction_chars=%d total_chars=%d input_label=%s",
+        session_id, model, kimi_thinking, len(messages), len(planning_text), text_chars, instruction_label,
+    )
+    yield {
+        "type": "progress",
+        "text": "规划阶段：正在理解用户指令，并生成结构化执行清单...\n",
+    }
+    plan_parts: list[str] = []
+    reasoning_chars = 0
+    response_usage: dict[str, Any] | None = None
+    started = time.time()
+    last_progress_at = started
+    last_reasoning_emit = 0
+    next_chunk_task: asyncio.Task[Any] | None = None
+    try:
+        stream = client.messages_create_with_history_stream(
+            model=model,
+            system=_KIMI_PLANNING_SYSTEM_PROMPT,
+            messages=messages,
+            max_tokens=4096 if kimi_thinking else 3072,
+            kimi_thinking=kimi_thinking,
+        )
+        iterator = stream.__aiter__()
+        next_chunk_task = asyncio.create_task(iterator.__anext__())
+        while True:
+            try:
+                chunk = await asyncio.wait_for(asyncio.shield(next_chunk_task), timeout=8.0)
+            except TimeoutError:
+                now = time.time()
+                if now - last_progress_at >= 7.5:
+                    last_progress_at = now
+                    yield {
+                        "type": "progress",
+                        "text": "规划阶段：模型仍在思考，正在等待下一段规划结果...\n",
+                    }
+                continue
+            except StopAsyncIteration:
+                break
+
+            next_chunk_task = asyncio.create_task(iterator.__anext__())
+            if isinstance(chunk, dict):
+                ctype = chunk.get("type")
+                if ctype == "reasoning":
+                    reasoning_chars += len(str(chunk.get("text") or ""))
+                    now = time.time()
+                    if now - last_progress_at >= 8:
+                        last_progress_at = now
+                        last_reasoning_emit = reasoning_chars
+                        yield {
+                            "type": "progress",
+                            "text": _kimi_planning_progress_summary(reasoning_chars) + "\n",
+                        }
+                elif ctype == "content":
+                    text_piece = str(chunk.get("text") or "")
+                    if text_piece:
+                        plan_parts.append(text_piece)
+                        now = time.time()
+                        if now - last_progress_at >= 3:
+                            last_progress_at = now
+                            yield {
+                                "type": "progress",
+                                "text": _kimi_planning_progress_summary(
+                                    reasoning_chars,
+                                    plan_chars=sum(len(p) for p in plan_parts),
+                                ) + "\n",
+                            }
+                elif ctype == "usage":
+                    usage = chunk.get("usage")
+                    if isinstance(usage, dict):
+                        response_usage = usage
+            elif isinstance(chunk, str) and chunk:
+                plan_parts.append(chunk)
+
+        plan_text = "".join(plan_parts).strip()
+        logger.info(
+            "[DEBUG-J] KIMI_PLAN_RESP session=%s status=ok latency_ms=%d plan_chars=%d reasoning_chars=%d token_usage=%s preview=%s",
+            session_id,
+            int((time.time() - started) * 1000),
+            len(plan_text),
+            reasoning_chars,
+            json.dumps(response_usage, ensure_ascii=False) if response_usage else "unknown",
+            plan_text[:500],
+        )
+        yield {"type": "progress", "text": "规划阶段：结构化执行清单已生成，开始调用工具...\n"}
+        yield {"type": "done", "plan_text": plan_text}
+    except Exception as exc:
+        if next_chunk_task is not None and not next_chunk_task.done():
+            next_chunk_task.cancel()
+        logger.warning(
+            "[DEBUG-J] KIMI_PLAN_RESP session=%s status=error latency_ms=%d plan_chars=%d reasoning_chars=%d error=%s",
+            session_id,
+            int((time.time() - started) * 1000),
+            sum(len(p) for p in plan_parts),
+            reasoning_chars,
+            str(exc)[:300],
+        )
+        yield {
+            "type": "progress",
+            "text": "规划阶段：计划生成失败，已切换为直接执行模式...\n",
+        }
+        yield {"type": "done", "plan_text": ""}
+
+
 # ═══════════════════════════════════════════════════════════
 #  Layout Constants (v4 — minimum intrusion)
 # ═══════════════════════════════════════════════════════════
@@ -3793,6 +4604,8 @@ def _tool_check_geometry(ctx: MergeContext, node_ids: list[str]) -> dict[str, An
             result["resolved_node_ref_sample"] = resolved_refs[:10]
             result["resolved_node_ref_count"] = len(resolved_refs)
     return result
+
+
 def _tool_auto_fix_collisions(ctx: MergeContext) -> dict[str, Any]:
     """Iteratively push overlapping nodes apart along the minimum separation vector.
     geometry_locked nodes never move. Runs up to 3 internal passes per call.
@@ -4512,7 +5325,12 @@ def _tool_update_node(
             new_name = str(v or "").strip()
             if not new_name:
                 return {"ok": False, "error": "name must not be empty"}
+            old_name = node.name
+            if old_name in ctx.nodes_by_name and ctx.nodes_by_name.get(old_name) is node:
+                del ctx.nodes_by_name[old_name]
             node.name = new_name
+            if new_name and (new_name not in ctx.nodes_by_name or ctx.nodes_by_name.get(new_name) is node):
+                ctx.nodes_by_name[new_name] = node
             applied["name"] = new_name
             continue
         # Plain string fields.
@@ -4936,11 +5754,39 @@ def _tool_set_parent(
             if cursor.parent_dept_id == node.id:
                 return {"ok": False, "error": "cycle detected: new parent is a descendant"}
             cursor = ctx.nodes_by_id.get(cursor.parent_dept_id)
+        if node.parent_dept_id == parent.id:
+            logger.info(
+                "[DEBUG-J] 7d.SET_PARENT node_id=%s new_parent=%s old_parent=%s no_op=true",
+                node.id, parent.id, _old_parent_dbg,
+            )
+            return {
+                "ok": True,
+                "no_op": True,
+                "node_id": node.id,
+                "name": node.name,
+                "new_parent_id": node.parent_dept_id,
+                "new_parent_name": parent.name or "",
+                "message": "node already has requested parent; do not repeat set_parent",
+            }
         node.parent_dept_id = parent.id
         new_parent_name = parent.name or ""
         if node.node_type == "user":
             node.department = parent.name
     else:
+        if not node.parent_dept_id:
+            logger.info(
+                "[DEBUG-J] 7d.SET_PARENT node_id=%s new_parent=%s old_parent=%s no_op=true",
+                node.id, "", _old_parent_dbg,
+            )
+            return {
+                "ok": True,
+                "no_op": True,
+                "node_id": node.id,
+                "name": node.name,
+                "new_parent_id": "",
+                "new_parent_name": "",
+                "message": "node is already top-level; do not repeat set_parent",
+            }
         node.parent_dept_id = ""
         if node.node_type == "user":
             node.department = ""
@@ -4957,6 +5803,983 @@ def _tool_set_parent(
         "new_parent_id": node.parent_dept_id,
         "new_parent_name": new_parent_name,
     }
+
+
+@dataclass
+class PowerMapIntentDepartment:
+    name: str
+    parent: str = ""
+    kind: str = "department"
+    notes: str = ""
+
+
+@dataclass
+class PowerMapIntentPerson:
+    name: str
+    title: str = ""
+    parent: str = ""
+
+
+@dataclass
+class PowerMapIntentUpdateNode:
+    ref: str
+    name: str = ""
+    position: str = ""
+    role: str = ""
+    reason: str = ""
+
+
+@dataclass
+class PowerMapIntentParentLink:
+    child: str
+    parent: str
+    reason: str = ""
+
+
+@dataclass
+class PowerMapIntentEdge:
+    source: str
+    target: str
+    relation: str = "reports_to"
+    reason: str = ""
+
+
+@dataclass
+class PowerMapIntent:
+    goal: str = ""
+    departments: list[PowerMapIntentDepartment] = field(default_factory=list)
+    people: list[PowerMapIntentPerson] = field(default_factory=list)
+    update_nodes: list[PowerMapIntentUpdateNode] = field(default_factory=list)
+    parent_links: list[PowerMapIntentParentLink] = field(default_factory=list)
+    report_edges: list[PowerMapIntentEdge] = field(default_factory=list)
+    layout_roots: list[str] = field(default_factory=list)
+    rank_groups: list[list[str]] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+def _extract_json_object_text(text: str) -> str:
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        return raw[start : end + 1]
+    return raw
+
+
+def _as_list_of_dicts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _compact_rows_to_dicts(value: Any, fields: tuple[str, ...]) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            rows.append(item)
+            continue
+        if not isinstance(item, list):
+            continue
+        row: dict[str, Any] = {}
+        for index, field_name in enumerate(fields):
+            if index < len(item):
+                row[field_name] = item[index]
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _name(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _parse_power_map_intent(plan_text: str) -> PowerMapIntent:
+    """Parse Kimi's radial intent JSON into a typed intermediate form."""
+    data = json.loads(_extract_json_object_text(plan_text))
+    if not isinstance(data, dict):
+        raise ValueError("power map intent must be a JSON object")
+
+    departments_raw = _as_list_of_dicts(data.get("departments"))
+    if not departments_raw:
+        departments_raw = _as_list_of_dicts(data.get("create_departments"))
+    if not departments_raw:
+        departments_raw = _compact_rows_to_dicts(data.get("d"), ("name", "parent", "kind"))
+    people_raw = _as_list_of_dicts(data.get("people"))
+    if not people_raw:
+        people_raw = _as_list_of_dicts(data.get("create_people"))
+    if not people_raw:
+        people_raw = _compact_rows_to_dicts(data.get("p"), ("name", "title", "department"))
+    update_nodes_raw = _as_list_of_dicts(data.get("update_nodes")) or _compact_rows_to_dicts(
+        data.get("u"),
+        ("ref", "name", "position", "role"),
+    )
+
+    departments = [
+        PowerMapIntentDepartment(
+            name=_name(item.get("name")),
+            parent=_name(item.get("parent") or item.get("parent_name") or item.get("parent_ref")),
+            kind=_name(item.get("kind") or item.get("type") or "department") or "department",
+            notes=_name(item.get("notes") or item.get("reason")),
+        )
+        for item in departments_raw
+        if _name(item.get("name"))
+    ]
+    people = [
+        PowerMapIntentPerson(
+            name=_name(item.get("name")),
+            title=_name(item.get("title") or item.get("position")),
+            parent=_name(item.get("parent") or item.get("department") or item.get("parent_name")),
+        )
+        for item in people_raw
+        if _name(item.get("name"))
+    ]
+    update_nodes = [
+        PowerMapIntentUpdateNode(
+            ref=_name(item.get("ref") or item.get("node") or item.get("node_ref") or item.get("old_name")),
+            name=_name(item.get("name") or item.get("new_name")),
+            position=_name(item.get("position") or item.get("title")),
+            role=_name(item.get("role")),
+            reason=_name(item.get("reason") or item.get("evidence")),
+        )
+        for item in update_nodes_raw
+        if _name(item.get("ref") or item.get("node") or item.get("node_ref") or item.get("old_name"))
+    ]
+    parent_links_raw = _as_list_of_dicts(data.get("parent_links")) or _compact_rows_to_dicts(
+        data.get("pl"),
+        ("child", "parent"),
+    )
+    parent_links = [
+        PowerMapIntentParentLink(
+            child=_name(item.get("child")),
+            parent=_name(item.get("parent")),
+            reason=_name(item.get("reason") or item.get("evidence")),
+        )
+        for item in parent_links_raw
+        if _name(item.get("child")) and _name(item.get("parent"))
+    ]
+    report_edges_raw = _as_list_of_dicts(data.get("report_edges")) or _compact_rows_to_dicts(
+        data.get("e"),
+        ("source", "target", "relation"),
+    )
+    report_edges = [
+        PowerMapIntentEdge(
+            source=_name(item.get("source")),
+            target=_name(item.get("target")),
+            relation=_name(item.get("relation") or item.get("edge_type") or "reports_to") or "reports_to",
+            reason=_name(item.get("reason") or item.get("evidence")),
+        )
+        for item in report_edges_raw
+        if _name(item.get("source")) and _name(item.get("target"))
+    ]
+    layout_roots = [_name(x) for x in (data.get("layout_roots") or []) if _name(x)]
+    rank_groups = [
+        [_name(x) for x in group if _name(x)]
+        for group in (data.get("rank_groups") or [])
+        if isinstance(group, list)
+    ]
+    constraints_source = data.get("constraints") or data.get("constraints_or_notes") or data.get("c") or []
+    constraints = [
+        _name(x) if not isinstance(x, dict) else json.dumps(x, ensure_ascii=False)
+        for x in constraints_source
+        if _name(x) or isinstance(x, dict)
+    ]
+    return PowerMapIntent(
+        goal=_name(data.get("goal") or data.get("effective_goal") or data.get("g")),
+        departments=departments,
+        people=people,
+        update_nodes=update_nodes,
+        parent_links=parent_links,
+        report_edges=report_edges,
+        layout_roots=layout_roots,
+        rank_groups=[g for g in rank_groups if g],
+        constraints=constraints,
+        raw=data,
+    )
+
+
+def _normalize_authority_home_department_parents(intent: PowerMapIntent) -> list[str]:
+    """Correct a common planning mistake before layout.
+
+    Models often read "总裁办：黄宇任 CEO。下设五个部门，负责人都向黄宇汇报"
+    as "总裁办 contains every business department". In the power-map model,
+    the CEO's own office is a peer container; the real hierarchy is expressed
+    by report_edges from each department leader to the CEO.
+    """
+    departments_by_name = {dept.name: dept for dept in intent.departments if dept.name}
+    people_parent = {person.name: person.parent for person in intent.people if person.name}
+    if not departments_by_name or not people_parent or not intent.report_edges:
+        return []
+
+    child_depts_by_parent: dict[str, set[str]] = {}
+    for dept in intent.departments:
+        if dept.name and dept.parent:
+            child_depts_by_parent.setdefault(dept.parent, set()).add(dept.name)
+    for link in intent.parent_links:
+        if link.child in departments_by_name and link.parent:
+            child_depts_by_parent.setdefault(link.parent, set()).add(link.child)
+
+    target_counts: dict[str, int] = {}
+    for edge in intent.report_edges:
+        relation = (edge.relation or "reports_to").strip().lower()
+        if relation == "reports_to":
+            target_counts[edge.target] = target_counts.get(edge.target, 0) + 1
+
+    max_target_count = max(target_counts.values(), default=0)
+    explicit_roots = [name for name in intent.layout_roots if name in people_parent]
+    inferred_roots = [
+        name for name, count in sorted(target_counts.items(), key=lambda kv: kv[1], reverse=True)
+        if name in people_parent and count == max_target_count and count >= 2
+    ]
+    root_people: list[str] = []
+    for name in explicit_roots + inferred_roots:
+        if name not in root_people:
+            root_people.append(name)
+
+    def _descendant_depts(root_dept: str) -> set[str]:
+        seen: set[str] = set()
+        stack = list(child_depts_by_parent.get(root_dept, set()))
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(child_depts_by_parent.get(current, set()))
+        return seen
+
+    def _people_in_dept_tree(root_dept: str) -> set[str]:
+        dept_names = {root_dept} | _descendant_depts(root_dept)
+        return {person for person, parent in people_parent.items() if parent in dept_names}
+
+    corrections: list[str] = []
+    lift_depts: set[str] = set()
+    def _looks_like_neutral_org_root(dept_name: str) -> bool:
+        dept = departments_by_name.get(dept_name)
+        kind = (dept.kind if dept else "").strip().lower()
+        if kind in {"company", "group"}:
+            return True
+        return any(
+            marker in dept_name
+            for marker in ("集团", "公司", "控股", "总部", "事业群")
+        )
+
+    def _looks_like_nested_operating_unit(dept_name: str) -> bool:
+        return dept_name.endswith("组") or any(
+            marker in dept_name
+            for marker in ("小组", "班组", "门店", "团队", "项目组", "工作组")
+        )
+
+    preserve_all_hierarchy = any(
+        marker in re.sub(r"\s+", "", str(part or ""))
+        for part in (intent.goal, *intent.constraints)
+        for marker in (
+            "不改变部门容器层级",
+            "不改变组织层级",
+            "不改变组织归属",
+            "保持部门层级",
+            "保持组织归属",
+        )
+    )
+    if preserve_all_hierarchy:
+        return []
+
+    def _has_explicit_internal_office_scope(home_dept: str, child_depts: set[str]) -> bool:
+        haystacks = [intent.goal, *intent.constraints]
+        for dept in intent.departments:
+            if dept.name == home_dept or dept.name in child_depts:
+                haystacks.append(dept.notes)
+        for link in intent.parent_links:
+            if link.parent == home_dept and link.child in child_depts:
+                haystacks.append(link.reason)
+        child_names = [name for name in sorted(child_depts, key=len, reverse=True) if name]
+        if not child_names:
+            return False
+        child_pattern = "|".join(re.escape(name) for name in child_names)
+
+        for part in haystacks:
+            text = re.sub(r"\s+", "", str(part or ""))
+            if not text or home_dept not in text or not any(child in text for child in child_names):
+                continue
+            # Avoid the broad false positive "总裁办 ... 下设五个部门": only
+            # preserve the parent when a named child is explicitly scoped to
+            # the authority-home department.
+            if re.search(rf"{re.escape(home_dept)}.{{0,16}}(内部|办公室内|内).{{0,24}}({child_pattern})", text):
+                return True
+            if re.search(rf"({child_pattern}).{{0,24}}(内部|办公室内|内).{{0,16}}{re.escape(home_dept)}", text):
+                return True
+            if re.search(rf"{re.escape(home_dept)}.{{0,16}}(下设|直属|包含|设有|管理).{{0,24}}({child_pattern})", text):
+                return True
+            if re.search(rf"({child_pattern}).{{0,24}}(属于|归属|隶属|直属|划归).{{0,16}}{re.escape(home_dept)}", text):
+                return True
+        return False
+
+    for root_person in root_people:
+        home_dept = people_parent.get(root_person, "")
+        if not home_dept:
+            continue
+        if _looks_like_neutral_org_root(home_dept):
+            continue
+        child_depts = {
+            name for name in child_depts_by_parent.get(home_dept, set())
+            if name in departments_by_name
+        }
+        if len(child_depts) < 2:
+            continue
+        if any(_looks_like_nested_operating_unit(name) for name in child_depts):
+            continue
+        if _has_explicit_internal_office_scope(home_dept, child_depts):
+            continue
+        reporting_child_depts: set[str] = set()
+        for dept_name in child_depts:
+            dept_people = _people_in_dept_tree(dept_name)
+            if any(
+                edge.source in dept_people
+                and edge.target == root_person
+                and (edge.relation or "reports_to").strip().lower() == "reports_to"
+                for edge in intent.report_edges
+            ):
+                reporting_child_depts.add(dept_name)
+        if len(reporting_child_depts) < 2:
+            continue
+        lift_depts.update(reporting_child_depts)
+        corrections.append(
+            f"lift {len(reporting_child_depts)} departments from {home_dept} to top-level because their leaders report to {root_person}"
+        )
+
+    if not lift_depts:
+        return []
+
+    for dept_name in lift_depts:
+        dept = departments_by_name.get(dept_name)
+        if dept:
+            home_parent = departments_by_name.get(dept.parent)
+            dept.parent = home_parent.parent if home_parent else ""
+    intent.parent_links = [
+        link
+        for link in intent.parent_links
+        if not (link.child in lift_depts and link.parent in people_parent.values())
+    ]
+    return corrections
+
+
+def _validate_power_map_intent(intent: PowerMapIntent, ctx: MergeContext | None = None) -> dict[str, Any]:
+    """Validate references before mutating MergeContext."""
+    hierarchy_corrections = _normalize_authority_home_department_parents(intent)
+    ctx = ctx or MergeContext()
+    errors: list[str] = []
+    department_names: set[str] = {
+        n.name for n in ctx.all_nodes if n.node_type == "dept" and n.name
+    }
+    person_names: set[str] = {
+        n.name for n in ctx.all_nodes if n.node_type == "user" and n.name
+    }
+    all_names: set[str] = {n.name for n in ctx.all_nodes if n.name}
+
+    seen_depts: set[str] = set()
+    for dept in intent.departments:
+        if dept.name in seen_depts:
+            errors.append(f"duplicate department in intent: {dept.name}")
+        seen_depts.add(dept.name)
+        department_names.add(dept.name)
+        all_names.add(dept.name)
+
+    seen_people: set[str] = set()
+    for person in intent.people:
+        if person.name in seen_people:
+            errors.append(f"duplicate person in intent: {person.name}")
+        seen_people.add(person.name)
+        person_names.add(person.name)
+        all_names.add(person.name)
+
+    for update in intent.update_nodes:
+        if update.ref not in ctx.nodes_by_id and update.ref not in all_names:
+            errors.append(f"update_node ref '{update.ref}' not found")
+        if update.name:
+            all_names.add(update.name)
+
+    department_parent_by_name: dict[str, str] = {}
+    for node in ctx.all_nodes:
+        if node.node_type != "dept" or not node.name:
+            continue
+        parent_name = ""
+        if node.parent_dept_id:
+            parent = ctx.nodes_by_id.get(node.parent_dept_id)
+            parent_name = parent.name if parent and parent.name else ""
+        department_parent_by_name[node.name] = parent_name
+    for dept in intent.departments:
+        if dept.name:
+            department_parent_by_name[dept.name] = dept.parent
+
+    for dept in intent.departments:
+        if dept.parent and dept.parent not in department_names:
+            errors.append(f"department '{dept.name}' parent '{dept.parent}' not found")
+
+    for person in intent.people:
+        if not person.parent:
+            errors.append(f"person '{person.name}' missing parent department")
+        elif person.parent not in department_names:
+            errors.append(f"person '{person.name}' parent '{person.parent}' not found")
+
+    for link in intent.parent_links:
+        if link.child not in all_names:
+            errors.append(f"parent_link child '{link.child}' not found")
+        if link.parent not in department_names:
+            errors.append(f"parent_link parent '{link.parent}' not found")
+
+    def _department_is_ancestor(ancestor_name: str, child_name: str) -> bool:
+        seen: set[str] = set()
+        parent_name = department_parent_by_name.get(child_name, "")
+        while parent_name and parent_name not in seen:
+            if parent_name == ancestor_name:
+                return True
+            seen.add(parent_name)
+            parent_name = department_parent_by_name.get(parent_name, "")
+        return False
+
+    for edge in intent.report_edges:
+        relation = (edge.relation or "reports_to").strip().lower()
+        if relation not in _VALID_EDGE_TYPES:
+            errors.append(f"edge '{edge.source}->{edge.target}' invalid relation '{edge.relation}'")
+        if edge.source not in all_names:
+            errors.append(f"edge source '{edge.source}' not found")
+        if edge.target not in all_names:
+            errors.append(f"edge target '{edge.target}' not found")
+        if (
+            relation == "reports_to"
+            and edge.source in department_names
+            and edge.target in department_names
+            and (
+                _department_is_ancestor(edge.source, edge.target)
+                or _department_is_ancestor(edge.target, edge.source)
+            )
+        ):
+            errors.append(
+                "department hierarchy edge must be parent_link, not reports_to: "
+                f"{edge.source}->{edge.target}"
+            )
+
+    return {"ok": not errors, "errors": errors, "hierarchy_corrections": hierarchy_corrections}
+
+
+def _validate_power_map_plan_against_instruction(
+    *,
+    instruction_text: str,
+    intent: PowerMapIntent,
+) -> list[str]:
+    """Catch high-signal facts that the planning round must not drop."""
+    text = instruction_text or ""
+    all_names = {
+        *(dept.name for dept in intent.departments if dept.name),
+        *(person.name for person in intent.people if person.name),
+        *(update.ref for update in intent.update_nodes if update.ref),
+        *(update.name for update in intent.update_nodes if update.name),
+        *(link.child for link in intent.parent_links if link.child),
+        *(link.parent for link in intent.parent_links if link.parent),
+        *(edge.source for edge in intent.report_edges if edge.source),
+        *(edge.target for edge in intent.report_edges if edge.target),
+    }
+    errors: list[str] = []
+    for required_name in ("你本人", "分管领导"):
+        if required_name in text and required_name not in all_names:
+            errors.append(f"required entity missing from plan: {required_name}")
+    explicit_reporting = any(
+        marker in text
+        for marker in ("汇报", "分管", "直属上级", "决策链", "抄报")
+    )
+    if explicit_reporting and not intent.report_edges:
+        errors.append("instruction requires reporting relationships but report_edges is empty")
+    return errors
+
+
+def _estimate_radial_department_size(
+    *,
+    direct_people_count: int = 0,
+    child_department_count: int = 0,
+    max_people_per_row: int = 4,
+    child_width_sum: float = 0.0,
+    child_max_height: float = 0.0,
+) -> dict[str, float]:
+    """Estimate a department container before placing children.
+
+    This deliberately happens before people are inserted into the visual
+    container so people-heavy departments start with enough room and do not
+    require repeated fit/expand rounds.
+    """
+    people = max(0, int(direct_people_count or 0))
+    child_depts = max(0, int(child_department_count or 0))
+    people_per_row = max(1, int(max_people_per_row or 4))
+    people_cols = min(max(1, people), people_per_row) if people else 0
+    people_rows = math.ceil(people / people_per_row) if people else 0
+    people_width = (
+        people_cols * PERSON_W + max(0, people_cols - 1) * MIN_GAP_BETWEEN_USERS
+        if people_cols else 0
+    )
+    people_height = (
+        people_rows * PERSON_H + max(0, people_rows - 1) * MIN_GAP_BETWEEN_USERS
+        if people_rows else 0
+    )
+    child_width = child_width_sum or (
+        child_depts * DEPT_MIN_W + max(0, child_depts - 1) * MIN_GAP_BETWEEN_DEPTS
+    )
+    child_height = child_max_height if child_depts else 0
+    content_w = max(people_width, child_width, DEPT_MIN_W - DEPT_PAD_LEFT - DEPT_PAD_RIGHT)
+    content_h = people_height + child_height
+    if people_height and child_height:
+        content_h += _LEVEL_GAP_V
+    if not content_h:
+        content_h = DEPT_MIN_H - DEPT_PAD_TOP - DEPT_PAD_BOTTOM
+    return {
+        "w": float(max(DEPT_MIN_W, content_w + DEPT_PAD_LEFT + DEPT_PAD_RIGHT)),
+        "h": float(max(DEPT_MIN_H, content_h + DEPT_PAD_TOP + DEPT_PAD_BOTTOM)),
+    }
+
+
+def _intent_edge_id_pairs(ctx: MergeContext, intent: PowerMapIntent | None = None) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    if intent:
+        for edge in intent.report_edges:
+            src = ctx.nodes_by_id.get(edge.source) or ctx.nodes_by_name.get(edge.source)
+            tgt = ctx.nodes_by_id.get(edge.target) or ctx.nodes_by_name.get(edge.target)
+            if src and tgt:
+                pairs.append((src.id, tgt.id))
+    for edge in ctx.edges:
+        if str(edge.get("edge_type") or "reports_to") != "reports_to":
+            continue
+        sid = str(edge.get("source_id") or "")
+        tid = str(edge.get("target_id") or "")
+        if sid and tid:
+            pairs.append((sid, tid))
+    return pairs
+
+
+def _build_radial_layout_tree(ctx: MergeContext, intent: PowerMapIntent | None = None) -> dict[str, Any]:
+    children_by_parent: dict[str, list[str]] = {}
+    for node in ctx.all_nodes:
+        children_by_parent.setdefault(node.parent_dept_id or "", []).append(node.id)
+    return {
+        "children_by_parent": children_by_parent,
+        "node_ids": [n.id for n in ctx.all_nodes],
+        "report_edges": _intent_edge_id_pairs(ctx, intent),
+    }
+
+
+def _compute_radial_org_layout(
+    ctx: MergeContext,
+    *,
+    intent: PowerMapIntent | None = None,
+    origin_x: float = 100.0,
+    origin_y: float = 100.0,
+) -> dict[str, Any]:
+    """Compute a deterministic top-down radial/tree layout.
+
+    The algorithm projects reports_to edges onto each container's direct
+    children, then lays managers/owning departments above their reports.
+    """
+    _reindex_ctx(ctx)
+    tree = _build_radial_layout_tree(ctx, intent)
+    children_by_parent: dict[str, list[str]] = tree["children_by_parent"]
+    report_pairs: list[tuple[str, str]] = tree["report_edges"]
+    node_by_id = ctx.nodes_by_id
+    estimated: dict[str, dict[str, float]] = {}
+    rel_pos: dict[str, dict[str, tuple[float, float]]] = {}
+
+    for node in ctx.all_nodes:
+        if node.node_type == "user":
+            node.w = PERSON_W
+            node.h = PERSON_H
+
+    def _direct_child_for_node(node_id: str, container_id: str) -> str:
+        node = node_by_id.get(node_id)
+        if not node:
+            return ""
+        if node.id == container_id:
+            return ""
+        current = node
+        direct_id = node.id
+        while current.parent_dept_id and current.parent_dept_id in node_by_id:
+            parent_id = current.parent_dept_id
+            if parent_id == container_id:
+                return direct_id
+            direct_id = parent_id
+            current = node_by_id[parent_id]
+        if not container_id:
+            return direct_id
+        return ""
+
+    def _layer_children(container_id: str, child_ids: list[str]) -> dict[int, list[str]]:
+        child_set = set(child_ids)
+        managers: dict[str, list[str]] = {cid: [] for cid in child_ids}
+        directs: dict[str, list[str]] = {cid: [] for cid in child_ids}
+        for source_id, target_id in report_pairs:
+            source_child = _direct_child_for_node(source_id, container_id)
+            target_child = _direct_child_for_node(target_id, container_id)
+            if (
+                source_child
+                and target_child
+                and source_child != target_child
+                and source_child in child_set
+                and target_child in child_set
+            ):
+                managers[source_child].append(target_child)
+                directs[target_child].append(source_child)
+        layers: dict[str, int] = {}
+        queue: list[str] = []
+        for cid in child_ids:
+            if not managers[cid]:
+                layers[cid] = 0
+                queue.append(cid)
+        while queue:
+            manager_id = queue.pop(0)
+            for direct_id in directs.get(manager_id, []):
+                cand = layers[manager_id] + 1
+                if direct_id not in layers or layers[direct_id] < cand:
+                    layers[direct_id] = cand
+                    queue.append(direct_id)
+        for cid in child_ids:
+            layers.setdefault(cid, 0)
+        out: dict[int, list[str]] = {}
+        for cid in child_ids:
+            out.setdefault(layers[cid], []).append(cid)
+        return out
+
+    def _layout_rows(container_id: str, child_ids: list[str]) -> tuple[float, float, dict[str, tuple[float, float]]]:
+        if not child_ids:
+            return 0.0, 0.0, {}
+        layers = _layer_children(container_id, child_ids)
+        physical_rows: list[list[str]] = []
+
+        def _wrap_rank(row: list[str]) -> list[list[str]]:
+            if len(row) <= 6:
+                return [row]
+            total_area = sum(
+                (node_by_id[cid].w + MIN_GAP_BETWEEN_DEPTS)
+                * (node_by_id[cid].h + _LEVEL_GAP_V)
+                for cid in row
+            )
+            widest = max((node_by_id[cid].w for cid in row), default=DEPT_MIN_W)
+            width_budget = min(
+                4800.0,
+                max(2400.0, widest, math.sqrt(max(total_area, 1.0)) * 2.4),
+            )
+            wrapped: list[list[str]] = []
+            current: list[str] = []
+            current_width = 0.0
+            for cid in row:
+                node_width = node_by_id[cid].w
+                candidate_width = (
+                    current_width
+                    + (MIN_GAP_BETWEEN_DEPTS if current else 0.0)
+                    + node_width
+                )
+                if current and candidate_width > width_budget:
+                    wrapped.append(current)
+                    current = [cid]
+                    current_width = node_width
+                else:
+                    current.append(cid)
+                    current_width = candidate_width
+            if current:
+                wrapped.append(current)
+            return wrapped
+
+        for layer in sorted(layers):
+            physical_rows.extend(_wrap_rank(layers[layer]))
+
+        row_widths: list[float] = []
+        row_heights: list[float] = []
+        for row in physical_rows:
+            row_widths.append(
+                sum(node_by_id[cid].w for cid in row)
+                + MIN_GAP_BETWEEN_DEPTS * max(0, len(row) - 1)
+            )
+            row_heights.append(max((node_by_id[cid].h for cid in row), default=0.0))
+        content_w = max(row_widths) if row_widths else 0.0
+        content_h = sum(row_heights) + _LEVEL_GAP_V * max(0, len(row_heights) - 1)
+        placed: dict[str, tuple[float, float]] = {}
+        cursor_y = 0.0
+        for idx, row in enumerate(physical_rows):
+            row_width = row_widths[idx]
+            cursor_x = (content_w - row_width) / 2.0
+            for cid in row:
+                node = node_by_id[cid]
+                placed[cid] = (cursor_x, cursor_y)
+                cursor_x += node.w + MIN_GAP_BETWEEN_DEPTS
+            cursor_y += row_heights[idx] + _LEVEL_GAP_V
+        return content_w, content_h, placed
+
+    def _measure_dept(dept_id: str) -> tuple[float, float]:
+        node = node_by_id[dept_id]
+        child_ids = children_by_parent.get(dept_id, [])
+        for cid in child_ids:
+            child = node_by_id[cid]
+            if child.node_type == "dept":
+                _measure_dept(cid)
+        content_w, content_h, placed = _layout_rows(dept_id, child_ids)
+        rel_pos[dept_id] = placed
+        direct_people_count = sum(1 for cid in child_ids if node_by_id[cid].node_type == "user")
+        child_dept_ids = [cid for cid in child_ids if node_by_id[cid].node_type == "dept"]
+        estimate = _estimate_radial_department_size(
+            direct_people_count=direct_people_count,
+            child_department_count=len(child_dept_ids),
+            child_width_sum=content_w if child_dept_ids else 0.0,
+            child_max_height=max((node_by_id[cid].h for cid in child_dept_ids), default=0.0),
+        )
+        node.w = max(float(estimate["w"]), content_w + DEPT_PAD_LEFT + DEPT_PAD_RIGHT)
+        node.h = max(float(estimate["h"]), content_h + DEPT_PAD_TOP + DEPT_PAD_BOTTOM)
+        estimated[node.name or node.id] = {"w": float(node.w), "h": float(node.h)}
+        return node.w, node.h
+
+    for node in ctx.all_nodes:
+        if node.node_type == "dept":
+            # Measured recursively from top-level roots below; skip nested here.
+            continue
+    top_level = children_by_parent.get("", [])
+    for cid in top_level:
+        child = node_by_id[cid]
+        if child.node_type == "dept":
+            _measure_dept(cid)
+    root_w, _root_h, root_placed = _layout_rows("", top_level)
+    _ = root_w  # retained for readability in debug dumps.
+
+    def _place_children(container_id: str, base_x: float, base_y: float) -> None:
+        placed = root_placed if container_id == "" else rel_pos.get(container_id, {})
+        pad_x = 0.0 if container_id == "" else DEPT_PAD_LEFT
+        pad_y = 0.0 if container_id == "" else DEPT_PAD_TOP
+        for cid, (rx, ry) in placed.items():
+            child = node_by_id[cid]
+            child.x = base_x + pad_x + rx
+            child.y = base_y + pad_y + ry
+            if child.node_type == "dept":
+                _place_children(child.id, child.x, child.y)
+
+    _place_children("", origin_x, origin_y)
+    try:
+        _compute_edge_ports(ctx.edges, ctx.nodes_by_id)
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "positions": {
+            node.id: {"x": node.x, "y": node.y, "w": node.w, "h": node.h, "name": node.name}
+            for node in ctx.all_nodes
+        },
+        "estimated_dept_sizes": estimated,
+        "report_edges_used": len(report_pairs),
+    }
+
+
+def _intent_name_to_node(ctx: MergeContext, ref: str) -> PowerNode | None:
+    key = _name(ref)
+    return ctx.nodes_by_id.get(key) or ctx.nodes_by_name.get(key)
+
+
+def _apply_radial_org_layout(ctx: MergeContext, intent: PowerMapIntent) -> dict[str, Any]:
+    return _compute_radial_org_layout(ctx, intent=intent)
+
+
+def _apply_power_map_intent_to_context(ctx: MergeContext, intent: PowerMapIntent) -> dict[str, Any]:
+    """Apply a validated intent in one backend-driven batch."""
+    validation = _validate_power_map_intent(intent, ctx)
+    if not validation["ok"]:
+        return {
+            "ok": False,
+            "intent_valid": False,
+            "errors": validation["errors"],
+            "fallback_reason": "intent_validation_failed",
+            "radial_layout_used": False,
+            "relayout_called": False,
+        }
+
+    snapshot_nodes = deepcopy(ctx.all_nodes)
+    snapshot_edges = deepcopy(ctx.edges)
+    snapshot_constraints = deepcopy(ctx.layout_constraints)
+    try:
+        created = 0
+        updated = 0
+        for update in intent.update_nodes:
+            node = _intent_name_to_node(ctx, update.ref)
+            if not node:
+                raise RuntimeError(f"update node not found: {update.ref}")
+            attrs: dict[str, Any] = {}
+            if update.name:
+                attrs["name"] = update.name
+            if update.position:
+                attrs["position"] = update.position
+            if update.role:
+                attrs["role"] = update.role
+            if not attrs:
+                continue
+            result = _tool_update_node(ctx, node.id, attrs)
+            if not result.get("ok"):
+                raise RuntimeError(str(result.get("error") or "update node failed"))
+            updated += 1
+
+        dept_by_name = {n.name: n for n in ctx.all_nodes if n.node_type == "dept" and n.name}
+        people_by_name = {n.name: n for n in ctx.all_nodes if n.node_type == "user" and n.name}
+        people_by_parent: dict[str, int] = {}
+        child_depts_by_parent: dict[str, int] = {}
+        for person in intent.people:
+            people_by_parent[person.parent] = people_by_parent.get(person.parent, 0) + 1
+        for dept in intent.departments:
+            if dept.parent:
+                child_depts_by_parent[dept.parent] = child_depts_by_parent.get(dept.parent, 0) + 1
+
+        pending = list(intent.departments)
+        while pending:
+            progressed = False
+            next_pending: list[PowerMapIntentDepartment] = []
+            for dept in pending:
+                if dept.name in dept_by_name:
+                    progressed = True
+                    continue
+                parent_id = ""
+                if dept.parent:
+                    parent = dept_by_name.get(dept.parent) or ctx.depts_by_name.get(dept.parent)
+                    if not parent:
+                        next_pending.append(dept)
+                        continue
+                    parent_id = parent.id
+                estimate = _estimate_radial_department_size(
+                    direct_people_count=people_by_parent.get(dept.name, 0),
+                    child_department_count=child_depts_by_parent.get(dept.name, 0),
+                )
+                dept_type = dept.kind if dept.kind in _CONTAINER_TYPES else "department"
+                result = _tool_create_node(
+                    ctx,
+                    dept_type,
+                    dept.name,
+                    parent_id=parent_id,
+                    attrs={},
+                    w=estimate["w"],
+                    h=estimate["h"],
+                )
+                if not result.get("ok"):
+                    raise RuntimeError(str(result.get("error") or "create department failed"))
+                node = ctx.nodes_by_id[str(result["node"]["id"])]
+                dept_by_name[dept.name] = node
+                created += 1
+                progressed = True
+            if next_pending and not progressed:
+                missing = ", ".join(d.name for d in next_pending)
+                raise RuntimeError(f"unresolved department parent chain: {missing}")
+            pending = next_pending
+
+        for person in intent.people:
+            if person.name in people_by_name:
+                continue
+            parent = dept_by_name.get(person.parent) or ctx.depts_by_name.get(person.parent)
+            if not parent:
+                raise RuntimeError(f"person parent not found: {person.name}->{person.parent}")
+            result = _tool_create_node(
+                ctx,
+                "person",
+                person.name,
+                parent_id=parent.id,
+                attrs={"position": person.title} if person.title else {},
+            )
+            if not result.get("ok"):
+                raise RuntimeError(str(result.get("error") or "create person failed"))
+            people_by_name[person.name] = ctx.nodes_by_id[str(result["node"]["id"])]
+            created += 1
+
+        for link in intent.parent_links:
+            child = _intent_name_to_node(ctx, link.child)
+            parent = dept_by_name.get(link.parent) or ctx.depts_by_name.get(link.parent)
+            if child and parent and child.parent_dept_id != parent.id:
+                result = _tool_set_parent(ctx, child.id, parent.id)
+                if not result.get("ok"):
+                    raise RuntimeError(str(result.get("error") or "set_parent failed"))
+
+        layout_result = _apply_radial_org_layout(ctx, intent)
+
+        edge_created = 0
+        existing_pairs = {
+            (str(e.get("source_id") or ""), str(e.get("target_id") or ""), str(e.get("edge_type") or "reports_to"))
+            for e in ctx.edges
+        }
+        for edge in intent.report_edges:
+            src = _intent_name_to_node(ctx, edge.source)
+            tgt = _intent_name_to_node(ctx, edge.target)
+            relation = (edge.relation or "reports_to").strip().lower()
+            if relation not in _VALID_EDGE_TYPES:
+                relation = "reports_to"
+            if not src or not tgt:
+                raise RuntimeError(f"edge endpoint not found: {edge.source}->{edge.target}")
+            pair = (src.id, tgt.id, relation)
+            if pair in existing_pairs:
+                continue
+            result = _tool_create_edge(ctx, src.id, tgt.id, relation)
+            if not result.get("ok"):
+                raise RuntimeError(str(result.get("error") or "create edge failed"))
+            existing_pairs.add(pair)
+            edge_created += 1
+
+        try:
+            _compute_edge_ports(ctx.edges, ctx.nodes_by_id)
+        except Exception:
+            pass
+        logger.info(
+            "[DEBUG-J] RADIAL_FAST_PATH ok intent_valid=%s radial_layout_used=%s estimated_dept_sizes=%s relayout_called=%s nodes=%d edges=%d created=%d updated=%d",
+            True,
+            True,
+            json.dumps(layout_result.get("estimated_dept_sizes", {}), ensure_ascii=False)[:1000],
+            False,
+            len(ctx.all_nodes),
+            len(ctx.edges),
+            created,
+            updated,
+        )
+        return {
+            "ok": True,
+            "intent_valid": True,
+            "radial_layout_used": True,
+            "relayout_called": False,
+            "fallback_reason": "",
+            "nodes": len(ctx.all_nodes),
+            "edges": len(ctx.edges),
+            "created": created,
+            "updated": updated,
+            "edge_created": edge_created,
+            "estimated_dept_sizes": layout_result.get("estimated_dept_sizes", {}),
+            "layout": layout_result,
+        }
+    except Exception as exc:
+        ctx.all_nodes = snapshot_nodes
+        ctx.edges = snapshot_edges
+        ctx.layout_constraints = snapshot_constraints
+        _reindex_ctx(ctx)
+        logger.warning(
+            "[DEBUG-J] RADIAL_FAST_PATH fallback intent_valid=%s radial_layout_used=%s relayout_called=%s fallback_reason=%s",
+            True,
+            False,
+            False,
+            str(exc)[:300],
+        )
+        return {
+            "ok": False,
+            "intent_valid": True,
+            "radial_layout_used": False,
+            "relayout_called": False,
+            "fallback_reason": f"apply_failed: {exc}",
+            "errors": [str(exc)],
+        }
+
+
+def _should_try_radial_fast_path(intent: PowerMapIntent, ctx: MergeContext) -> bool:
+    if not _power_map_radial_fast_path_enabled():
+        return False
+    planned_nodes = len(intent.departments) + len(intent.people)
+    if planned_nodes == 0:
+        return False
+    if planned_nodes >= 5:
+        return True
+    goal = intent.goal or json.dumps(intent.raw, ensure_ascii=False)
+    return any(marker in goal for marker in ("组织架构", "权力地图", "完整", "批量"))
 
 
 def _add_layout_constraint(
@@ -5372,6 +7195,8 @@ def _tool_relayout(
         return x
 
     def _union(a: str, b: str) -> None:
+        same_rank_root.setdefault(a, a)
+        same_rank_root.setdefault(b, b)
         ra, rb = _find(a), _find(b)
         if ra != rb:
             same_rank_root[ra] = rb
@@ -5385,15 +7210,85 @@ def _tool_relayout(
         for i in range(1, len(ids)):
             _union(ids[0], ids[i])
 
-    def _layer_children(kids: list[PowerNode]) -> dict[int, list[PowerNode]]:
+    def _direct_child_for_node(node_id: str, container_id: str) -> str:
+        """Return the direct child of container_id that owns node_id.
+
+        reports_to edges often connect people across departments. For layout,
+        those cross-container edges need to influence the container layer too:
+        if a person inside 财务部 reports to a person inside 总裁办, the direct
+        children under root are 财务部 and 总裁办.
+        """
+        node = ctx.nodes_by_id.get(node_id)
+        if not node:
+            return ""
+        if node.id == container_id:
+            return ""
+
+        current = node
+        direct_id = node.id
+        while current.parent_dept_id and current.parent_dept_id in ctx.nodes_by_id:
+            parent_id = current.parent_dept_id
+            if parent_id == container_id:
+                return direct_id
+            direct_id = parent_id
+            current = ctx.nodes_by_id[parent_id]
+
+        if not container_id:
+            return direct_id
+        return ""
+
+    def _layer_children(container_id: str, kids: list[PowerNode]) -> dict[int, list[PowerNode]]:
         kid_ids = {k.id for k in kids}
-        # subordinate → managers (within this container only)
+        # subordinate → managers. Direct edges layer people/depts inside the
+        # same container; cross-container edges are projected to each side's
+        # direct child so department containers form an org-tree fan-out.
         managers: dict[str, list[str]] = {k.id: [] for k in kids}
         directs: dict[str, list[str]] = {k.id: [] for k in kids}
+
+        def _has_direct_path(start: str, target: str) -> bool:
+            stack = [start]
+            seen: set[str] = set()
+            while stack:
+                cur = stack.pop()
+                if cur == target:
+                    return True
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                stack.extend(directs.get(cur, []))
+            return False
+
+        def _add_layer_edge(direct_id: str, manager_id: str) -> None:
+            if direct_id == manager_id:
+                _union(direct_id, manager_id)
+                return
+            if _has_direct_path(direct_id, manager_id):
+                _union(direct_id, manager_id)
+                logger.warning(
+                    "[DIAG] relayout projected reporting cycle collapsed to same rank: %s <-> %s",
+                    manager_id,
+                    direct_id,
+                )
+                return
+            if manager_id not in managers[direct_id]:
+                managers[direct_id].append(manager_id)
+            if direct_id not in directs[manager_id]:
+                directs[manager_id].append(direct_id)
+
         for s, t in reports_edges:
             if s in kid_ids and t in kid_ids:
-                managers[s].append(t)
-                directs[t].append(s)
+                _add_layer_edge(s, t)
+                continue
+            source_child = _direct_child_for_node(s, container_id)
+            target_child = _direct_child_for_node(t, container_id)
+            if (
+                source_child
+                and target_child
+                and source_child != target_child
+                and source_child in kid_ids
+                and target_child in kid_ids
+            ):
+                _add_layer_edge(source_child, target_child)
         layer: dict[str, int] = {}
         from collections import deque
         queue: deque[str] = deque()
@@ -5456,7 +7351,7 @@ def _tool_relayout(
                 k.w = PERSON_W
                 k.h = PERSON_H
 
-        layers = _layer_children(kids)
+        layers = _layer_children(container_id, kids)
         sorted_layer_keys = sorted(layers.keys())
         if direction == "BT" or direction == "RL":
             sorted_layer_keys = list(reversed(sorted_layer_keys))
@@ -7382,7 +9277,7 @@ async def _execute_harness_tool(
     if tool == "list_layout_constraints":
         return {"ok": True, "constraints": [], "note": "deprecated in Route B; use place_node + arrange_* + center_* tools instead"}
     if tool == "relayout":
-        return {"ok": True, "note": "deprecated in Route B; use place_node + arrange_* + center_* tools instead"}
+        return _tool_relayout(ctx, args.get("options") if isinstance(args.get("options"), dict) else {})
     if tool in ("nudge_node", "move_user"):
         dist = args.get("distance")
         try:
@@ -7941,6 +9836,8 @@ def _classify_spatial_relation(subject: dict[str, Any], reference: dict[str, Any
     dx = s["cx"] - r["cx"]
     dy = s["cy"] - r["cy"]
 
+    # Strong cardinal relation: boxes are separated on one axis and overlap on
+    # the other axis, so "right of" or "below" is visually unambiguous.
     if x_dir and y_overlap_ratio >= 0.35:
         confidence = _clamp(0.62 + y_overlap_ratio * 0.28 + min(x_gap / 400.0, 0.1))
         return {
@@ -7964,6 +9861,8 @@ def _classify_spatial_relation(subject: dict[str, Any], reference: dict[str, Any
             },
         }
 
+    # Diagonal relation: both axes are separated or the orthogonal overlap is
+    # too small for a precise cardinal label.
     if x_dir and y_dir:
         vertical = "upper" if y_dir == "above" else "lower"
         horizontal = "right" if x_dir == "right_of" else "left"
@@ -7982,6 +9881,7 @@ def _classify_spatial_relation(subject: dict[str, Any], reference: dict[str, Any
             },
         }
 
+    # Touching or near-touching cases: keep the label, but mark it weak.
     if x_dir or y_dir:
         relation = x_dir or y_dir
         confidence = 0.45 if max(x_overlap_ratio, y_overlap_ratio) < 0.2 else 0.55
@@ -8070,6 +9970,9 @@ def _augment_layout_digest(raw: dict[str, Any]) -> dict[str, Any]:
                     continue
                 if relation_info.get("relation") == "overlaps":
                     ratio = float((relation_info.get("basis") or {}).get("overlap_ratio") or 0)
+                    # Department siblings may touch at borders. Treat material
+                    # partial overlap as a problem; full containment would have
+                    # been classified separately and is not a sibling layout.
                     problems.append({
                         "level": "CRITICAL" if ratio > 0.05 else "HIGH",
                         "type": "dept_partial_overlap",
@@ -8196,6 +10099,8 @@ def _ctx_layout_digest(ctx: MergeContext, *, source: str = "ctx_fallback") -> di
         "nodes": raw_nodes,
         "edges": raw_edges,
     })
+
+
 def _layout_digest_to_text(digest: dict[str, Any] | None) -> str:
     if not digest or not digest.get("ok"):
         return ""
@@ -8252,6 +10157,7 @@ def _layout_digest_to_text(digest: dict[str, Any] | None) -> str:
                 f" confidence={confidence}{primary}{basis_text}"
             )
     return "\n".join(lines)
+
 
 def _build_graph_state_text(ctx: MergeContext) -> str:
     """Build a compact text summary of the graph for LLM consumption."""
@@ -8402,7 +10308,56 @@ _TOOL_RESULT_COMPRESS_KEEP_FIELDS: dict[str, tuple[str, ...]] = {
     "align_left": ("node_ids", "count"),
     "align_top": ("node_ids", "count"),
     "nudge_node": ("node_id", "direction", "distance"),
+    "relayout": ("direction", "depth_styles_applied"),
 }
+
+_POST_RELAYOUT_PLAN_MAX_CHARS = 4000
+
+
+def _truncate_for_llm_context(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...[truncated]"
+
+
+def _build_post_relayout_compacted_messages(
+    *,
+    graph_state_text: str,
+    plan_text: str,
+    batch_nudge: str = "",
+    screenshot_url: str = "",
+) -> list[dict[str, Any]]:
+    """Start a compact layout-adjustment phase after relayout.
+
+    ``relayout`` can return a large graph snapshot and usually happens after
+    many structure-editing rounds. Keeping all prior assistant/tool messages
+    makes the next Kimi request huge. The latest graph_state already contains
+    the durable source of truth, so we intentionally drop old tool protocol
+    history and resume from a concise user state.
+    """
+    guidance = (
+        "## relayout 后布局微调阶段\n"
+        "刚刚已经执行 relayout 生成算法初稿。不要重放已经完成的 create_node、set_parent、create_edge。"
+        "请只基于下面的当前图结构和截图判断是否需要少量树状辐射调整：上级/上级容器在上方居中，"
+        "直属部门或小组向下横向展开，下级人员继续向下展开。"
+        "如果结构或真实汇报边仍缺失，可以补少量结构工具；否则优先使用 center_above、"
+        "move_dept_with_children、fit_container_to_children 或 check_geometry 做收口。"
+    )
+    content: list[dict[str, Any]] = [{"type": "text", "text": guidance}]
+    if batch_nudge:
+        content.append({"type": "text", "text": batch_nudge})
+    if plan_text:
+        content.append({
+            "type": "text",
+            "text": "## 首轮执行计划（压缩保留）\n" + _truncate_for_llm_context(
+                plan_text,
+                _POST_RELAYOUT_PLAN_MAX_CHARS,
+            ),
+        })
+    content.append({"type": "text", "text": graph_state_text})
+    if screenshot_url:
+        content.append({"type": "image_url", "image_url": {"url": screenshot_url}})
+    return [{"role": "user", "content": content}]
 
 
 def _compress_tool_result_content(tool_name: str, content_str: str) -> str:
@@ -8487,8 +10442,12 @@ def _get_round_number(messages: list[dict[str, Any]], index: int) -> int:
     return count or 1
 
 
-def _normalize_tool_call_ids(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Re-localize tool_call ids and split multi-tool-call assistant messages.
+def _normalize_tool_call_ids(
+    messages: list[dict[str, Any]],
+    *,
+    split_multi_tool_calls: bool = True,
+) -> list[dict[str, Any]]:
+    """Re-localize tool_call ids and optionally split multi-tool-call assistant messages.
 
     Bedrock-backed endpoints (e.g. it-ai.fineres.com) mint a fresh
     ``toolu_bdrk_*`` set per request; any such id carried over from a prior
@@ -8500,11 +10459,13 @@ def _normalize_tool_call_ids(messages: list[dict[str, Any]]) -> list[dict[str, A
     pass guarantees self-consistent id pairing within every outgoing request.
 
     Additionally, when an assistant message carries *multiple* tool_calls
-    (``len(tool_calls) > 1``), the message is split into N separate
-    ``assistant→tool`` pairs.  The it-ai.fineres.com gateway has been
-    observed to mishandle OpenAI-to-Anthropic translation of multi-tool
-    assistant blocks, dropping or mismatching tool_use ids.  Single-tool
-    round-trips work reliably, so we avoid the buggy code-path altogether.
+    (``len(tool_calls) > 1``), the default behavior is to split the message
+    into N separate ``assistant→tool`` pairs. The it-ai.fineres.com gateway
+    has been observed to mishandle OpenAI-to-Anthropic translation of
+    multi-tool assistant blocks, dropping or mismatching tool_use ids.
+    Single-tool round-trips work reliably, so this remains the default safety
+    path. Tests can disable splitting to verify whether preserving multi-tool
+    history is structurally safe before changing runtime behavior.
     """
     if not messages:
         return messages
@@ -8526,7 +10487,7 @@ def _normalize_tool_call_ids(messages: list[dict[str, Any]]) -> list[dict[str, A
                 tool_msgs.append(messages[j])
                 j += 1
 
-            if len(original_calls) > 1:
+            if len(original_calls) > 1 and split_multi_tool_calls:
                 # ═══ SPLIT path: emit N assistant+tool pairs ═══
                 # Avoids the gateway's multi-tool-call translation bug.
                 base_msg = {k: v for k, v in msg.items() if k != "tool_calls"}
@@ -8536,10 +10497,15 @@ def _normalize_tool_call_ids(messages: list[dict[str, Any]]) -> list[dict[str, A
                     if pos < len(tool_msgs):
                         out.append({**tool_msgs[pos], "tool_call_id": fresh_id})
             else:
-                # ═══ Single tool_call: keep as-is (just regenerate id) ═══
-                out.append({**msg, "tool_calls": [{**original_calls[0], "id": new_ids[0]}]})
-                if tool_msgs:
-                    out.append({**tool_msgs[0], "tool_call_id": new_ids[0]})
+                # ═══ Preserve the assistant block shape; only regenerate ids ═══
+                localized_calls = [
+                    {**tc, "id": new_ids[pos]}
+                    for pos, tc in enumerate(original_calls)
+                ]
+                out.append({**msg, "tool_calls": localized_calls})
+                for pos, tool_msg in enumerate(tool_msgs):
+                    if pos < len(new_ids):
+                        out.append({**tool_msg, "tool_call_id": new_ids[pos]})
 
             i = j
             continue
@@ -8575,6 +10541,8 @@ def _prepare_messages_for_text_fallback(
 def _build_llm_messages(
     accumulated_messages: list[dict[str, Any]],
     current_round: int,
+    *,
+    split_multi_tool_calls: bool = True,
 ) -> list[dict[str, Any]]:
     """Construct messages to send to the LLM with old rounds trimmed.
 
@@ -8612,7 +10580,10 @@ def _build_llm_messages(
             result.append(_strip_graph_state_text(_strip_images(msg), round_num))
         else:
             result.append(_strip_images(msg))
-    normalized = _normalize_tool_call_ids(result)
+    normalized = _normalize_tool_call_ids(
+        result,
+        split_multi_tool_calls=split_multi_tool_calls,
+    )
 
     # ── DEBUG: dump normalized messages for Bedrock ID troubleshooting ──
     try:
@@ -9489,7 +11460,8 @@ async def _run_llm_tool_loop(
                 name == "check_geometry"
                 and ok
                 and isinstance(result, dict)
-                and int((result.get("summary") or {}).get("total") or 0) == 0
+                and int((result.get("summary") or {}).get("critical") or 0) == 0
+                and int((result.get("summary") or {}).get("high") or 0) == 0
             )
             if geometry_clean and repeated_tool_signature_count >= 2:
                 ctx.harness_can_commit = True
@@ -9688,7 +11660,10 @@ async def _run_llm_tool_loop(
         int((time.time() - _loop_start_ms) * 1000),
         len(ctx.all_nodes), len(ctx.edges), "max_rounds_hit",
     )
-    ctx.harness_can_commit = False
+    # Hitting the round cap means the automated loop did not prove convergence,
+    # but the sandbox still contains the latest user-visible graph. Let the user
+    # manually confirm and submit that state instead of forcing another run.
+    ctx.harness_can_commit = True
     ctx.harness_last_error = "max_rounds_hit"
     await _maybe_queue_review("max_rounds_hit")
     yield HarnessEvent(
@@ -9705,6 +11680,8 @@ async def _run_llm_tool_loop(
             ),
         }),
     )
+
+
 async def _execute_harness_stream(
     company_id: str,
     prj_id: str,
@@ -9884,38 +11861,37 @@ async def _fetch_from_external(
         url: str,
         *,
         params: dict[str, Any],
-        allow_com_id_fallback: bool = False,
     ) -> dict[str, Any]:
         resp = await client.get(url, params=params, headers=headers, cookies=cookies)
         resp.raise_for_status()
-        data = resp.json()
-        if allow_com_id_fallback and isinstance(data, dict):
-            has_graph = bool(data.get("node_info") or data.get("nodes") or data.get("edge_info") or data.get("edges"))
-            if not has_graph:
-                fallback_params = dict(params)
-                fallback_params.pop("prj_type", None)
-                fallback_params.pop("prj_id", None)
-                fallback_params["com_id"] = company_id
-                resp2 = await client.get(url, params=fallback_params, headers=headers, cookies=cookies)
-                resp2.raise_for_status()
-                data2 = resp2.json()
-                if isinstance(data2, dict):
-                    return data2
-        return data
+        return resp.json()
 
     async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
         url1 = f"{base}{get_path}"
         params1 = {"prj_type": "company", "prj_id": company_id}
-        meta = await _bi_get(client, url1, params=params1, allow_com_id_fallback=True)
+        meta = await _bi_get(client, url1, params=params1)
         logger.info("BI getInfo step1 keys: %s", list(meta.keys()) if isinstance(meta, dict) else type(meta).__name__)
 
         result: dict[str, Any] = {"nodes": [], "edges": []}
+        allowed_version_ids: set[str] = set()
         if isinstance(meta, dict):
             for key in ("version_info", "contact_info", "company_name", "owner_info", "opp_info"):
                 if key in meta:
                     result[key] = meta[key]
+            for item in meta.get("version_info") or []:
+                value = item.get("value") if isinstance(item, dict) else item
+                if value:
+                    allowed_version_ids.add(str(value))
 
         ver_id = version
+        if ver_id and allowed_version_ids and str(ver_id) not in allowed_version_ids:
+            logger.warning(
+                "BI getInfo ignored foreign version: prj_id=%s requested=%s allowed=%s",
+                company_id,
+                ver_id,
+                sorted(allowed_version_ids),
+            )
+            ver_id = None
         if not ver_id and isinstance(meta, dict):
             vi = meta.get("version_info") or []
             if isinstance(vi, list) and vi:
@@ -9928,7 +11904,7 @@ async def _fetch_from_external(
             # version list as the single source of truth.
             try:
                 params_opp = {"prj_type": "opp", "prj_id": company_id}
-                opp_meta = await _bi_get(client, url1, params=params_opp, allow_com_id_fallback=True)
+                opp_meta = await _bi_get(client, url1, params=params_opp)
                 if isinstance(opp_meta, dict):
                     vi = opp_meta.get("version_info") or []
                     if isinstance(vi, list) and vi:
@@ -9949,7 +11925,7 @@ async def _fetch_from_external(
 
         if ver_id:
             params2 = {"prj_type": "opp", "ver_info": ver_id, "prj_id": company_id}
-            data = await _bi_get(client, url1, params=params2, allow_com_id_fallback=True)
+            data = await _bi_get(client, url1, params=params2)
             logger.info("BI getInfo step2 keys: %s", list(data.keys()) if isinstance(data, dict) else type(data).__name__)
 
             if isinstance(data, dict):
@@ -10489,6 +12465,103 @@ async def preview_power_map(
     return result
 
 
+_BATCH_NUDGE_CREATE_NODE_AFTER = 2
+_BATCH_NUDGE_SET_PARENT_AFTER = 3
+_BATCH_NUDGE_FIT_AFTER = 2
+_BATCH_NUDGE_CREATE_EDGE_AFTER = 2
+_BATCH_NUDGE_ARRANGE_AFTER = 2
+_BATCH_NUDGE_MOVE_DEPT_AFTER = 2
+
+
+def _tool_call_signature(name: str, args: dict[str, Any]) -> str:
+    """Stable signature for detecting repeated no-progress tool calls."""
+    try:
+        args_text = json.dumps(args or {}, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        args_text = str(args)
+    return f"{str(name or '').strip()}:{args_text}"
+
+
+def _update_batch_execution_streaks(
+    streaks: dict[str, int],
+    tool_calls: list[tuple[str, dict[str, Any]]],
+) -> dict[str, int]:
+    """Track repeated single-tool rounds that usually signal poor batching."""
+    next_streaks = {
+        "single_create_node": 0,
+        "single_set_parent": 0,
+        "single_fit_container": 0,
+        "single_create_edge": 0,
+        "single_arrange": 0,
+        "single_move_dept": 0,
+    }
+    if len(tool_calls) == 1:
+        tool_name = str(tool_calls[0][0] or "")
+        if tool_name == "create_node":
+            next_streaks["single_create_node"] = int(streaks.get("single_create_node", 0)) + 1
+        if tool_name == "set_parent":
+            next_streaks["single_set_parent"] = int(streaks.get("single_set_parent", 0)) + 1
+        if tool_name == "fit_container_to_children":
+            next_streaks["single_fit_container"] = int(streaks.get("single_fit_container", 0)) + 1
+        if tool_name == "create_edge":
+            next_streaks["single_create_edge"] = int(streaks.get("single_create_edge", 0)) + 1
+        if tool_name == "arrange_horizontally":
+            next_streaks["single_arrange"] = int(streaks.get("single_arrange", 0)) + 1
+        if tool_name == "move_dept_with_children":
+            next_streaks["single_move_dept"] = int(streaks.get("single_move_dept", 0)) + 1
+    return next_streaks
+
+
+def _build_batch_execution_nudge(streaks: dict[str, int]) -> str:
+    """Return a user-visible runtime hint when the model falls into serial loops."""
+    create_node_streak = int(streaks.get("single_create_node", 0))
+    set_parent_streak = int(streaks.get("single_set_parent", 0))
+    fit_streak = int(streaks.get("single_fit_container", 0))
+    create_edge_streak = int(streaks.get("single_create_edge", 0))
+    arrange_streak = int(streaks.get("single_arrange", 0))
+    move_dept_streak = int(streaks.get("single_move_dept", 0))
+
+    hints: list[str] = []
+    if create_node_streak >= _BATCH_NUDGE_CREATE_NODE_AFTER:
+        hints.append(
+            "【执行约束提醒｜强制】你最近连续多轮只调用了 1 个 create_node。"
+            "如果本轮还剩多个同层部门、子部门或人员需要新建，下一轮必须同轮批量创建，"
+            "不要继续一轮只建 1 个；除非确认只剩 1 个目标，否则本轮必须发出多个 create_node。"
+            "尤其是同一父节点下的多个下属单位，请一次性批量发出多个 create_node。"
+        )
+    if set_parent_streak >= _BATCH_NUDGE_SET_PARENT_AFTER:
+        hints.append(
+            "【执行约束提醒｜强制】你最近连续多轮只调用了 1 个 set_parent。"
+            "下一轮必须把剩余同类挂载关系批量完成：同一父节点下的多个子节点，"
+            "请在同一轮中发出多个 set_parent，不要逐轮一个个挂载；除非确认只剩 1 个目标。"
+        )
+    if fit_streak >= _BATCH_NUDGE_FIT_AFTER:
+        hints.append(
+            "【执行约束提醒｜强制】你最近连续多轮只调用了 1 个 fit_container_to_children。"
+            "下一轮必须按层批量收敛：先把同层叶子容器放在同一轮一起 fit，"
+            "再处理上一层容器；不要一个容器一轮慢慢试，除非确认只剩 1 个容器。"
+            "如果这是从零新建完整组织架构且结构/汇报边已完成，请停止微调并直接调用 relayout。"
+        )
+    if create_edge_streak >= _BATCH_NUDGE_CREATE_EDGE_AFTER:
+        hints.append(
+            "【执行约束提醒｜强制】你最近连续多轮只创建了 1 条 create_edge。"
+            "如果首轮执行计划里还有多条真实汇报/决策连线未创建，下一轮必须一次性批量发出多个 create_edge；"
+            "不要继续逐条补边。只为真实汇报、分管、决策链或协作关系建边，不要为层级归属补边。"
+        )
+    if arrange_streak >= _BATCH_NUDGE_ARRANGE_AFTER:
+        hints.append(
+            "【执行约束提醒｜强制】你最近连续多轮只调用了 1 个 arrange_horizontally。"
+            "下一轮必须把同层、同父容器下的可排列节点批量处理；不要一个部门一轮慢慢排，除非确认只剩 1 组。"
+        )
+    if move_dept_streak >= _BATCH_NUDGE_MOVE_DEPT_AFTER:
+        hints.append(
+            "【执行约束提醒｜强制】你最近连续多轮只调用了 1 个 move_dept_with_children。"
+            "下一轮必须批量移动同层需要让位的部门容器，或停止布局微调并先补齐结构/真实汇报边。"
+            "如果这是从零新建完整组织架构且结构/汇报边已完成，请直接调用 relayout 重新收口整图。"
+        )
+    return "\n".join(hints).strip()
+
+
 # ═══════════════════════════════════════════════════════════
 #  v2: vision LLM + local sandbox (Route B — atomic geometry tools)
 # ═══════════════════════════════════════════════════════════
@@ -10615,29 +12688,35 @@ title 默认：
 ═══════════════════════════════════════════
 【六、工作流 SOP】
 ═══════════════════════════════════════════
-收到指令后，第一步在 thinking 中识别场景类型：
+收到指令后，先识别场景类型。若消息中已有“首轮执行计划”，执行轮必须直接按计划执行，
+不要重新分析原始用户长指令，不要输出 Step 叙事：
 - 场景 A（从零新建）：用户描述完整架构，画布为空或几乎为空
 - 场景 B（增量新增）：在已有画布上添加部门/人/连线
 - 场景 C（调整）：移动、改汇报关系、改连线备注、改职级、改名
 - 场景 D（删除）：删除节点或连线
 - 场景 E（混合）：用户指令同时包含多种操作 → 按 A→B→C→D 顺序拆解执行
 - 场景 F（模糊）：触发反问策略，纯文本回复，不调工具
-按对应 SOP 执行，不跳步、不合并、不乱序：
+按对应 SOP 执行；同类独立操作应尽量同轮批量执行：
 ──────────────────────────────────────
 【SOP 执行约束 - 强制遵守】
 ──────────────────────────────────────
-1. 严禁跳步
-- 必须按 Step 1 → 2 → 3 → 4 → 5 → 6 的顺序执行
-- 即使你认为某 Step "好像不必要"或"后端已经处理过了"，也必须执行
-- 跳步会导致最终布局不符合产品规范
-2. 结构化输出
-- 每个 Step 开始时，在 thinking 中第一句话必须是："开始 Step N：step 名称"
-- 每个 Step 结束时，在 thinking 中最后一句话必须是："Step N 完成"
-- 不允许在一个 thinking 段落里跨多个 Step
-- 不允许出现"Step 1 续"、"Step 3"（跳过 Step 2）这种编号
-3. 每个 Step 必须有实际工具调用
-- 如果某 Step 你判断"无需调整"，也必须至少调用一次相关工具或 check_geometry 确认
-- 不允许 Step 直接 thinking 后进入下一 Step 不调工具
+1. Step 是内部检查清单，不是输出格式
+- 执行轮不要输出"开始 Step N / Step N 完成 / 下一步"等叙事；未完成时直接调用工具
+- 不要在 execution 阶段重新规划或复述方案；planning 阶段已经负责理解和制定计划
+- 如果一个 Step 对当前计划不适用，或图状态显示已经完成，允许跳过，但必须继续检查后续未完成项
+2. 结构优先，布局后置
+- create_node / set_parent / create_edge 属于结构编辑，必须先完成
+- 组织架构任务必须先批量完成节点、归属、汇报边，再进入 arrange / fit / move / check_geometry
+- edges 未达到计划中的汇报关系数量前，不能因为布局看起来完成而自然收敛
+3. 同类独立操作必须批量
+- 同一父节点下的多个 create_node / set_parent / create_edge，如果彼此无前后依赖，必须在同一轮内批量发出
+- 严禁把 5 个以上彼此独立的 set_parent 拆成 5 个以上轮次逐个执行
+- 严禁把 2 条以上彼此独立的 create_edge 拆成多轮逐条执行
+- fit_container_to_children 必须按"同层一轮、上层下一轮"的方式分层批量执行，不要一个容器一轮慢慢试
+4. 禁止为了满足 Step 而调用无意义工具
+- 不要为了"每个 Step 都有工具"而调用 check_geometry、arrange_horizontally 或 move_dept_with_children
+- check_geometry 只在完成结构和必要布局后调用一次，或确实怀疑冲突时调用
+- 如果没有未完成工具任务，可以自然收敛；如果还有未完成结构任务，必须调用工具
 ──────────────────────────────────────
 【场景 A SOP - 从零新建】
 ──────────────────────────────────────
@@ -10647,43 +12726,15 @@ Step 1：批量创建所有部门容器
 - 顶层部门 parent_id=None（不填）
 - 子部门 parent_id 指向父部门
 - 不传 x/y，后端自动放置
-完成标志：thinking 输出"Step 1 完成"
+完成标志：计划内所有部门容器均已创建
 Step 2：批量创建所有人员节点
 操作：
 - 按部门分组调用 create_node
 - parent_id 必须指向所属部门
 - 不传 x/y
 - title 字段填用户原文（如"销售总监"），用户没说则留空
-完成标志：thinking 输出"Step 2 完成"
-Step 3：调整每个部门内人员布局
-必须执行，不允许跳过
-对每个部门容器依次执行：
-a. 识别该部门的负责人：
-- 优先匹配 title 含"总监/CEO/CTO/CFO/COO/总经理/负责人/组长"的人
-- 都不匹配取该部门下第一个创建的人员
-b. 把下属人员横向排列在负责人下方：
-- 收集该部门所有下属人员（除负责人外）
-- 调用 arrange_horizontally，起始 x=部门容器.x + 30, y=部门容器.y + 200, 间距 30
-- 如果下属人员数 > 6，分批调用（每批最多 6 人，第二批 y+=110 换行）
-- 如果部门内包含子部门，把子部门的 node_id 也加入 arrange_horizontally 的 node_ids 列表中
-c. 把负责人放到下属组上方居中：
-- 如果有下属人员，调用 center_above(负责人 id, reference_node_ids=[直属下属人员 id], gap=60)
-- 禁止用旧容器宽度手算 place_node 给负责人居中；fit_container_to_children 会改变容器宽度，手算容易失效
-- 如果没有下属人员，才从 graph_state 读取容器 x/y/w，用 place_node 将负责人放到容器顶部居中
-d. 调用 fit_container_to_children(该部门容器 id) 收缩容器到合适尺寸
-e. 负责人居中复查：
-- 如果该部门存在"负责人/经理 + 下属"结构，fit 后必须确认负责人中心线仍在直属下属组中心线上方
-- 若负责人偏离直属下属组中心，调用 center_above(负责人 id, reference_node_ids=[直属下属人员 id], gap=60)，再调用 fit_container_to_children(该部门容器 id)
-全部部门处理完后：
-f. 调用 check_geometry(node_ids=[所有部门 id + 所有人员 id])
-g. 如果有 HIGH 冲突（人员未完全在父容器内）：
-- 调用 fit_container_to_children 重新收缩对应容器
-- 再次 check_geometry 确认无冲突
-h. 如果有 MEDIUM 冲突（同容器人员重叠）：
-- 调用 arrange_horizontally 重新排列对应部门人员
-- 再次 check_geometry 确认
-完成标志：thinking 输出"Step 3 完成"，几何检测无 HIGH 及以上冲突
-Step 4：批量创建所有汇报连线
+完成标志：计划内所有人员节点均已创建并挂入对应部门
+Step 3：批量创建所有汇报连线
 操作：
 - 只为本轮用户明确表达的汇报关系调用 create_edge 创建 reports_to
 - 如果本轮用户同时给新连线提出备注/标注/说明，必须在 create_edge 成功后立即用返回的 edge_id 调 set_edge_remark
@@ -10691,60 +12742,60 @@ Step 4：批量创建所有汇报连线
 - 禁止扫描历史画布，禁止仅凭既有部门内 A 角色/title/负责人字段给未提及人员补边
 - 跨部门连线：仅当用户本轮明确表达部门负责人向上级负责人汇报时创建
 - 部门内连线：仅当用户本轮明确表达下属 → 部门负责人时创建
-完成标志：thinking 输出"Step 4 完成"
-Step 5：调整顶层部门容器布局（最后做，避免被前面操作破坏）
-必须执行，不允许跳过
-**核心约束**：本步骤所有"移动部门容器"的操作必须使用 move_dept_with_children
-（容器及其全部后代统一平移），**禁止**使用 place_node 移动部门容器，
-否则会出现"容器走了，人留在原地"。place_node 仅用于移动单个用户/独立节点。
-Step 5a - 排开非最高级的顶层部门：
-a. 识别"最高级部门"：
-- 优先匹配名称含"总裁办/董事会/集团总部/executive/总公司"
-- 都不匹配取用户描述顺序的第一个顶层部门
-（即 Step 1 中最早 create_node 创建的顶层部门）
-b. 收集"其他顶层部门"：parent_id=None 且不是最高级部门的所有部门
-c. 从 graph_state 读取每个其他顶层部门的 w；按顺序计算每个的目标 (new_x, new_y)：
-- 第 1 个：new_x = 50
-- 第 k 个（k ≥ 2）：new_x = 第 k-1 个的 new_x + 第 k-1 个的 w + 80（间距）
-- 所有其他顶层部门统一 new_y = 500
-d. 依次对每个其他顶层部门调用 move_dept_with_children(dept_id, new_x, new_y)。
-**不要用 arrange_horizontally 排开顶层部门**——它内部走 place_node，
-会让子节点留在原地。
-Step 5b - 计算最高级部门居中位置：
-a. 从 graph_state 读取所有其他顶层部门的 x 和 w（Step 5a 已排开）
-b. 计算视觉中点：
-leftmost = min(其他顶层部门.x)
-rightmost = max(其他顶层部门.x + 其他顶层部门.w)
-center_x = (leftmost + rightmost) / 2
-c. 计算最高级部门位置：
-x = center_x - 最高级部门.w / 2
-y = 50
-d. 调用 move_dept_with_children(最高级部门 id, x, y)
-（**不要用 place_node**——最高级部门里的高管节点必须跟随容器整体平移）
-Step 5c - 几何自查：
-调用 check_geometry(node_ids=[所有顶层部门 id])
-如果有 CRITICAL 冲突（顶层部门重叠）：
-- 加大顶层部门之间的间距（如 80→120→150），按 Step 5a 的步骤 d
-  用 move_dept_with_children 重新平移
-- 再次 check_geometry 确认
-完成标志：thinking 输出"Step 5 完成"，顶层几何无 CRITICAL 冲突
+- 多条彼此独立的 create_edge 必须同轮批量发出
+完成标志：所有计划内汇报边均已创建
+Step 4：后端 radial 树状辐射布局
+操作：
+- Kimi auto 主路径下，后端会基于首轮 radial intent 执行确定性布局，不需要模型调用布局工具猜坐标
+- 后端先按每个部门直属人员数、子部门数、人员层级和标题高度预估部门初始宽高，再摆放人员和子部门
+- 布局目标：上级节点/上级容器在上方居中，直属部门/小组在下方横向展开，下级人员再向下展开
+- relayout 仅作为 fallback：只有 radial intent 校验失败、后端 radial layout 明确失败，或用户明确要求全局重排时才考虑
+- radial layout 后调用 check_geometry(node_ids=[所有部门 id + 所有人员 id]) 做一次几何自查
+完成标志：radial layout 已产生可读树状辐射图；若无 HIGH/CRITICAL 冲突，不再进入多轮美化
+Step 5：少量局部修复
+仅在 radial layout 后仍有 HIGH/CRITICAL 冲突时执行；目标不是重画全图，而是局部修复。
+调整目标：
+- 最高级负责人/最高级容器位于上方居中
+- 直属部门/直属小组在其下方横向展开，形成树状扇出
+- 部门负责人位于本部门下属组上方，直属下属在下方横向排列
+- 子部门/小组跟随父部门，不要散落到画布远处
+允许的调整：
+- 负责人偏离直属下属组中心：调用 center_above(负责人 id, reference_node_ids=[直属下属人员 id], gap=60)，再 fit_container_to_children(对应部门 id)
+- 单个部门容器局部包裹不合理：只对该部门调用 fit_container_to_children
+- 同层顶层部门有少量重叠或间距不均：使用 move_dept_with_children 批量移动同层部门容器，子节点必须跟随
+- 同一层需要横向展开的多个部门容器：批量使用 move_dept_with_children，不要一轮只移动一个
+禁止的微调：
+- 禁止绕过 radial 主路径手动排整图
+- 禁止连续多轮只 move 一个部门或只 fit 一个容器
+- 禁止用 place_node 移动部门容器
+- 禁止为了追求完美布局反复 check_geometry；无 HIGH/CRITICAL 且结构正确时应自然收敛
+完成标志：树状辐射关系可读，且无 HIGH/CRITICAL 冲突
 Step 6：自然收敛
 操作：
 - 输出纯文本总结："已完成 X 个部门、Y 个人员、Z 条汇报关系，架构图构建完成。"
 - 不再调用任何工具
-完成标志：thinking 输出"Step 6 完成，任务结束"
+完成标志：节点、归属、汇报边、必要布局均完成
 ──────────────────────────────────────
 【场景 B SOP - 增量新增】
 ──────────────────────────────────────
 Step 1：读取 graph_state，识别已有结构
 Step 2：仅创建新增对象（部门/人员/连线），不传 x/y
+- 同一父节点下的多个新增部门/人员，必须同轮批量 create_node
 - 如新增连线带备注，先 create_edge，再 set_edge_remark
-Step 3：仅对受影响的容器 fit_container_to_children
-Step 4：**不重排已有节点**，保护用户已认可的视觉
-Step 5：如果新增部门容器迫使已有顶层部门需要让位（如挤在右侧）：
+Step 3：批量修正父子归属
+- 如果本轮同时明确了多个节点的新归属关系，必须同轮批量 set_parent
+- 同一父节点下多个子节点改挂载，禁止逐轮一个个 set_parent
+Step 4：批量创建本轮新增汇报关系
+- 多条彼此独立的 create_edge 必须同轮发出
+- 组织架构/汇报关系任务必须先补齐汇报边，再进入布局微调；edges=0 不能进入自然收敛
+Step 5：仅对受影响的容器 fit_container_to_children
+- 先处理叶子容器，同层容器同轮批量 fit_container_to_children
+- 再处理上一层容器；禁止一个容器一轮连续微调
+Step 6：**不重排已有节点**，保护用户已认可的视觉
+Step 7：如果新增部门容器迫使已有顶层部门需要让位（如挤在右侧）：
 - 移动已有部门容器**必须用 move_dept_with_children**，让子节点跟随
 - 移动单个新增用户节点仍用 place_node
-Step 6：自然收敛
+Step 8：自然收敛
 ──────────────────────────────────────
 【场景 C SOP - 调整】
 ──────────────────────────────────────
@@ -10758,9 +12809,16 @@ Step 2：按指令类型执行：
 - 改职级/改名 → update_node
 - 改汇报关系 → delete_edge + create_edge
 - 给连线加备注/改备注/标注关系 → set_edge_remark；不要为了备注 delete_edge/create_edge，除非用户明确要求改关系本身
+补充批量约束：
+- 同一父节点下多个节点改归属时，必须同轮批量 set_parent
+- 多条独立汇报边变更时，必须同轮批量 delete_edge / create_edge
 Step 3：fit_container_to_children 受影响的容器
 （注意：move_dept_with_children 不会改 w/h，但如果迁移到新父容器后
 新父容器的 bbox 需要收缩才能合理包裹，仍需 fit_container_to_children）
+批量规则：
+- 叶子容器先同轮批量 fit_container_to_children
+- 父容器后同轮批量 fit_container_to_children
+- 若上一轮已经连续做过 3 次以上 fit_container_to_children，本轮禁止继续只调 1 个容器；必须按层批量完成剩余 fit
 Step 4：自然收敛
 ──────────────────────────────────────
 【场景 D SOP - 删除】
@@ -10942,6 +13000,8 @@ async def _sandbox_screenshot(
     )
     png_bytes = await svg_el.screenshot(type="png")
     return "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+
 async def chat_power_map_v2(
     db: Session,
     company_id: str,
@@ -11099,6 +13159,8 @@ async def chat_power_map_v2(
         )
 
         # Drop save_state — commit/discard are now external endpoints.
+        # Keep relayout available: from-zero org-chart creation needs a single
+        # deterministic layout pass instead of many fragile geometry micro-moves.
         v2_tools = [
             t for t in _HARNESS_TOOLS_OPENAI
             if t.get("function", {}).get("name") != "save_state"

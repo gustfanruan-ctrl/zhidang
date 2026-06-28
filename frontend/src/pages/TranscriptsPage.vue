@@ -398,6 +398,57 @@
                       <option value="否">否</option>
                     </SelectNative>
                   </div>
+                  <div class="mt-2 rounded-lg border border-border/60 p-2.5">
+                    <div class="flex items-center justify-between gap-2 mb-2">
+                      <span class="text-xs font-medium text-muted-foreground">绑定干系人</span>
+                      <Badge v-if="item.stakeholderContactNames.length" variant="secondary" class="text-[10px]">
+                        {{ item.stakeholderContactNames.length }}
+                      </Badge>
+                    </div>
+                    <div v-if="item.stakeholderContactNames.length" class="flex flex-wrap gap-1.5 mb-2">
+                      <button
+                        v-for="contact in item.stakeholderContacts"
+                        :key="contact.cont_id || contact.cont_name"
+                        type="button"
+                        class="inline-flex items-center gap-1 rounded-md border border-primary/20 bg-primary/5 px-2 py-1 text-[11px] text-primary"
+                        @click="toggleExpectationStakeholder(item.operationId, contact)"
+                      >
+                        {{ contact.cont_name }}
+                        <X class="h-3 w-3" />
+                      </button>
+                    </div>
+                    <Input
+                      v-model="stakeholderKeyword"
+                      class="h-8 text-xs mb-2"
+                      placeholder="搜索干系人"
+                      @input="stakeholderContactPage = 1"
+                    />
+                    <div class="rounded-md border border-border/50 max-h-[132px] overflow-y-auto">
+                      <div v-if="stakeholderContactsLoading" class="text-xs text-muted-foreground py-3 text-center flex items-center justify-center gap-1">
+                        <Loader2 class="h-3 w-3 animate-spin" />加载中
+                      </div>
+                      <div v-else-if="!pagedStakeholderContacts.length" class="text-xs text-muted-foreground py-3 text-center">
+                        暂无匹配干系人
+                      </div>
+                      <button
+                        v-for="contact in pagedStakeholderContacts"
+                        v-show="!stakeholderContactsLoading && pagedStakeholderContacts.length"
+                        :key="contact.cont_id || contact.cont_name"
+                        type="button"
+                        class="w-full px-3 py-1.5 text-left text-xs border-b border-border/30 last:border-0 hover:bg-muted/40"
+                        :class="{ 'bg-primary/5 text-primary': isExpectationStakeholderSelected(item, contact) }"
+                        @click="toggleExpectationStakeholder(item.operationId, contact)"
+                      >
+                        <span class="font-medium">{{ contact.cont_name }}</span>
+                        <span v-if="contact.cont_id" class="ml-2 text-[10px] text-muted-foreground font-mono">{{ contact.cont_id }}</span>
+                      </button>
+                    </div>
+                    <div v-if="filteredStakeholderContacts.length > stakeholderPageSize" class="flex items-center justify-between gap-1 mt-1.5">
+                      <Button variant="ghost" size="sm" class="h-6 text-[10px]" :disabled="stakeholderContactPage <= 1" @click="stakeholderContactPage--">上一页</Button>
+                      <span class="text-[10px] text-muted-foreground">{{ stakeholderContactPage }} / {{ Math.ceil(filteredStakeholderContacts.length / stakeholderPageSize) }}</span>
+                      <Button variant="ghost" size="sm" class="h-6 text-[10px]" :disabled="stakeholderContactPage >= Math.ceil(filteredStakeholderContacts.length / stakeholderPageSize)" @click="stakeholderContactPage++">下一页</Button>
+                    </div>
+                  </div>
                   <div v-if="item.source_quote" class="bg-muted/50 rounded-lg p-2.5 mt-2 text-xs">
                     <p class="text-muted-foreground mb-1">原文引用：</p>
                     <p class="italic break-words">"{{ item.source_quote }}"</p>
@@ -1000,6 +1051,7 @@ const cardGroups = computed(() => {
     const parsedScenarioFields = tf === '场景表'
       ? parseScenarioStructuredFields(rawQuestion, rawAnswer)
       : null
+    const stakeholders = normalizeStakeholderContacts(card)
     const item = {
       summary: getVal('预期简述') || getVal('detail_brief'),
       scene_first_value: tf === '场景表' ? (getVal('是否第一价值实现场景') || parsedScenarioFields?.scene_first_value || '') : '',
@@ -1026,6 +1078,10 @@ const cardGroups = computed(() => {
       rejected: reviewState.get(card.card_id) === 'rejected',
       customerId: card.customer_id || '',
       _targetForm: tf,
+      stakeholderContacts: stakeholders,
+      stakeholderContactNames: stakeholderNames(stakeholders),
+      stakeholderContactIds: stakeholderIds(stakeholders),
+      stakeholderTouched: !!card.stakeholder_contacts_touched,
       relatedYuqiId: card.related_yuqi_id || '',
       relatedYuqiCardId: card.related_yuqi_card_id || '',
       relatedYuqiSource: card.related_yuqi_card_id ? 'generated' : (card.related_yuqi_id ? 'existing' : ''),
@@ -1077,6 +1133,28 @@ const pagedReviewCustomers = computed(() => {
 const yuqiLoading = ref(false)
 const yuqiWarning = ref('')
 const customerYuqiItems = ref([])
+const stakeholderContacts = ref([])
+const stakeholderContactsLoading = ref(false)
+const stakeholderContactsWarning = ref('')
+const stakeholderKeyword = ref('')
+const stakeholderContactPage = ref(1)
+const stakeholderPageSize = 12
+
+const filteredStakeholderContacts = computed(() => {
+  const k = stakeholderKeyword.value.trim().toLowerCase()
+  const contacts = stakeholderContacts.value || []
+  if (!k) return contacts
+  return contacts.filter(c => {
+    const name = String(c.cont_name || '').toLowerCase()
+    const id = String(c.cont_id || '').toLowerCase()
+    return name.includes(k) || id.includes(k)
+  })
+})
+
+const pagedStakeholderContacts = computed(() => {
+  const start = (stakeholderContactPage.value - 1) * stakeholderPageSize
+  return filteredStakeholderContacts.value.slice(start, start + stakeholderPageSize)
+})
 
 function truncateLabel(text, limit = 32) {
   const value = String(text || '').trim()
@@ -1085,6 +1163,44 @@ function truncateLabel(text, limit = 32) {
 
 function yuqiSummary(row) {
   return String(row?.detail_brief || row?.['预期简述'] || row?.detail || row?._id || '').trim()
+}
+
+function splitStakeholderValue(value) {
+  if (!value) return []
+  if (Array.isArray(value)) return value.map(v => String(v || '').trim()).filter(Boolean)
+  return String(value)
+    .split(/[,\n，、；;]/)
+    .map(v => v.trim())
+    .filter(Boolean)
+}
+
+function normalizeStakeholderContacts(card) {
+  const byKey = new Map()
+  const rawContacts = Array.isArray(card?.stakeholder_contacts) ? card.stakeholder_contacts : []
+  for (const c of rawContacts) {
+    const id = String(c?.cont_id || c?.id || '').trim()
+    const name = String(c?.cont_name || c?.name || '').trim()
+    if (!id && !name) continue
+    byKey.set(id || name, { cont_id: id, cont_name: name || id })
+  }
+  const ids = splitStakeholderValue(card?.stakeholder_contact_ids || card?.cont_id)
+  const names = splitStakeholderValue(card?.stakeholder_contact_names || card?.cont_name_array)
+  const count = Math.max(ids.length, names.length)
+  for (let i = 0; i < count; i++) {
+    const id = ids[i] || ''
+    const name = names[i] || id
+    if (!id && !name) continue
+    byKey.set(id || name, { cont_id: id, cont_name: name })
+  }
+  return [...byKey.values()]
+}
+
+function stakeholderNames(contacts) {
+  return (contacts || []).map(c => String(c?.cont_name || '').trim()).filter(Boolean)
+}
+
+function stakeholderIds(contacts) {
+  return (contacts || []).map(c => String(c?.cont_id || '').trim()).filter(Boolean)
 }
 
 const relatedYuqiOptions = computed(() => {
@@ -1309,8 +1425,64 @@ async function loadCustomerYuqiOptions(companyId) {
   }
 }
 
+async function loadStakeholderContacts(companyId) {
+  const id = String(companyId || '').trim()
+  if (!id || id === 'demo') {
+    stakeholderContacts.value = []
+    stakeholderContactsWarning.value = ''
+    return
+  }
+  stakeholderContactsLoading.value = true
+  try {
+    const selectedCustomer = customerStore.customers.find(c => c.company_id === id)
+      || reviewSearchResults.value.find(c => c.company_id === id)
+      || customerStore.currentCustomer
+    const params = selectedCustomer?.com_id ? { com_id: selectedCustomer.com_id } : {}
+    const resp = await api.get(`/api/v1/customers/${id}/contacts`, { params })
+    stakeholderContacts.value = resp.data?.contacts || []
+    stakeholderContactsWarning.value = resp.data?.warning || resp.data?.error || ''
+    stakeholderContactPage.value = 1
+  } catch (e) {
+    stakeholderContacts.value = []
+    stakeholderContactsWarning.value = e?.response?.data?.detail || '干系人加载失败'
+  } finally {
+    stakeholderContactsLoading.value = false
+  }
+}
+
+function isExpectationStakeholderSelected(item, contact) {
+  const id = String(contact?.cont_id || '').trim()
+  const name = String(contact?.cont_name || '').trim()
+  return (item.stakeholderContacts || []).some(c => {
+    const cid = String(c?.cont_id || '').trim()
+    const cname = String(c?.cont_name || '').trim()
+    return (id && cid === id) || (!id && name && cname === name)
+  })
+}
+
+function toggleExpectationStakeholder(cardId, contact) {
+  const card = findSelectedCard(cardId)
+  if (!card || !contact) return
+  const id = String(contact.cont_id || '').trim()
+  const name = String(contact.cont_name || '').trim()
+  if (!id && !name) return
+  const contacts = normalizeStakeholderContacts(card)
+  const existingIndex = contacts.findIndex(c => {
+    const cid = String(c?.cont_id || '').trim()
+    const cname = String(c?.cont_name || '').trim()
+    return (id && cid === id) || (!id && name && cname === name)
+  })
+  if (existingIndex >= 0) contacts.splice(existingIndex, 1)
+  else contacts.push({ cont_id: id, cont_name: name || id })
+  card.stakeholder_contacts = contacts
+  card.stakeholder_contact_ids = stakeholderIds(contacts).join(',')
+  card.stakeholder_contact_names = stakeholderNames(contacts).join('，')
+  card.stakeholder_contacts_touched = true
+}
+
 watch(effectiveCompanyId, (id) => {
   loadCustomerYuqiOptions(id)
+  loadStakeholderContacts(id)
 })
 
 async function searchReviewCustomers() {
@@ -1358,6 +1530,7 @@ function loadCardsFromTranscript() {
     }
   }
   loadCustomerYuqiOptions(effectiveCompanyId.value)
+  loadStakeholderContacts(effectiveCompanyId.value)
 }
 
 async function addManualCard(targetForm) {
@@ -1516,6 +1689,8 @@ async function submitCards() {
       up['预期详情'] = item.description || ''
       if (item.status) up['预期状态'] = item.status
       if (item.is_first_value) up['是否第一价值实现预期'] = item.is_first_value
+      if (item.stakeholderContactNames.length || item.stakeholderTouched) up['关联干系人'] = item.stakeholderContactNames.join('，')
+      if (item.stakeholderContactIds.length || item.stakeholderTouched) up['干系人id'] = item.stakeholderContactIds.join(',')
     } else if (item._targetForm === '场景表') {
       up['场景标题'] = item.title || ''
       if (item.scene_first_value) up['是否第一价值实现场景'] = item.scene_first_value
@@ -1528,6 +1703,12 @@ async function submitCards() {
     if (Object.keys(up).length) fieldUpdates[item.operationId] = up
     // 始终带 target_form，后端用它覆盖 OPERATION_CARD_STORE 中的旧值
     const override = { target_form: item._targetForm }
+    if (item._targetForm === '预期表') {
+      override.stakeholder_contact_names = item.stakeholderContactNames.join('，')
+      override.stakeholder_contact_ids = item.stakeholderContactIds.join(',')
+      override.stakeholder_contacts = item.stakeholderContacts
+      override.stakeholder_contacts_touched = item.stakeholderTouched
+    }
     if (item._targetForm === '场景表') {
       override.related_yuqi_id = item.relatedYuqiId || ''
       override.related_yuqi_card_id = item.relatedYuqiCardId || ''

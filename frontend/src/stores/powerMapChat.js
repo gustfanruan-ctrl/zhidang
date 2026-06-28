@@ -244,7 +244,8 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
       if (!this.currentSessionId || !companyId) return
       if (this.isLoading) return
       const { toast } = useToast()
-      if (this.lastDone?.error || this.lastDone?.converged === false) {
+      const isRoundCap = this.lastDone?.exit_reason === 'max_rounds_hit'
+      if (this.lastDone?.error || (this.lastDone?.converged === false && !isRoundCap)) {
         toast({
           title: '当前会话不可提交',
           description: '本轮维护未正常收敛，请先重新描述需求后再执行。',

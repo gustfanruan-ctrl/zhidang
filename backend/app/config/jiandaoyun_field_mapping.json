@@ -114,6 +114,16 @@
           "widget": "promote_idea",
           "type": "textarea",
           "safety": "writable"
+        },
+        "关联干系人": {
+          "widget": "cont_name_array",
+          "type": "text",
+          "safety": "writable"
+        },
+        "干系人id": {
+          "widget": "cont_id",
+          "type": "text",
+          "safety": "writable"
         }
       },
       "subforms": {
@@ -179,11 +189,16 @@
     },
     "跟进记录": {
       "entry_id": "670a28334883adafb152a869",
-      "lookup_yuqi": {
-        "widget": "_widget_1757576851901",
-        "resolve_by": "_id"
+      "yuqi_subform": {
+        "widget": "_widget_1780904531626",
+        "link_widget": "_widget_1780974773924",
+        "stakeholder_widget": "_widget_1780974773919",
+        "brief_widget": "_widget_1780974773920",
+        "detail_widget": "_widget_1780974773921",
+        "status_widget": "_widget_1780974773922",
+        "uuid_widget": "_widget_1780997127334",
+        "concat_widget": "yuqi_id_concat"
       },
-      "yuqi_id_widget": "review_yuqi_id",
       "display_fields": ["com_name", "follow_type", "review_date", "review_record", "if_tuisong", "genjin"]
     }
   }

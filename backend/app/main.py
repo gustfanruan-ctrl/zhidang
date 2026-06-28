@@ -897,6 +897,89 @@ RELATED_YUQI_OVERRIDE_FIELDS = {
     "related_yuqi_confidence",
 }
 
+EXPECTATION_STAKEHOLDER_OVERRIDE_FIELDS = {
+    "stakeholder_contacts",
+    "stakeholder_contact_names",
+    "stakeholder_contact_ids",
+    "stakeholder_contacts_touched",
+}
+
+
+def _join_operation_card_stakeholder_values(value: Any, *, name_key: str, fallback_key: str = "") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = str(item.get(name_key) or (item.get(fallback_key) if fallback_key else "") or "").strip()
+            else:
+                text = str(item or "").strip()
+            if text:
+                parts.append(text)
+        return "，".join(parts)
+    return str(value or "").strip()
+
+
+def _operation_card_stakeholder_values(card: dict[str, Any]) -> tuple[str, str, bool]:
+    names = _join_operation_card_stakeholder_values(card.get("stakeholder_contact_names"), name_key="cont_name")
+    ids = _join_operation_card_stakeholder_values(card.get("stakeholder_contact_ids"), name_key="cont_id")
+    contacts = card.get("stakeholder_contacts")
+    if not names:
+        names = _join_operation_card_stakeholder_values(contacts, name_key="cont_name", fallback_key="name")
+    if not ids:
+        ids = _join_operation_card_stakeholder_values(contacts, name_key="cont_id", fallback_key="id").replace("，", ",")
+    touched = bool(card.get("stakeholder_contacts_touched"))
+    return names, ids, touched
+
+
+def _apply_operation_card_field_updates(
+    card: dict[str, Any],
+    updates: dict[str, Any],
+    forms_cfg: dict[str, Any],
+) -> bool:
+    up = dict(updates or {})
+    if card.get("target_form") == "预期表":
+        stakeholder_names, stakeholder_ids, stakeholder_touched = _operation_card_stakeholder_values(card)
+        if stakeholder_names or stakeholder_touched:
+            up.setdefault("关联干系人", stakeholder_names)
+        if stakeholder_ids or stakeholder_touched:
+            up.setdefault("干系人id", stakeholder_ids)
+    if not up:
+        return False
+
+    change_items = card.get("change_items") or []
+    for item in change_items:
+        fn = item.get("field_name")
+        if fn in up:
+            item["new_value"] = up[fn]
+    form_cfg = forms_cfg.get(card.get("target_form", ""), {})
+    field_mapping = form_cfg.get("field_mapping") or {}
+    existing_fields = {it.get("field_name") for it in change_items}
+    fallback_field_mapping = {}
+    if card.get("target_form") == "预期表":
+        fallback_field_mapping = {
+            "关联干系人": {"widget": "cont_name_array"},
+            "干系人id": {"widget": "cont_id"},
+        }
+    for field_name, new_val in up.items():
+        if field_name in existing_fields:
+            continue
+        mapped = field_mapping.get(field_name) or fallback_field_mapping.get(field_name)
+        if mapped and isinstance(mapped, dict):
+            change_items.append({
+                "field_name": field_name,
+                "widget_name": str(mapped.get("widget", "")),
+                "old_value": None,
+                "new_value": new_val,
+            })
+    if change_items:
+        card["change_items"] = change_items
+        return True
+    return False
+
 
 def _apply_operation_card_override(card: dict[str, Any], override: dict[str, Any], forms_cfg: dict[str, Any]) -> None:
     if not override:
@@ -915,6 +998,15 @@ def _apply_operation_card_override(card: dict[str, Any], override: dict[str, Any
 
     if card.get("target_form") != "场景表":
         for key in RELATED_YUQI_OVERRIDE_FIELDS:
+            card.pop(key, None)
+
+    for key in EXPECTATION_STAKEHOLDER_OVERRIDE_FIELDS:
+        if key not in override:
+            continue
+        card[key] = override.get(key)
+
+    if card.get("target_form") != "预期表":
+        for key in EXPECTATION_STAKEHOLDER_OVERRIDE_FIELDS:
             card.pop(key, None)
 
 
@@ -1184,6 +1276,7 @@ def _persist_operation_cards(record: Transcript | FollowupRecord, cards: list[di
     result = dict(agent_b_result.get("result", {}) or {})
     result["operation_cards"] = cards
     record.agent_b_result = {**agent_b_result, "result": result}
+
 
 def _resolve_requested_operation_cards(cards: list[dict[str, Any]], requested_ids: set[str]) -> list[dict[str, Any]]:
     """优先取已审批卡片；若运行态缺失审批态，则对本次明确提交的卡片做兜底批准。"""
@@ -2994,6 +3087,7 @@ def calibrate_operation_type(
         "operation_type_calibrated": bool(card.get("operation_type_calibrated")),
     }
 
+
 @app.post("/api/v1/operations/execute")
 async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     # New flow: execute approved cards from in-memory review store.
@@ -3021,31 +3115,7 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         for card in approved:
             cid = card.get("card_id")
             _apply_operation_card_override(card, req.card_overrides.get(cid, {}), forms_cfg)
-            # field_updates
-            up = req.field_updates.get(cid, {})
-            if up:
-                change_items = card.get("change_items") or []
-                for item in change_items:
-                    fn = item.get("field_name")
-                    if fn in up:
-                        item["new_value"] = up[fn]
-                # 对 change_items 中不存在的字段，从 field_mapping 查 widget 后追加
-                form_cfg = forms_cfg.get(card.get("target_form", ""), {})
-                field_mapping = form_cfg.get("field_mapping") or {}
-                existing_fields = {it.get("field_name") for it in change_items}
-                for field_name, new_val in up.items():
-                    if field_name in existing_fields:
-                        continue
-                    mapped = field_mapping.get(field_name)
-                    if mapped and isinstance(mapped, dict):
-                        change_items.append({
-                            "field_name": field_name,
-                            "widget_name": str(mapped.get("widget", "")),
-                            "old_value": None,
-                            "new_value": new_val,
-                        })
-                if change_items:
-                    card["change_items"] = change_items
+            _apply_operation_card_field_updates(card, req.field_updates.get(cid, {}), forms_cfg)
 
         # ── 全部覆写落盘到 OPERATION_CARD_STORE + DB ──
         for card in cards:
@@ -3788,7 +3858,7 @@ def _inject_live_proxy_token_cookie(html: str, token: str) -> str:
         return html
     cookie_script = (
         "<script>"
-        f"document.cookie='power_map_live_token={token}; Path={_POWER_MAP_LIVE_PROXY_PREFIX}/; Secure; SameSite=Lax';"
+        f"document.cookie='power_map_live_token={token}; Path={_POWER_MAP_LIVE_PROXY_PREFIX}/; SameSite=Lax';"
         "</script>"
     )
     if "<head>" in html:
@@ -3803,6 +3873,15 @@ async def _proxy_live_power_map_request(
     current_user: dict[str, Any],
 ) -> Response:
     from urllib.parse import urlparse
+
+    normalized_path = proxy_path.strip("/").lower()
+    if request.method.upper() != "GET" and normalized_path == "decision/url/power_map/upinfo":
+        logger.warning(
+            "blocked live power map write through iframe proxy: user=%s path=%s",
+            current_user.get("username") or current_user.get("user_name") or "",
+            proxy_path,
+        )
+        raise HTTPException(status_code=403, detail="原版权力地图页面为只读预览，请使用右侧维护面板执行写入。")
 
     api_cfg = _get_power_map_config(cfg)
     headers, cookies = await _get_live_power_map_auth(cfg, current_user)
@@ -3848,7 +3927,7 @@ async def _proxy_live_power_map_request(
                 key="power_map_live_token",
                 value=token,
                 path=f"{_POWER_MAP_LIVE_PROXY_PREFIX}/",
-                secure=True,
+                secure=False,
                 httponly=True,
                 samesite="lax",
             )
@@ -4525,14 +4604,30 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
         jiandaoyun_data["contid"] = {"value": data["contid"]}
     if data.get("contact_names"):
         jiandaoyun_data["contname"] = {"value": data["contact_names"]}
+    client = JiandaoyunClient(api_key=jiandaoyun_api_key)
     # 预期状态：写入是否第一价值实现预期 和 关联预期
     yuqi_first_value = data.get("yuqi_first_value", "")
     if yuqi_first_value:
         jiandaoyun_data["_widget_1757578251950"] = {"value": yuqi_first_value}
+    yuqi_record: dict[str, Any] | None = None
+    yuqi_id = str(data.get("yuqi_id") or "").strip()
+    if yuqi_id:
+        yuqi_entry_id = (
+            field_mappings.get("jiandaoyun", {})
+            .get("forms", {})
+            .get("预期表", {})
+            .get("entry_id", "69e836f10bc8756eea476a1f")
+        )
+        try:
+            yuqi_resp = await client.query_single_data(jiandaoyun_app_id, yuqi_entry_id, yuqi_id)
+            yuqi_record = yuqi_resp.get("data", {}) or {}
+        except Exception as exc:
+            logger.warning("followup submit: failed to load yuqi record %s: %s", yuqi_id, exc)
     apply_followup_yuqi_fields(
         jiandaoyun_data,
         field_mappings=field_mappings,
-        yuqi_id=data.get("yuqi_id", ""),
+        yuqi_id=yuqi_id,
+        yuqi_record=yuqi_record,
     )
     # 跟进标签（关联触发式标签）
     relevent_tags = data.get("relevent_tag", [])
@@ -4592,7 +4687,6 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
 
     data_creator = user.get("integrate_id") or user.get("username", "")
     writer = JiandaoyunWriter(api_key=jiandaoyun_api_key, app_id=jiandaoyun_app_id, data_creator=data_creator)
-    client = JiandaoyunClient(api_key=jiandaoyun_api_key)
     followup_push_cfg = get_followup_push_config(field_mappings)
     t_jdy = time.monotonic()
     jdy_trace = new_trace("rwj")

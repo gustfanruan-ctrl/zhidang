@@ -1,5 +1,6 @@
 """Unit tests for power_map_service v4 layout algorithm."""
 
+import asyncio
 import json
 import os
 import sys
@@ -61,6 +62,8 @@ from app.services.power_map_service import (
     _push_group_right,
     _find_safe_position,
     _post_submit_verify,
+    _tool_relayout,
+    _execute_harness_tool,
 )
 
 
@@ -1181,6 +1184,59 @@ class TestV31EdgeCases:
         assert parent.w >= DEPT_MIN_W
         assert child_dept.w >= DEPT_MIN_W
         assert user.w == PERSON_W
+
+
+class TestRelayoutTool:
+    def _ctx(self, nodes, edges):
+        ctx = MergeContext()
+        ctx.all_nodes = nodes
+        ctx.edges = edges
+        ctx.nodes_by_id = {n.id: n for n in nodes}
+        ctx.nodes_by_name = {n.name: n for n in nodes}
+        ctx.depts_by_name = {n.name: n for n in nodes if n.node_type == "dept"}
+        return ctx
+
+    def test_cross_department_reports_project_to_container_layers(self):
+        exec_dept = PowerNode(id="d-exec", node_type="dept", name="总裁办")
+        finance = PowerNode(id="d-fin", node_type="dept", name="财务部")
+        sales = PowerNode(id="d-sales", node_type="dept", name="销售部")
+        ceo = PowerNode(id="u-ceo", node_type="user", name="黄宇", parent_dept_id="d-exec")
+        cfo = PowerNode(id="u-cfo", node_type="user", name="纪成", parent_dept_id="d-fin")
+        sales_director = PowerNode(id="u-sales", node_type="user", name="张强", parent_dept_id="d-sales")
+        ctx = self._ctx(
+            [exec_dept, finance, sales, ceo, cfo, sales_director],
+            [
+                {"id": "e1", "source_id": "u-cfo", "target_id": "u-ceo", "edge_type": "reports_to"},
+                {"id": "e2", "source_id": "u-sales", "target_id": "u-ceo", "edge_type": "reports_to"},
+            ],
+        )
+
+        result = _tool_relayout(ctx, {"direction": "TB"})
+
+        assert result["ok"] is True
+        assert finance.y > exec_dept.y
+        assert sales.y > exec_dept.y
+        assert abs((finance.y + finance.h / 2) - (sales.y + sales.h / 2)) < 5
+
+    def test_execute_harness_tool_relayout_runs_real_layout(self):
+        exec_dept = PowerNode(id="d-exec", node_type="dept", name="总裁办", x=5000, y=5000)
+        finance = PowerNode(id="d-fin", node_type="dept", name="财务部", x=-3000, y=-3000)
+        ceo = PowerNode(id="u-ceo", node_type="user", name="黄宇", parent_dept_id="d-exec")
+        cfo = PowerNode(id="u-cfo", node_type="user", name="纪成", parent_dept_id="d-fin")
+        ctx = self._ctx(
+            [exec_dept, finance, ceo, cfo],
+            [{"id": "e1", "source_id": "u-cfo", "target_id": "u-ceo", "edge_type": "reports_to"}],
+        )
+
+        result = asyncio.run(
+            _execute_harness_tool(ctx, "relayout", {"options": {"direction": "TB"}})
+        )
+
+        assert result["ok"] is True
+        assert "deprecated" not in json.dumps(result, ensure_ascii=False)
+        assert finance.y > exec_dept.y
+        assert exec_dept.x >= 0
+        assert finance.x >= 0
 
 
 # ═══════════════════════════════════════════════════
