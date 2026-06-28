@@ -713,6 +713,7 @@ _REFRESH_LOCK = asyncio.Lock()
 
 
 SERVICE_MANYI_FIELD_CANDIDATES = (
+    "satisfy_charger",
     "服务侧满一",
     "service_manyi",
     "service_side_manyi",

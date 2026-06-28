@@ -62,6 +62,28 @@ def test_sso_user_can_see_customer_when_service_manyi_matches_raw_field():
     assert [item["company_id"] for item in visible] == ["raw-service-owner"]
 
 
+def test_user_can_see_customer_when_real_satisfy_charger_field_matches():
+    visible = _filter_customers_for_user_scope(
+        [
+            {
+                "company_id": "real-service-owner",
+                "company_name": "real field customer",
+                "csm": "other",
+                "raw": {"satisfy_charger": [{"name": "zhang san"}]},
+            },
+            {
+                "company_id": "not-owned",
+                "company_name": "not owned",
+                "csm": "other",
+                "raw": {"satisfy_charger": [{"name": "li si"}]},
+            },
+        ],
+        {"source": "user", "display_name": "zhang san"},
+    )
+
+    assert [item["company_id"] for item in visible] == ["real-service-owner"]
+
+
 def test_superadmin_customer_scope_is_unfiltered():
     visible = _filter_customers_for_user_scope(CUSTOMERS, {"source": "superadmin"})
 
