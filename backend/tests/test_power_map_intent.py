@@ -8,6 +8,8 @@ from app.services.power_map_service import (  # noqa: E402
     MergeContext,
     PowerNode,
     _parse_power_map_intent,
+    _power_map_intent_to_pseudo_graph,
+    _power_map_parallel_edge_warnings,
     _validate_power_map_plan_against_instruction,
     _validate_power_map_intent,
 )
@@ -172,3 +174,97 @@ def test_plan_validation_rejects_missing_explicit_reporting_edges():
     )
 
     assert any("report_edges" in error for error in errors)
+
+
+def test_power_map_pseudo_graph_splits_hierarchy_parallel_and_reporting_sections():
+    intent = _parse_power_map_intent(
+        json.dumps(
+            {
+                "goal": "构建回收宝局部组织关系",
+                "create_departments": [
+                    {"name": "信息中心", "parent": ""},
+                    {"name": "开发组", "parent": "信息中心"},
+                    {"name": "运维组", "parent": "信息中心"},
+                    {"name": "运营管理部", "parent": ""},
+                ],
+                "create_people": [
+                    {"name": "侯新硕", "title": "CIO", "parent": "信息中心"},
+                    {"name": "吴龙", "title": "开发组组长", "parent": "开发组"},
+                    {"name": "刘东", "title": "运营管理部部长", "parent": "运营管理部"},
+                    {"name": "王忠", "title": "业务人员", "parent": "运营管理部"},
+                ],
+                "rank_groups": [["信息中心", "运营管理部"]],
+                "report_edges": [
+                    {
+                        "source": "王忠",
+                        "target": "刘东",
+                        "relation": "reports_to",
+                        "reason": "刘东是部长，下面有业务人员王忠",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    pseudo = _power_map_intent_to_pseudo_graph(intent)
+
+    assert "部门层级：" in pseudo
+    assert "平行关系：" in pseudo
+    assert "人员汇报线：" in pseudo
+    assert "- 信息中心" in pseudo
+    assert "  - 开发组" in pseudo
+    assert "- 信息中心 ｜ 运营管理部" in pseudo
+    assert "王忠 -> 刘东" in pseudo
+    assert "刘东 -> 侯新硕" not in pseudo
+    assert "吴龙 -> 侯新硕" not in pseudo
+
+
+def test_power_map_pseudo_graph_explicitly_shows_no_reporting_edges():
+    intent = _parse_power_map_intent(
+        json.dumps(
+            {
+                "create_departments": [
+                    {"name": "信息中心", "parent": ""},
+                    {"name": "运营管理部", "parent": ""},
+                ],
+                "rank_groups": [["信息中心", "运营管理部"]],
+                "report_edges": [],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    pseudo = _power_map_intent_to_pseudo_graph(intent)
+
+    assert "人员汇报线：" in pseudo
+    assert "- 无明确关系线" in pseudo
+
+
+def test_parallel_edge_warning_is_advisory_only():
+    intent = _parse_power_map_intent(
+        json.dumps(
+            {
+                "create_departments": [
+                    {"name": "信息中心", "parent": ""},
+                    {"name": "开发组", "parent": "信息中心"},
+                    {"name": "运营管理部", "parent": ""},
+                ],
+                "create_people": [
+                    {"name": "侯新硕", "title": "CIO", "parent": "信息中心"},
+                    {"name": "刘东", "title": "运营管理部部长", "parent": "运营管理部"},
+                    {"name": "吴龙", "title": "开发组组长", "parent": "开发组"},
+                ],
+                "rank_groups": [["信息中心", "运营管理部"]],
+                "report_edges": [
+                    {"source": "刘东", "target": "侯新硕", "relation": "reports_to"},
+                    {"source": "吴龙", "target": "侯新硕", "relation": "reports_to"},
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    warnings = _power_map_parallel_edge_warnings(intent)
+
+    assert warnings == ["请确认跨平行部门汇报是否明确存在：刘东 -> 侯新硕"]

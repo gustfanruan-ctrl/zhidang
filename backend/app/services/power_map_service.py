@@ -499,6 +499,10 @@ _KIMI_PLANNING_SYSTEM_PROMPT = """你是权力地图 radial intent 规划器。�
 - “你本人”是一个需要原样保留的人员名称，不要改写成“本人”“我”或“用户本人”。
 - “信息化条线为：分管领导 → 科技信息部 → 研发中心 → ITC”这类组织/部门条线不能直接变成部门对部门的 reports_to；部门层级仍写 parent，只有明确人员关系才写 report_edges。
 - 只有用户明确表达“向谁汇报、分管、决策链、影响/协作关系、正式/非正式流程”等关系时，才列入 create_edge 连线。
+- “平行部门、并列部门、同级部门、另一个平行部门”是强语义边界：这些部门之间没有上下级，也没有默认汇报线；应放入 rank_groups 或保留共同父级/顶层并列。
+- “部门下面有小组/部门/中心”是容器层级；“负责人/部长/组长下面有人员/下属/业务人员”才是人员汇报语义。
+- CIO、部长、组长、负责人只是职位或角色标签，不能仅凭职位跨平行部门补 reports_to；跨部门汇报必须有“X 向 Y 汇报/直属上级/受 Y 分管/汇报给 Y”这类二元依据。
+- report_edges.reason 必须写出原文明确依据；如果只能靠职位或组织层级推测，就不要输出该边。
 - 如果用户要求组织架构或汇报关系，执行清单里必须显式区分“parent_links”和“report_edges”。
 - report_edges 中每个 source/target 必须能在 create_people/create_departments 或当前图结构中找到；从零建图时，像“分管领导、负责人、联系人、外包人员”这类边端点必须先列入 create_people。
 - 后端会按 departments → people → parent_links → radial layout → report_edges 执行；你只负责把事实放进 schema。
@@ -509,6 +513,12 @@ _KIMI_PLANNING_SYSTEM_PROMPT = """你是权力地图 radial intent 规划器。�
 - 可选输出 tool_batches 仅用于说明执行批次，不要把它当主输出；主输出必须是 radial intent schema。
 - 可用核心语义：department/user 节点、parent_links 容器归属、report_edges 真实关系；坐标、容器宽高和微调由后端 radial layout 负责。
 - 不要纠结截图和视觉细节；布局只写必要步骤，结构事实以当前图结构为准。
+
+Few-shot 语义示例：
+用户：信息中心CIO是侯新硕，下面有开发组和运维组，开发组组长吴龙，吴龙和我们关系很好。平行的一个运营部门叫运营管理部，刘东是运营管理部的部长，下面有个业务人员是王忠。
+正确：信息中心与运营管理部同层；开发组、运维组属于信息中心；王忠向刘东汇报；不要输出刘东向侯新硕、吴龙向侯新硕。
+原因：“平行”阻断跨部门默认汇报；“CIO/部长/组长”不是跨部门汇报依据；“刘东是部长，下面有业务人员王忠”是部门内人员汇报依据。
+对照：只有用户明确说“开发组组长吴龙向 CIO 侯新硕汇报”时，才输出吴龙 -> 侯新硕。
 
 当用户要求“改名、改成、改为、重命名、改职级、改角色”且目标已存在于当前图结构时，必须输出 update_nodes，不要输出 create_departments/create_people 来表示同一个修改。
 输出格式必须是一个 JSON 对象，不要包 markdown 代码块，不要输出 JSON 之外的文本：
@@ -6861,12 +6871,11 @@ def _power_map_intent_to_pseudo_graph(intent: PowerMapIntent) -> str:
 
     lines: list[str] = []
     roots = sorted(child_depts.get("", []))
+    lines.append("部门层级：")
     if roots:
-        lines.append("部门/人员：")
         for root in roots:
             lines.extend(render_dept(root))
     elif intent.people:
-        lines.append("人员：")
         for person in intent.people:
             title = f"（{person.title}）" if person.title else ""
             parent = f" @ {person.parent}" if person.parent else ""
@@ -6876,17 +6885,20 @@ def _power_map_intent_to_pseudo_graph(intent: PowerMapIntent) -> str:
 
     if intent.rank_groups:
         lines.append("")
-        lines.append("平行/同层：")
+        lines.append("平行关系：")
         for group in intent.rank_groups:
             if group:
                 lines.append("- " + " ｜ ".join(group))
 
+    lines.append("")
+    lines.append("人员汇报线：")
     if intent.report_edges:
-        lines.append("")
-        lines.append("汇报/影响线：")
         for edge in intent.report_edges:
             relation = edge.relation or "reports_to"
-            lines.append(f"- {edge.source} -> {edge.target} ({relation})")
+            reason = f"；依据：{edge.reason}" if edge.reason else ""
+            lines.append(f"- {edge.source} -> {edge.target} ({relation}{reason})")
+    else:
+        lines.append("- 无明确关系线")
 
     if intent.update_nodes:
         lines.append("")
@@ -6902,6 +6914,44 @@ def _power_map_intent_to_pseudo_graph(intent: PowerMapIntent) -> str:
             lines.append(f"- {update.ref}: " + ("；".join(parts) if parts else "无属性变更"))
 
     return "```text\n" + "\n".join(lines) + "\n```"
+
+
+def _power_map_parallel_edge_warnings(intent: PowerMapIntent) -> list[str]:
+    if not intent.rank_groups or not intent.report_edges:
+        return []
+
+    dept_parent: dict[str, str] = {d.name: d.parent for d in intent.departments if d.name}
+    for link in intent.parent_links:
+        if link.child in dept_parent:
+            dept_parent[link.child] = link.parent
+    person_parent: dict[str, str] = {p.name: p.parent for p in intent.people if p.name}
+
+    parallel_roots: list[set[str]] = [set(name for name in group if name) for group in intent.rank_groups]
+
+    def top_dept(ref: str) -> str:
+        current = person_parent.get(ref) or (ref if ref in dept_parent else "")
+        seen: set[str] = set()
+        while current and current not in seen:
+            seen.add(current)
+            parent = dept_parent.get(current, "")
+            if not parent:
+                return current
+            current = parent
+        return current
+
+    warnings: list[str] = []
+    for edge in intent.report_edges:
+        source_root = top_dept(edge.source)
+        target_root = top_dept(edge.target)
+        if not source_root or not target_root or source_root == target_root:
+            continue
+        for group in parallel_roots:
+            if source_root in group and target_root in group:
+                warnings.append(
+                    f"请确认跨平行部门汇报是否明确存在：{edge.source} -> {edge.target}"
+                )
+                break
+    return warnings
 
 
 def _power_map_plan_summary(intent: PowerMapIntent) -> str:
@@ -7056,6 +7106,7 @@ async def plan_power_map_v2(
             intent=intent,
         )
         warnings.extend(str(e) for e in plan_errors[:8])
+        warnings.extend(_power_map_parallel_edge_warnings(intent))
     except Exception as exc:
         intent = PowerMapIntent(goal=message, raw={"goal": message})
         warnings.append(f"计划 JSON 解析失败：{exc}")

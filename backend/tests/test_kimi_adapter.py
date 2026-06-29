@@ -225,6 +225,12 @@ def test_kimi_planning_prompt_separates_hierarchy_from_edges():
     assert "每个 source/target 必须能在 create_people/create_departments 或当前图结构中找到" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "你本人" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "部门对部门的 reports_to" in _KIMI_PLANNING_SYSTEM_PROMPT
+    assert "平行部门" in _KIMI_PLANNING_SYSTEM_PROMPT
+    assert "职位或角色标签" in _KIMI_PLANNING_SYSTEM_PROMPT
+    assert "report_edges.reason" in _KIMI_PLANNING_SYSTEM_PROMPT
+    assert "信息中心CIO是侯新硕" in _KIMI_PLANNING_SYSTEM_PROMPT
+    assert "王忠向刘东汇报" in _KIMI_PLANNING_SYSTEM_PROMPT
+    assert "不要输出刘东向侯新硕、吴龙向侯新硕" in _KIMI_PLANNING_SYSTEM_PROMPT
 
 
 def test_kimi_cleaning_prompt_understands_power_map_model():
