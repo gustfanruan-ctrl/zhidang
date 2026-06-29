@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { commitChatV2, discardChatV2, startChatV2 } from '../services/powerMapChatV2'
+import { commitChatV2, confirmPlanChatV2, discardChatV2, startChatV2 } from '../services/powerMapChatV2'
 import { useToast } from '../composables/useToast'
 
 function makeAssistantMessage() {
@@ -8,6 +8,7 @@ function makeAssistantMessage() {
     content: '',
     toolCalls: [],
     graphState: null,
+    planPreview: null,
     screenshotUrl: null,
     sandboxUrl: null,
     done: null,
@@ -53,6 +54,8 @@ function pickScreenshot(result) {
 export const usePowerMapChatStore = defineStore('powerMapChat', {
   state: () => ({
     currentSessionId: null,
+    currentPlanId: null,
+    phase: 'idle',
     messages: [],
     streamingText: '',
     streamingStatus: '',
@@ -67,6 +70,8 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
   actions: {
     reset() {
       this.currentSessionId = null
+      this.currentPlanId = null
+      this.phase = 'idle'
       this.messages = []
       this.streamingText = ''
       this.streamingStatus = ''
@@ -100,6 +105,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
       this.messages.push(assistant)
 
       this.isLoading = true
+      this.phase = 'planning'
       this.streamingText = ''
       this.streamingStatus = 'AI 正在思考...'
       this.lastError = ''
@@ -112,10 +118,13 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
           companyId,
           message: trimmed,
           version,
+          sessionId: this.currentSessionId,
+          planId: this.currentPlanId,
           onEvent: (eventType, data) => {
             switch (eventType) {
               case 'round_start': {
                 if (data?.session_id) this.currentSessionId = data.session_id
+                if (data?.plan_id) this.currentPlanId = data.plan_id
                 if (typeof data?.sandbox_url === 'string' && data.sandbox_url) {
                   this.sandboxUrl = data.sandbox_url
                 }
@@ -185,13 +194,29 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
                 assistant.graphState = data
                 break
               }
+              case 'plan_preview': {
+                assistant.planPreview = data
+                this.currentPlanId = data?.plan_id || this.currentPlanId
+                if (data?.session_id) this.currentSessionId = data.session_id
+                this.phase = 'awaiting_plan_confirmation'
+                this.streamingStatus = ''
+                break
+              }
               case 'done': {
                 this.lastDone = data
                 assistant.done = data
                 if (data?.session_id) this.currentSessionId = data.session_id
+                if (data?.plan_id) this.currentPlanId = data.plan_id
                 if (typeof data?.sandbox_url === 'string' && data.sandbox_url) {
                   this.sandboxUrl = data.sandbox_url
                 }
+                if (data?.needs_plan_confirmation) {
+                  this.lastDone = null
+                  this.phase = 'awaiting_plan_confirmation'
+                  this.streamingStatus = ''
+                  break
+                }
+                this.phase = data?.error ? 'idle' : 'awaiting_commit'
                 if (!data?.error) this.sandboxRefreshKey += 1
                 if (data?.error) {
                   const friendly = mapDoneError(data.error)
@@ -228,6 +253,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
       } catch (err) {
         const msg = err?.message || '网络异常，请重试'
         this.lastError = msg
+        this.phase = 'idle'
         this.streamingText = `网络异常，请重试：${msg}`
         if (!assistant.content) {
           assistant.content = `请求失败：${msg}`
@@ -237,6 +263,52 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
         this.isLoading = false
         this.streamingText = ''
         this.streamingStatus = ''
+      }
+    },
+
+    async confirmPlan(companyId) {
+      if (!this.currentPlanId || !companyId) return
+      if (this.isLoading) return
+      const { toast } = useToast()
+      this.isLoading = true
+      this.phase = 'executing'
+      this.lastError = ''
+      try {
+        const res = await confirmPlanChatV2({ companyId, planId: this.currentPlanId })
+        if (!res.ok) {
+          const msg = res.error || '计划执行失败'
+          this.lastError = msg
+          this.phase = 'awaiting_plan_confirmation'
+          toast({ title: '计划执行失败', description: msg, variant: 'destructive' })
+          return
+        }
+        const data = res.data || {}
+        this.currentSessionId = data.session_id || this.currentSessionId
+        this.currentPlanId = null
+        this.phase = 'awaiting_commit'
+        if (data.sandbox_url) this.sandboxUrl = data.sandbox_url
+        if (data.screenshot_url) this.lastScreenshot = data.screenshot_url
+        this.lastDone = data.done || {
+          rounds: 1,
+          executed: 0,
+          session_id: this.currentSessionId,
+          converged: true,
+          exit_reason: 'plan_confirmed',
+        }
+        const assistant = makeAssistantMessage()
+        assistant.content = '已按计划生成沙箱预览，请确认是否写入。'
+        assistant.graphState = data.graph_state || null
+        assistant.screenshotUrl = data.screenshot_url || null
+        assistant.done = this.lastDone
+        this.messages.push(assistant)
+        this.sandboxRefreshKey += 1
+      } catch (err) {
+        const msg = err?.message || '计划执行失败'
+        this.lastError = msg
+        this.phase = 'awaiting_plan_confirmation'
+        toast({ title: '计划执行失败', description: msg, variant: 'destructive' })
+      } finally {
+        this.isLoading = false
       }
     },
 
@@ -285,7 +357,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
     },
 
     async discard(companyId) {
-      if (!this.currentSessionId) return
+      if (!this.currentSessionId && !this.currentPlanId) return
       if (this.isLoading) return
       const confirmed = window.confirm('放弃当前修改？已修改的内容将不会保存')
       if (!confirmed) return

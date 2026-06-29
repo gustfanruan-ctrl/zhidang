@@ -27,7 +27,7 @@ from .crypto_utils import decrypt_secret, encrypt_secret
 from .database import Base, engine, get_db
 from .models import AnalyticsEvent, ConfigChangeLog, FollowupRecord, OperationLog, Superadmin, SystemConfig, Transcript, User
 from .progress import build_progress
-from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, PowerMapChatPayload, PowerMapConfirmPayload, PowerMapRelayoutPayload, PowerMapPreviewPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptAnalyzeResponse, TranscriptUploadResponse
+from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, PowerMapChatPayload, PowerMapConfirmPayload, PowerMapConfirmPlanPayload, PowerMapRelayoutPayload, PowerMapPreviewPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptAnalyzeResponse, TranscriptUploadResponse
 from .schemas.operation import OperationExecuteRequest, OperationTypeCalibrationRequest, ReviewAction
 from .schemas.agent_output import validate_comparison_output, validate_extraction_output
 from .services.agent_runner import AgentPhase, AgentRunner
@@ -51,7 +51,7 @@ from .services.followup_push import (
     push_followup_to_travel_server,
 )
 from .services.followup_yuqi import apply_followup_yuqi_fields, extract_followup_yuqi_id
-from .services.power_map_service import _build_merge_context, _ctx_to_getinfo_response, _drop_session, _execute_harness_stream, _fetch_from_external, _get_power_map_config, _get_session, _new_session_id, _node_from_bi_dict, _split_bi_auth, _store_session, chat_power_map, chat_power_map_v2, commit_power_map_session, confirm_power_map, discard_power_map_session, get_power_map, preview_power_map, relayout_power_map
+from .services.power_map_service import _build_merge_context, _ctx_to_getinfo_response, _drop_session, _execute_harness_stream, _fetch_from_external, _get_power_map_config, _get_session, _new_session_id, _node_from_bi_dict, _split_bi_auth, _store_session, chat_power_map, chat_power_map_v2, commit_power_map_session, confirm_power_map, confirm_power_map_plan, discard_power_map_session, get_power_map, plan_power_map_v2, preview_power_map, relayout_power_map
 from .services import sandbox_infra
 from .services.sandbox_infra import (
     SANDBOX_DIR,
@@ -3810,10 +3810,7 @@ async def power_map_chat_v2(
     db: Session = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user_for_sse),
 ):
-    """SSE streaming chat v2: vision LLM tool loop against the local sandbox renderer."""
-    # Reject resumed sessions — every chat starts fresh
-    if payload.session_id:
-        raise HTTPException(status_code=400, detail="session_id is no longer accepted; every chat starts a new session")
+    """SSE streaming chat v2: plan-preview first, execution after confirm-plan."""
 
     cfg = db.get(SystemConfig, 1)
     if not cfg:
@@ -3830,14 +3827,14 @@ async def power_map_chat_v2(
 
     async def event_generator():
         try:
-            async for event in chat_power_map_v2(
+            async for event in plan_power_map_v2(
                 db=db,
                 company_id=company_id,
                 message=payload.message,
                 current_user=user,
                 version=payload.version,
-                bi_credentials=bi_credentials,
-                # session_id removed — every chat starts fresh
+                session_id=payload.session_id or "",
+                plan_id=payload.plan_id or "",
             ):
                 yield f"event: {event.type}\ndata: {json.dumps(event.data, ensure_ascii=False)}\n\n"
         except Exception as exc:
@@ -3849,6 +3846,16 @@ async def power_map_chat_v2(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/v1/power-map/{company_id}/chat_v2/confirm-plan")
+async def power_map_chat_v2_confirm_plan(
+    company_id: str,
+    payload: PowerMapConfirmPlanPayload,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    return await confirm_power_map_plan(db, company_id, payload.plan_id, current_user=user)
 
 
 @app.get("/api/v1/power-map/debug/dump_ctx")

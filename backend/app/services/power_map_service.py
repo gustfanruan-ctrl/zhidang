@@ -904,6 +904,31 @@ _SESSION_LAST_ACCESS: dict[str, float] = {}
 _SESSION_TTL = 1800  # seconds
 
 
+@dataclass
+class PowerMapPlanDraft:
+    plan_id: str
+    company_id: str
+    version: str | None
+    current_intent: "PowerMapIntent"
+    plan_text: str
+    plan_messages: list[dict[str, str]] = field(default_factory=list)
+    pseudo_graph_markdown: str = ""
+    warnings: list[str] = field(default_factory=list)
+    base_session_id: str = ""
+    base_ctx: "MergeContext | None" = None
+    prj_id: str = ""
+    version_id: str = ""
+    bi_version: str | None = None
+    bi_prj_type: str = "opp"
+    bi_ver_info: str | None = None
+    upinfo_users: list = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    last_access: float = field(default_factory=time.time)
+
+
+_PLAN_STORE: dict[str, PowerMapPlanDraft] = {}
+
+
 def _cleanup_expired_sessions() -> None:
     now = time.time()
     expired = [
@@ -913,6 +938,12 @@ def _cleanup_expired_sessions() -> None:
     for sid in expired:
         _SESSION_STORE.pop(sid, None)
         _SESSION_LAST_ACCESS.pop(sid, None)
+    expired_plans = [
+        pid for pid, draft in _PLAN_STORE.items()
+        if now - draft.last_access > _SESSION_TTL
+    ]
+    for pid in expired_plans:
+        _PLAN_STORE.pop(pid, None)
 
 
 def _touch_session(session_id: str) -> None:
@@ -941,6 +972,30 @@ def _store_session(session_id: str, ctx: "MergeContext") -> None:
 def _drop_session(session_id: str) -> None:
     _SESSION_STORE.pop(session_id, None)
     _SESSION_LAST_ACCESS.pop(session_id, None)
+
+
+def _new_plan_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _get_plan(plan_id: str) -> PowerMapPlanDraft | None:
+    if not plan_id:
+        return None
+    _cleanup_expired_sessions()
+    draft = _PLAN_STORE.get(plan_id)
+    if draft:
+        draft.last_access = time.time()
+    return draft
+
+
+def _store_plan(draft: PowerMapPlanDraft) -> None:
+    _cleanup_expired_sessions()
+    draft.last_access = time.time()
+    _PLAN_STORE[draft.plan_id] = draft
+
+
+def _drop_plan(plan_id: str) -> None:
+    _PLAN_STORE.pop(plan_id, None)
 
 # v3.1 legacy constants (still used by _v31_global_layout fallback)
 _SIBLING_GAP_H = 30
@@ -6780,6 +6835,264 @@ def _should_try_radial_fast_path(intent: PowerMapIntent, ctx: MergeContext) -> b
         return True
     goal = intent.goal or json.dumps(intent.raw, ensure_ascii=False)
     return any(marker in goal for marker in ("组织架构", "权力地图", "完整", "批量"))
+
+
+def _power_map_intent_to_pseudo_graph(intent: PowerMapIntent) -> str:
+    dept_parent: dict[str, str] = {d.name: d.parent for d in intent.departments if d.name}
+    for link in intent.parent_links:
+        if link.child in dept_parent:
+            dept_parent[link.child] = link.parent
+    people_by_parent: dict[str, list[PowerMapIntentPerson]] = {}
+    for person in intent.people:
+        people_by_parent.setdefault(person.parent, []).append(person)
+    child_depts: dict[str, list[str]] = {}
+    for name, parent in dept_parent.items():
+        child_depts.setdefault(parent or "", []).append(name)
+
+    def render_dept(name: str, depth: int = 0) -> list[str]:
+        prefix = "  " * depth
+        lines = [f"{prefix}- {name}"]
+        for person in people_by_parent.get(name, []):
+            title = f"（{person.title}）" if person.title else ""
+            lines.append(f"{prefix}  - {person.name}{title}")
+        for child in sorted(child_depts.get(name, [])):
+            lines.extend(render_dept(child, depth + 1))
+        return lines
+
+    lines: list[str] = []
+    roots = sorted(child_depts.get("", []))
+    if roots:
+        lines.append("部门/人员：")
+        for root in roots:
+            lines.extend(render_dept(root))
+    elif intent.people:
+        lines.append("人员：")
+        for person in intent.people:
+            title = f"（{person.title}）" if person.title else ""
+            parent = f" @ {person.parent}" if person.parent else ""
+            lines.append(f"- {person.name}{title}{parent}")
+    else:
+        lines.append("暂无可绘制节点，请补充部门或人员。")
+
+    if intent.rank_groups:
+        lines.append("")
+        lines.append("平行/同层：")
+        for group in intent.rank_groups:
+            if group:
+                lines.append("- " + " ｜ ".join(group))
+
+    if intent.report_edges:
+        lines.append("")
+        lines.append("汇报/影响线：")
+        for edge in intent.report_edges:
+            relation = edge.relation or "reports_to"
+            lines.append(f"- {edge.source} -> {edge.target} ({relation})")
+
+    if intent.update_nodes:
+        lines.append("")
+        lines.append("修改已有节点：")
+        for update in intent.update_nodes:
+            parts = []
+            if update.name:
+                parts.append(f"名称={update.name}")
+            if update.position:
+                parts.append(f"职务={update.position}")
+            if update.role:
+                parts.append(f"角色={update.role}")
+            lines.append(f"- {update.ref}: " + ("；".join(parts) if parts else "无属性变更"))
+
+    return "```text\n" + "\n".join(lines) + "\n```"
+
+
+def _power_map_plan_summary(intent: PowerMapIntent) -> str:
+    return (
+        f"计划包含 {len(intent.departments)} 个部门、{len(intent.people)} 个人员、"
+        f"{len(intent.report_edges)} 条关系线、{len(intent.update_nodes)} 个已有节点修改。"
+    )
+
+
+def _power_map_plan_payload(draft: PowerMapPlanDraft) -> dict[str, Any]:
+    return {
+        "plan_id": draft.plan_id,
+        "session_id": draft.base_session_id or "",
+        "needs_plan_confirmation": True,
+        "summary": _power_map_plan_summary(draft.current_intent),
+        "pseudo_graph_markdown": draft.pseudo_graph_markdown,
+        "warnings": draft.warnings,
+        "intent": draft.current_intent.raw,
+        "phase": "awaiting_plan_confirmation",
+    }
+
+
+async def _prepare_power_map_plan_context(
+    db: Session,
+    cfg: SystemConfig,
+    company_id: str,
+    current_user: dict[str, Any] | None,
+    version: str | None,
+    session_id: str = "",
+) -> tuple[MergeContext, dict[str, Any]]:
+    if session_id:
+        existing = _get_session(session_id)
+        if existing is None:
+            raise ValueError("session_not_found")
+        return existing, {
+            "session_id": session_id,
+            "prj_id": existing.harness_prj_id or await _resolve_prj_id(db, cfg, company_id),
+            "version_id": existing.harness_version_id or "",
+            "bi_version": existing.bi_version,
+            "bi_prj_type": existing.bi_prj_type or "opp",
+            "bi_ver_info": existing.bi_ver_info,
+            "upinfo_users": existing.upinfo_users,
+        }
+
+    prj_id = await _resolve_prj_id(db, cfg, company_id)
+    current = await _fetch_from_external(cfg, prj_id, current_user, version=version)
+    nodes = [_node_from_bi_dict(n) for n in current.get("nodes", [])]
+    _mark_geometry_anomalies(nodes)
+    version_id = _extract_version_id(current, version)
+    ctx = _build_merge_context(
+        nodes,
+        current.get("edges", []),
+        version_id,
+        bi_version=version,
+        bi_prj_type="opp",
+        bi_ver_info=version_id,
+    )
+    ctx.upinfo_users = current.get("contact_info", [])
+    try:
+        _normalize_edges(ctx)
+    except Exception:
+        logger.exception("plan: _normalize_edges failed (continuing)")
+    return ctx, {
+        "session_id": "",
+        "prj_id": prj_id,
+        "version_id": version_id,
+        "bi_version": version,
+        "bi_prj_type": "opp",
+        "bi_ver_info": version_id,
+        "upinfo_users": ctx.upinfo_users,
+    }
+
+
+async def plan_power_map_v2(
+    db: Session,
+    company_id: str,
+    message: str,
+    current_user: dict[str, Any] | None = None,
+    version: str | None = None,
+    session_id: str = "",
+    plan_id: str = "",
+) -> AsyncGenerator[HarnessEvent, None]:
+    cfg = db.get(SystemConfig, 1)
+    if not cfg:
+        yield HarnessEvent(type="done", data={"skipped": True, "error": "系统未初始化", "phase": "planning"})
+        return
+
+    existing_plan = _get_plan(plan_id) if plan_id else None
+    if existing_plan:
+        base_ctx = _get_session(existing_plan.base_session_id) if existing_plan.base_session_id else existing_plan.base_ctx
+        if base_ctx is None:
+            yield HarnessEvent(type="done", data={"error": "plan_base_expired", "phase": "planning"})
+            return
+        ctx = base_ctx
+        meta = {
+            "session_id": existing_plan.base_session_id,
+            "prj_id": existing_plan.prj_id,
+            "version_id": existing_plan.version_id,
+            "bi_version": existing_plan.bi_version,
+            "bi_prj_type": existing_plan.bi_prj_type,
+            "bi_ver_info": existing_plan.bi_ver_info,
+            "upinfo_users": existing_plan.upinfo_users,
+        }
+        plan_messages = list(existing_plan.plan_messages)
+        plan_messages.append({"role": "user", "content": message})
+        instruction_text = (
+            "请基于当前计划和用户新增修改，输出完整替换版 radial intent JSON。\n"
+            f"当前计划：\n{existing_plan.plan_text}\n\n"
+            "历史对话：\n"
+            + "\n".join(f"{m['role']}: {m['content']}" for m in plan_messages)
+        )
+    else:
+        try:
+            ctx, meta = await _prepare_power_map_plan_context(
+                db, cfg, company_id, current_user, version, session_id=session_id,
+            )
+        except ValueError as exc:
+            yield HarnessEvent(type="done", data={"error": str(exc), "phase": "planning"})
+            return
+        plan_messages = [{"role": "user", "content": message}]
+        instruction_text = message
+
+    draft_plan_id = plan_id or _new_plan_id()
+    yield HarnessEvent(type="round_start", data={"round": 1, "plan_id": draft_plan_id, "phase": "planning"})
+
+    model = _get_power_map_llm_model(cfg)
+    client = _get_llm_client(cfg)
+    graph_state_text = _build_graph_state_text(ctx)
+    plan_text = ""
+    async for planning_event in _run_kimi_planning_round(
+        client=client,
+        model=model,
+        instruction_text=instruction_text,
+        instruction_label="用户指令" if not existing_plan else "计划阶段补充说明",
+        graph_state_text=graph_state_text,
+        session_id=draft_plan_id,
+        kimi_thinking=_should_use_kimi_planning_thinking(mode=_power_map_kimi_mode()),
+    ):
+        if planning_event.get("type") == "progress":
+            yield HarnessEvent(type="thinking", data={"text_chunk": str(planning_event.get("text") or "")})
+        elif planning_event.get("type") == "done":
+            plan_text = str(planning_event.get("plan_text") or "")
+
+    warnings: list[str] = []
+    try:
+        intent = _parse_power_map_intent(plan_text)
+        validation = _validate_power_map_intent(intent, ctx)
+        if not validation.get("ok"):
+            warnings.extend(str(e) for e in validation.get("errors", [])[:8])
+        plan_errors = _validate_power_map_plan_against_instruction(
+            instruction_text=instruction_text,
+            intent=intent,
+        )
+        warnings.extend(str(e) for e in plan_errors[:8])
+    except Exception as exc:
+        intent = PowerMapIntent(goal=message, raw={"goal": message})
+        warnings.append(f"计划 JSON 解析失败：{exc}")
+        plan_text = json.dumps(intent.raw, ensure_ascii=False)
+
+    draft = PowerMapPlanDraft(
+        plan_id=draft_plan_id,
+        company_id=company_id,
+        version=version,
+        current_intent=intent,
+        plan_text=plan_text,
+        plan_messages=plan_messages,
+        pseudo_graph_markdown=_power_map_intent_to_pseudo_graph(intent),
+        warnings=warnings,
+        base_session_id=str(meta.get("session_id") or ""),
+        base_ctx=None if meta.get("session_id") else deepcopy(ctx),
+        prj_id=str(meta.get("prj_id") or ""),
+        version_id=str(meta.get("version_id") or ""),
+        bi_version=meta.get("bi_version"),
+        bi_prj_type=str(meta.get("bi_prj_type") or "opp"),
+        bi_ver_info=meta.get("bi_ver_info"),
+        upinfo_users=list(meta.get("upinfo_users") or []),
+    )
+    _store_plan(draft)
+    yield HarnessEvent(type="plan_preview", data=_power_map_plan_payload(draft))
+    yield HarnessEvent(
+        type="done",
+        data={
+            "plan_id": draft.plan_id,
+            "session_id": draft.base_session_id or "",
+            "needs_plan_confirmation": True,
+            "converged": False,
+            "phase": "awaiting_plan_confirmation",
+            "rounds": 1,
+            "executed": 0,
+        },
+    )
 
 
 def _add_layout_constraint(
@@ -13000,6 +13313,84 @@ async def _sandbox_screenshot(
     )
     png_bytes = await svg_el.screenshot(type="png")
     return "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+
+async def confirm_power_map_plan(
+    db: Session,
+    company_id: str,
+    plan_id: str,
+    current_user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cfg = db.get(SystemConfig, 1)
+    if not cfg:
+        return {"ok": False, "error": "system_not_initialized"}
+    draft = _get_plan(plan_id)
+    if draft is None or draft.company_id != company_id:
+        return {"ok": False, "error": "plan_not_found"}
+
+    session_id = draft.base_session_id or _new_session_id()
+    base_ctx = _get_session(draft.base_session_id) if draft.base_session_id else draft.base_ctx
+    if base_ctx is None:
+        _drop_plan(plan_id)
+        return {"ok": False, "error": "plan_base_expired"}
+    ctx = deepcopy(base_ctx)
+
+    ctx.harness_session_id = session_id
+    ctx.harness_cfg = cfg
+    ctx.harness_current_user = current_user
+    ctx.harness_prj_id = draft.prj_id or await _resolve_prj_id(db, cfg, company_id)
+    ctx.harness_version_id = draft.version_id
+    ctx.bi_version = draft.bi_version
+    ctx.bi_prj_type = draft.bi_prj_type
+    ctx.bi_ver_info = draft.bi_ver_info
+    ctx.upinfo_users = draft.upinfo_users
+    ctx.harness_can_commit = False
+    ctx.harness_last_error = ""
+
+    result = _apply_power_map_intent_to_context(ctx, draft.current_intent)
+    if not result.get("ok"):
+        ctx.harness_can_commit = False
+        ctx.harness_last_error = str(result.get("fallback_reason") or result.get("error") or "apply_failed")
+        return {
+            "ok": False,
+            "error": ctx.harness_last_error,
+            "plan_id": plan_id,
+            "session_id": session_id,
+            "result": result,
+        }
+
+    _store_session(session_id, ctx)
+    screenshot_url = ""
+    try:
+        screenshot_url = await _render_sandbox_preview(ctx)
+        ctx.last_screenshot_url = screenshot_url
+    except Exception as exc:
+        logger.warning("confirm-plan: sandbox preview failed: %s", exc)
+    graph_state = _tool_get_graph_state(ctx)
+    graph_state["session_id"] = session_id
+    graph_state["sandbox_url"] = f"/sandbox/render?session_id={session_id}"
+    ctx.harness_can_commit = True
+    ctx.harness_last_error = ""
+    _drop_plan(plan_id)
+    return {
+        "ok": True,
+        "plan_id": plan_id,
+        "session_id": session_id,
+        "sandbox_url": f"/sandbox/render?session_id={session_id}",
+        "screenshot_url": screenshot_url,
+        "graph_state": graph_state,
+        "done": {
+            "rounds": 1,
+            "executed": int(result.get("created", 0)) + int(result.get("edge_created", 0)) + int(result.get("updated", 0)),
+            "session_id": session_id,
+            "converged": True,
+            "exit_reason": "plan_confirmed",
+            "radial_fast_path": True,
+            "radial_layout_used": bool(result.get("radial_layout_used")),
+            "relayout_called": bool(result.get("relayout_called")),
+            "sandbox_url": f"/sandbox/render?session_id={session_id}",
+        },
+    }
 
 
 async def chat_power_map_v2(

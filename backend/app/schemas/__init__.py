@@ -205,7 +205,8 @@ ConfigPayload = AdminConfigPayload
 # ── 权利地图 ──────────────────────────────────────
 class PowerMapChatPayload(BaseAPIModel):
     message: str = Field(min_length=1, max_length=4000)
-    session_id: str | None = None  # DEPRECATED: rejected with 400; every chat starts a new session
+    session_id: str | None = None
+    plan_id: str | None = None
     confirm: bool = False
     version: str | None = None
 
@@ -221,6 +222,10 @@ class PowerMapChatPayload(BaseAPIModel):
 class PowerMapConfirmPayload(BaseAPIModel):
     proposed_changes: dict[str, Any]
     version: str | None = None
+
+
+class PowerMapConfirmPlanPayload(BaseAPIModel):
+    plan_id: str = Field(min_length=1, max_length=100)
 
 
 class PowerMapRelayoutPayload(BaseAPIModel):

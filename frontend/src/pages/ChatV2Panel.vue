@@ -56,6 +56,30 @@
                 class="text-sm whitespace-pre-wrap break-words"
               >{{ msg.content }}</div>
 
+              <div
+                v-if="msg.planPreview"
+                class="rounded-md border border-blue-200 bg-blue-50/70 p-3 text-xs text-slate-700 space-y-2"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <span class="font-semibold text-slate-900">计划预览</span>
+                  <Badge variant="outline" class="text-[10px]">待确认</Badge>
+                </div>
+                <div v-if="msg.planPreview.summary" class="whitespace-pre-wrap break-words leading-relaxed">
+                  {{ msg.planPreview.summary }}
+                </div>
+                <ul v-if="msg.planPreview.warnings?.length" class="space-y-1 text-amber-700">
+                  <li v-for="(warning, wi) in msg.planPreview.warnings" :key="wi">
+                    {{ warning }}
+                  </li>
+                </ul>
+                <details class="rounded border border-blue-200 bg-white/80">
+                  <summary class="cursor-pointer select-none px-2 py-1.5 text-slate-600 hover:text-slate-900">
+                    展开伪图
+                  </summary>
+                  <pre class="max-w-full overflow-x-auto whitespace-pre p-2 text-[11px] leading-relaxed font-mono text-slate-700">{{ stripMarkdownFence(msg.planPreview.pseudo_graph_markdown) }}</pre>
+                </details>
+              </div>
+
               <details v-if="msg.toolCalls?.length" class="text-xs">
                 <summary class="cursor-pointer text-muted-foreground hover:text-foreground select-none">
                   工具调用 · {{ msg.toolCalls.length }} 次
@@ -175,6 +199,42 @@
           </Button>
         </div>
 
+        <div v-if="showPlanBar" class="flex items-center justify-end gap-2 pt-1">
+          <span class="text-xs text-muted-foreground mr-auto">
+            请先确认计划。确认后才会绘制到沙箱，未确认前不会改图。
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-9 px-3"
+            :disabled="chatStore.isLoading"
+            @click="onDiscard"
+          >
+            <X class="h-4 w-4" />
+            <span class="ml-1.5">放弃</span>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-9 px-3"
+            :disabled="chatStore.isLoading"
+            @click="focusInput"
+          >
+            <RotateCcw class="h-4 w-4" />
+            <span class="ml-1.5">修改描述</span>
+          </Button>
+          <Button
+            size="sm"
+            class="h-9 px-3"
+            :disabled="chatStore.isLoading || !chatStore.currentPlanId"
+            @click="onConfirmPlan"
+          >
+            <Check v-if="!chatStore.isLoading" class="h-4 w-4" />
+            <Loader2 v-else class="h-4 w-4 animate-spin" />
+            <span class="ml-1.5">确认并绘制</span>
+          </Button>
+        </div>
+
         <div v-if="showCommitBar" class="flex items-center justify-end gap-2 pt-1">
           <span class="text-xs text-muted-foreground mr-auto">
             <template v-if="isNotConverged">AI 未完全收敛，建议重新描述后再执行。</template>
@@ -258,6 +318,10 @@ const showCommitBar = computed(
   () => chatStore.lastDone !== null && !!chatStore.currentSessionId,
 )
 
+const showPlanBar = computed(
+  () => chatStore.phase === 'awaiting_plan_confirmation' && !!chatStore.currentPlanId,
+)
+
 const isNotConverged = computed(
   () => chatStore.lastDone?.converged === false,
 )
@@ -295,6 +359,12 @@ function formatJson(value) {
   }
 }
 
+function stripMarkdownFence(value) {
+  const text = String(value || '').trim()
+  const match = text.match(/^```(?:\w+)?\s*\n([\s\S]*?)\n```$/)
+  return match ? match[1] : text
+}
+
 function openImage(url) {
   previewImage.value = url
 }
@@ -318,6 +388,12 @@ async function onCommit() {
   const cid = customerStore.currentCustomer?.company_id
   if (!cid) return
   await chatStore.commit(cid)
+}
+
+async function onConfirmPlan() {
+  const cid = customerStore.currentCustomer?.company_id
+  if (!cid) return
+  await chatStore.confirmPlan(cid)
 }
 
 async function onDiscard() {
