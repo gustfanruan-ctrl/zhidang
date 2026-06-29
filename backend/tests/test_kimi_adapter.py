@@ -222,6 +222,9 @@ def test_kimi_planning_prompt_separates_hierarchy_from_edges():
     assert "集团/公司/总部/子公司/事业部/中心/部门/区域/城市组/门店/小组/班组" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "不能覆盖明确的 parent 层级" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "不能省略中间层容器" in _KIMI_PLANNING_SYSTEM_PROMPT
+    assert "如果 parent 不在当前图结构中" in _KIMI_PLANNING_SYSTEM_PROMPT
+    assert "必须先在 create_departments 中创建这个父容器" in _KIMI_PLANNING_SYSTEM_PROMPT
+    assert "不要使用 root 作为 parent" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "每个 source/target 必须能在 create_people/create_departments 或当前图结构中找到" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "你本人" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "部门对部门的 reports_to" in _KIMI_PLANNING_SYSTEM_PROMPT

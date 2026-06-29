@@ -8,6 +8,7 @@ from app.services.power_map_service import (  # noqa: E402
     MergeContext,
     PowerNode,
     _parse_power_map_intent,
+    _parse_power_map_intent_with_warnings,
     _power_map_intent_to_pseudo_graph,
     _power_map_parallel_edge_warnings,
     _validate_power_map_plan_against_instruction,
@@ -60,6 +61,48 @@ def test_parse_power_map_intent_accepts_legacy_create_fields():
     assert intent.departments[0].name == "销售部"
     assert intent.people[0].name == "张强"
     assert intent.people[0].parent == "销售部"
+
+
+def test_parse_power_map_intent_repairs_missing_comma_between_fields():
+    plan = (
+        '{"goal":"build org",'
+        '"create_departments":[{"name":"Group","parent":""}],'
+        '"create_people":[{"name":"Alice","title":"CIO","parent":"Group"}] '
+        '"report_edges":[]}'
+    )
+
+    intent, warnings = _parse_power_map_intent_with_warnings(plan)
+
+    assert intent.departments[0].name == "Group"
+    assert intent.people[0].name == "Alice"
+    assert intent.report_edges == []
+    assert warnings and "自动修复" in warnings[0]
+
+
+def test_parse_power_map_intent_repairs_missing_comma_between_array_objects():
+    plan = (
+        '{"create_departments":['
+        '{"name":"Group","parent":""}'
+        '{"name":"IT","parent":"Group"}'
+        '],"report_edges":[]}'
+    )
+
+    intent, warnings = _parse_power_map_intent_with_warnings(plan)
+
+    assert [(dept.name, dept.parent) for dept in intent.departments] == [
+        ("Group", ""),
+        ("IT", "Group"),
+    ]
+    assert warnings
+
+
+def test_parse_power_map_intent_repairs_unclosed_json_object():
+    plan = '{"create_departments":[{"name":"Group","parent":""}],"report_edges":[]'
+
+    intent, warnings = _parse_power_map_intent_with_warnings(plan)
+
+    assert intent.departments[0].name == "Group"
+    assert warnings
 
 
 def test_parse_power_map_intent_accepts_compact_cleaning_schema():

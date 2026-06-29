@@ -496,6 +496,9 @@ _KIMI_PLANNING_SYSTEM_PROMPT = """你是权力地图 radial intent 规划器。�
 - 如果原文明确说 A 属于/下设/隶属/归属 B，必须优先保留 A.parent=B；汇报链只能生成 report_edges，不能覆盖明确的 parent 层级。
 - 如果清洗输入使用紧凑字段：g=goal，d=departments 数组 [name,parent,kind]，p=people 数组 [name,title,department]，e=report_edges 数组 [source,target,relation]，c=constraints；必须先还原语义再规划。
 - create_departments 中每个 parent 必须能在 create_departments 或当前图结构中找到；create_people 中每个 parent/department 也必须能找到，不能省略中间层容器。
+- 如果 parent 不在当前图结构中，必须先在 create_departments 中创建这个父容器，并按从根到叶完整列出。例如用户说“华大集团下有华大股份，华大股份下有科服/财务/IT/供应链”，而当前图没有“华大集团”或“华大股份”，create_departments 必须包含“华大集团(parent='')”“华大股份(parent='华大集团')”，再创建其子部门。
+- 不要使用 root 作为 parent，除非当前图里确有名为 root 的 department；顶层容器的 parent 必须写空字符串。
+- 如果用户使用简称或别名，必须优先匹配当前图中的精确节点名；找不到时，创建用户原文里的父容器，并在 notes 里标注可能别名待确认。
 - “你本人”是一个需要原样保留的人员名称，不要改写成“本人”“我”或“用户本人”。
 - “信息化条线为：分管领导 → 科技信息部 → 研发中心 → ITC”这类组织/部门条线不能直接变成部门对部门的 reports_to；部门层级仍写 parent，只有明确人员关系才写 report_edges。
 - 只有用户明确表达“向谁汇报、分管、决策链、影响/协作关系、正式/非正式流程”等关系时，才列入 create_edge 连线。
@@ -5935,6 +5938,110 @@ def _extract_json_object_text(text: str) -> str:
     return raw
 
 
+def _strip_json_trailing_commas(text: str) -> str:
+    return re.sub(r",\s*([}\]])", r"\1", text)
+
+
+def _balance_json_delimiters(text: str) -> str:
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack and ((stack[-1] == "{" and ch == "}") or (stack[-1] == "[" and ch == "]")):
+                stack.pop()
+
+    closers = {"{": "}", "[": "]"}
+    return text + "".join(closers[ch] for ch in reversed(stack))
+
+
+def _previous_non_ws(text: str, pos: int) -> str:
+    i = pos - 1
+    while i >= 0 and text[i].isspace():
+        i -= 1
+    return text[i] if i >= 0 else ""
+
+
+def _next_non_ws(text: str, pos: int) -> str:
+    i = pos
+    while i < len(text) and text[i].isspace():
+        i += 1
+    return text[i] if i < len(text) else ""
+
+
+def _repair_missing_comma_at_error(text: str, exc: json.JSONDecodeError) -> str:
+    if not exc.msg.startswith("Expecting ',' delimiter"):
+        return text
+    pos = max(0, min(exc.pos, len(text)))
+    prev = _previous_non_ws(text, pos)
+    current = _next_non_ws(text, pos)
+    if prev in {'"', "}", "]"} or prev.isdigit() or prev in {"e", "E", "l"}:
+        if current in {'"', "{", "["}:
+            insert_at = pos
+            while insert_at < len(text) and text[insert_at].isspace():
+                insert_at += 1
+            return text[:insert_at] + "," + text[insert_at:]
+    return text
+
+
+def _load_power_map_intent_json(plan_text: str) -> tuple[dict[str, Any], list[str]]:
+    """Load LLM plan JSON, repairing only syntax-level JSON mistakes."""
+    raw = _extract_json_object_text(plan_text)
+    if not raw:
+        raise ValueError("power map intent JSON is empty")
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("power map intent must be a JSON object")
+        return data, []
+    except json.JSONDecodeError as first_exc:
+        text = _strip_json_trailing_commas(_balance_json_delimiters(raw))
+        changed = text != raw
+        last_exc: json.JSONDecodeError = first_exc
+        for _ in range(12):
+            try:
+                data = json.loads(text)
+                if not isinstance(data, dict):
+                    raise ValueError("power map intent must be a JSON object")
+                note = (
+                    "计划 JSON 已自动修复："
+                    f"{first_exc.msg} at line {first_exc.lineno} column {first_exc.colno}"
+                )
+                return data, [note]
+            except json.JSONDecodeError as exc:
+                last_exc = exc
+                repaired = _repair_missing_comma_at_error(text, exc)
+                repaired = _strip_json_trailing_commas(_balance_json_delimiters(repaired))
+                if repaired == text:
+                    break
+                changed = True
+                text = repaired
+        if changed:
+            try:
+                data = json.loads(text)
+                if not isinstance(data, dict):
+                    raise ValueError("power map intent must be a JSON object")
+                return data, [
+                    "计划 JSON 已自动修复："
+                    f"{first_exc.msg} at line {first_exc.lineno} column {first_exc.colno}"
+                ]
+            except json.JSONDecodeError as exc:
+                last_exc = exc
+        raise last_exc
+
+
 def _as_list_of_dicts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -5966,10 +6073,13 @@ def _name(value: Any) -> str:
 
 def _parse_power_map_intent(plan_text: str) -> PowerMapIntent:
     """Parse Kimi's radial intent JSON into a typed intermediate form."""
-    data = json.loads(_extract_json_object_text(plan_text))
-    if not isinstance(data, dict):
-        raise ValueError("power map intent must be a JSON object")
+    intent, _warnings = _parse_power_map_intent_with_warnings(plan_text)
+    return intent
 
+
+def _parse_power_map_intent_with_warnings(plan_text: str) -> tuple[PowerMapIntent, list[str]]:
+    """Parse Kimi's radial intent JSON and return syntax-repair warnings."""
+    data, warnings = _load_power_map_intent_json(plan_text)
     departments_raw = _as_list_of_dicts(data.get("departments"))
     if not departments_raw:
         departments_raw = _as_list_of_dicts(data.get("create_departments"))
@@ -6065,7 +6175,7 @@ def _parse_power_map_intent(plan_text: str) -> PowerMapIntent:
         rank_groups=[g for g in rank_groups if g],
         constraints=constraints,
         raw=data,
-    )
+    ), warnings
 
 
 def _normalize_authority_home_department_parents(intent: PowerMapIntent) -> list[str]:
@@ -7097,7 +7207,8 @@ async def plan_power_map_v2(
 
     warnings: list[str] = []
     try:
-        intent = _parse_power_map_intent(plan_text)
+        intent, parse_warnings = _parse_power_map_intent_with_warnings(plan_text)
+        warnings.extend(parse_warnings)
         validation = _validate_power_map_intent(intent, ctx)
         if not validation.get("ok"):
             warnings.extend(str(e) for e in validation.get("errors", [])[:8])
