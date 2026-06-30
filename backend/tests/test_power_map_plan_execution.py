@@ -154,6 +154,56 @@ def test_apply_power_map_intent_creates_departments_people_edges_without_llm_too
     _assert_no_false_department_wrapping(ctx)
 
 
+def test_radial_layout_wraps_wide_root_sibling_departments():
+    plan = {
+        "goal": "build dreame organization",
+        "departments": [
+            {"name": "Dreame", "parent": ""},
+            {"name": "Factory", "parent": "Dreame"},
+            {"name": "China", "parent": "Dreame"},
+            {"name": "Incubator1", "parent": "Dreame"},
+            {"name": "Incubator2", "parent": "Dreame"},
+            {"name": "Incubator3", "parent": "Dreame"},
+            {"name": "Incubator4", "parent": "Dreame"},
+            {"name": "RobotBU", "parent": "Incubator1"},
+            {"name": "WetDryBU", "parent": "Incubator1"},
+            {"name": "VacuumBU", "parent": "Incubator1"},
+            {"name": "HairDryerBU", "parent": "Incubator1"},
+            {"name": "Incubator1IT", "parent": "Incubator1"},
+            {"name": "Incubator1Data", "parent": "Incubator1IT"},
+            {"name": "Incubator3IT", "parent": "Incubator3"},
+            {"name": "Incubator3Data", "parent": "Incubator3IT"},
+            {"name": "Incubator4IT", "parent": "Incubator4"},
+        ],
+        "people": [
+            {"name": "ChenLei", "title": "IT owner", "parent": "Incubator1IT"},
+            {"name": "CuiShuo", "title": "Data owner", "parent": "Incubator1Data"},
+            {"name": "XiaoLi", "title": "FineReport", "parent": "Incubator1Data"},
+            {"name": "ZhangBingbing", "title": "", "parent": "Incubator1Data"},
+            {"name": "YanShu", "title": "IT owner", "parent": "Incubator3IT"},
+            {"name": "HuangZhongrui", "title": "Data owner", "parent": "Incubator3Data"},
+            {"name": "ZhangShilei", "title": "IT owner", "parent": "Incubator4IT"},
+            {"name": "ZengYuhui", "title": "3/4 IT manager", "parent": "Dreame"},
+        ],
+        "report_edges": [
+            {"source": "CuiShuo", "target": "ChenLei"},
+            {"source": "XiaoLi", "target": "CuiShuo"},
+            {"source": "ZhangBingbing", "target": "XiaoLi"},
+            {"source": "HuangZhongrui", "target": "YanShu"},
+            {"source": "YanShu", "target": "ZengYuhui"},
+            {"source": "ZhangShilei", "target": "ZengYuhui"},
+        ],
+    }
+
+    ctx = _apply_plan(plan)
+
+    root = ctx.nodes_by_name["Dreame"]
+    assert root.w <= 2700
+    assert ctx.nodes_by_name["Incubator1"].y < ctx.nodes_by_name["Incubator3"].y
+    assert ("YanShu", "ZengYuhui") in _reports_to_pairs(ctx)
+    assert ("ZhangShilei", "ZengYuhui") in _reports_to_pairs(ctx)
+
+
 def test_apply_power_map_intent_lifts_ceo_office_sibling_departments():
     ctx = MergeContext()
     plan = json.loads(json.dumps(HUANGYU_INTENT, ensure_ascii=False))

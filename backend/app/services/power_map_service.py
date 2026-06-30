@@ -6629,18 +6629,16 @@ def _compute_radial_org_layout(
         physical_rows: list[list[str]] = []
 
         def _wrap_rank(row: list[str]) -> list[list[str]]:
-            if len(row) <= 6:
+            row_width = (
+                sum(node_by_id[cid].w for cid in row)
+                + MIN_GAP_BETWEEN_DEPTS * max(0, len(row) - 1)
+            )
+            if len(row) <= 1:
                 return [row]
-            total_area = sum(
-                (node_by_id[cid].w + MIN_GAP_BETWEEN_DEPTS)
-                * (node_by_id[cid].h + _LEVEL_GAP_V)
-                for cid in row
-            )
             widest = max((node_by_id[cid].w for cid in row), default=DEPT_MIN_W)
-            width_budget = min(
-                4800.0,
-                max(2400.0, widest, math.sqrt(max(total_area, 1.0)) * 2.4),
-            )
+            width_budget = max(1800.0, min(2600.0, widest + MIN_GAP_BETWEEN_DEPTS * 2))
+            if row_width <= width_budget:
+                return [row]
             wrapped: list[list[str]] = []
             current: list[str] = []
             current_width = 0.0
