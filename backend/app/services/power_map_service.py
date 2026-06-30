@@ -507,6 +507,7 @@ _KIMI_PLANNING_SYSTEM_PROMPT = """你是权力地图 radial intent 规划器。�
 - CIO、部长、组长、负责人只是职位或角色标签，不能仅凭职位跨平行部门补 reports_to；跨部门汇报必须有“X 向 Y 汇报/直属上级/受 Y 分管/汇报给 Y”这类二元依据。
 - report_edges.reason 必须写出原文明确依据；如果只能靠职位或组织层级推测，就不要输出该边。
 - 如果用户要求组织架构或汇报关系，执行清单里必须显式区分“parent_links”和“report_edges”。
+- 如果用户要求删除部门/人员，必须输出 delete_nodes；删除部门及其下所有人员时写 {"ref":"部门名","cascade":true}，不要只把删除动作藏在 tool_batches 里。
 - report_edges 中每个 source/target 必须能在 create_people/create_departments 或当前图结构中找到；从零建图时，像“分管领导、负责人、联系人、外包人员”这类边端点必须先列入 create_people。
 - 后端会按 departments → people → parent_links → radial layout → report_edges 执行；你只负责把事实放进 schema。
 - 从零新建完整组织架构时，必须输出足以支持部门初始尺寸预估的信息：每个部门的直属人员、子部门、负责人/汇报中心。
@@ -535,6 +536,9 @@ Few-shot 语义示例：
   ],
   "update_nodes": [
     {"ref": "当前图中已有节点名称或 id", "name": "新名称，可空", "position": "新职务，可空", "role": "A|D|I|S，可空", "reason": "改名/改职级/改角色"}
+  ],
+  "delete_nodes": [
+    {"ref": "当前图中已有节点名称或 id", "cascade": true, "reason": "删除部门及其下属人员"}
   ],
   "parent_links": [
     {"child": "子部门或人员名称", "parent": "父部门名称", "reason": "层级/下设/隶属"}
@@ -5898,6 +5902,13 @@ class PowerMapIntentUpdateNode:
 
 
 @dataclass
+class PowerMapIntentDeleteNode:
+    ref: str
+    cascade: bool = True
+    reason: str = ""
+
+
+@dataclass
 class PowerMapIntentParentLink:
     child: str
     parent: str
@@ -5918,6 +5929,7 @@ class PowerMapIntent:
     departments: list[PowerMapIntentDepartment] = field(default_factory=list)
     people: list[PowerMapIntentPerson] = field(default_factory=list)
     update_nodes: list[PowerMapIntentUpdateNode] = field(default_factory=list)
+    delete_nodes: list[PowerMapIntentDeleteNode] = field(default_factory=list)
     parent_links: list[PowerMapIntentParentLink] = field(default_factory=list)
     report_edges: list[PowerMapIntentEdge] = field(default_factory=list)
     layout_roots: list[str] = field(default_factory=list)
@@ -6071,6 +6083,21 @@ def _name(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def _parse_power_map_intent(plan_text: str) -> PowerMapIntent:
     """Parse Kimi's radial intent JSON into a typed intermediate form."""
     intent, _warnings = _parse_power_map_intent_with_warnings(plan_text)
@@ -6094,6 +6121,39 @@ def _parse_power_map_intent_with_warnings(plan_text: str) -> tuple[PowerMapInten
         data.get("u"),
         ("ref", "name", "position", "role"),
     )
+    delete_nodes_raw = _as_list_of_dicts(data.get("delete_nodes")) or _as_list_of_dicts(data.get("nodes_delete")) or _compact_rows_to_dicts(
+        data.get("dels"),
+        ("ref", "cascade"),
+    )
+    for batch in data.get("tool_batches") or []:
+        if not isinstance(batch, dict):
+            continue
+        for call in batch.get("calls") or []:
+            if not isinstance(call, dict):
+                continue
+            args = call.get("args") if isinstance(call.get("args"), dict) else {}
+            action = _name(args.get("action") or call.get("tool")).lower()
+            if not action.startswith("delete_"):
+                continue
+            ref = _name(
+                args.get("ref")
+                or args.get("name_ref")
+                or args.get("name")
+                or args.get("target")
+                or args.get("id_or_name")
+                or args.get("node_id")
+                or args.get("id")
+            )
+            if not ref:
+                continue
+            delete_nodes_raw.append({
+                "ref": ref,
+                "cascade": _as_bool(
+                    args.get("cascade") if "cascade" in args else args.get("include_children"),
+                    default=("department" in action or "recursive" in action or "node" in action),
+                ),
+                "reason": _name(batch.get("why") or args.get("reason")),
+            })
 
     departments = [
         PowerMapIntentDepartment(
@@ -6125,6 +6185,26 @@ def _parse_power_map_intent_with_warnings(plan_text: str) -> tuple[PowerMapInten
         for item in update_nodes_raw
         if _name(item.get("ref") or item.get("node") or item.get("node_ref") or item.get("old_name"))
     ]
+    delete_nodes: list[PowerMapIntentDeleteNode] = []
+    seen_delete_refs: set[str] = set()
+    for item in delete_nodes_raw:
+        ref = _name(
+            item.get("ref")
+            or item.get("node")
+            or item.get("node_ref")
+            or item.get("name")
+            or item.get("name_ref")
+            or item.get("target")
+            or item.get("id_or_name")
+        )
+        if not ref or ref in seen_delete_refs:
+            continue
+        seen_delete_refs.add(ref)
+        delete_nodes.append(PowerMapIntentDeleteNode(
+            ref=ref,
+            cascade=_as_bool(item.get("cascade"), default=True),
+            reason=_name(item.get("reason") or item.get("evidence")),
+        ))
     parent_links_raw = _as_list_of_dicts(data.get("parent_links")) or _compact_rows_to_dicts(
         data.get("pl"),
         ("child", "parent"),
@@ -6169,6 +6249,7 @@ def _parse_power_map_intent_with_warnings(plan_text: str) -> tuple[PowerMapInten
         departments=departments,
         people=people,
         update_nodes=update_nodes,
+        delete_nodes=delete_nodes,
         parent_links=parent_links,
         report_edges=report_edges,
         layout_roots=layout_roots,
@@ -6377,6 +6458,10 @@ def _validate_power_map_intent(intent: PowerMapIntent, ctx: MergeContext | None 
         if update.name:
             all_names.add(update.name)
 
+    for delete in intent.delete_nodes:
+        if not _intent_name_to_node(ctx, delete.ref):
+            errors.append(f"delete_node ref '{delete.ref}' not found")
+
     department_parent_by_name: dict[str, str] = {}
     for node in ctx.all_nodes:
         if node.node_type != "dept" or not node.name:
@@ -6453,6 +6538,7 @@ def _validate_power_map_plan_against_instruction(
         *(person.name for person in intent.people if person.name),
         *(update.ref for update in intent.update_nodes if update.ref),
         *(update.name for update in intent.update_nodes if update.name),
+        *(delete.ref for delete in intent.delete_nodes if delete.ref),
         *(link.child for link in intent.parent_links if link.child),
         *(link.parent for link in intent.parent_links if link.parent),
         *(edge.source for edge in intent.report_edges if edge.source),
@@ -6748,7 +6834,19 @@ def _compute_radial_org_layout(
 
 def _intent_name_to_node(ctx: MergeContext, ref: str) -> PowerNode | None:
     key = _name(ref)
-    return ctx.nodes_by_id.get(key) or ctx.nodes_by_name.get(key)
+    node = ctx.nodes_by_id.get(key) or ctx.nodes_by_name.get(key)
+    if node:
+        return node
+    aliases: list[str] = []
+    if key.endswith("部门"):
+        aliases.append(key[:-2] + "部")
+    if key.endswith("部"):
+        aliases.append(key + "门")
+    for alias in aliases:
+        node = ctx.nodes_by_name.get(alias)
+        if node:
+            return node
+    return None
 
 
 def _apply_radial_org_layout(ctx: MergeContext, intent: PowerMapIntent) -> dict[str, Any]:
@@ -6774,6 +6872,17 @@ def _apply_power_map_intent_to_context(ctx: MergeContext, intent: PowerMapIntent
     try:
         created = 0
         updated = 0
+        deleted = 0
+
+        for delete in intent.delete_nodes:
+            node = _intent_name_to_node(ctx, delete.ref)
+            if not node:
+                raise RuntimeError(f"delete node not found: {delete.ref}")
+            result = _tool_delete_node(ctx, node.id, cascade=delete.cascade)
+            if not result.get("ok"):
+                raise RuntimeError(str(result.get("error") or "delete node failed"))
+            deleted += len(result.get("deleted_ids") or [node.id])
+
         for update in intent.update_nodes:
             node = _intent_name_to_node(ctx, update.ref)
             if not node:
@@ -6897,7 +7006,7 @@ def _apply_power_map_intent_to_context(ctx: MergeContext, intent: PowerMapIntent
         except Exception:
             pass
         logger.info(
-            "[DEBUG-J] RADIAL_FAST_PATH ok intent_valid=%s radial_layout_used=%s estimated_dept_sizes=%s relayout_called=%s nodes=%d edges=%d created=%d updated=%d",
+            "[DEBUG-J] RADIAL_FAST_PATH ok intent_valid=%s radial_layout_used=%s estimated_dept_sizes=%s relayout_called=%s nodes=%d edges=%d created=%d updated=%d deleted=%d",
             True,
             True,
             json.dumps(layout_result.get("estimated_dept_sizes", {}), ensure_ascii=False)[:1000],
@@ -6906,6 +7015,7 @@ def _apply_power_map_intent_to_context(ctx: MergeContext, intent: PowerMapIntent
             len(ctx.edges),
             created,
             updated,
+            deleted,
         )
         return {
             "ok": True,
@@ -6917,6 +7027,7 @@ def _apply_power_map_intent_to_context(ctx: MergeContext, intent: PowerMapIntent
             "edges": len(ctx.edges),
             "created": created,
             "updated": updated,
+            "deleted": deleted,
             "edge_created": edge_created,
             "estimated_dept_sizes": layout_result.get("estimated_dept_sizes", {}),
             "layout": layout_result,
@@ -6946,7 +7057,7 @@ def _apply_power_map_intent_to_context(ctx: MergeContext, intent: PowerMapIntent
 def _should_try_radial_fast_path(intent: PowerMapIntent, ctx: MergeContext) -> bool:
     if not _power_map_radial_fast_path_enabled():
         return False
-    planned_nodes = len(intent.departments) + len(intent.people)
+    planned_nodes = len(intent.departments) + len(intent.people) + len(intent.delete_nodes)
     if planned_nodes == 0:
         return False
     if planned_nodes >= 5:
@@ -7021,6 +7132,14 @@ def _power_map_intent_to_pseudo_graph(intent: PowerMapIntent) -> str:
                 parts.append(f"角色={update.role}")
             lines.append(f"- {update.ref}: " + ("；".join(parts) if parts else "无属性变更"))
 
+    if intent.delete_nodes:
+        lines.append("")
+        lines.append("删除节点：")
+        for delete in intent.delete_nodes:
+            suffix = "（级联删除下属）" if delete.cascade else ""
+            reason = f"；依据：{delete.reason}" if delete.reason else ""
+            lines.append(f"- {delete.ref}{suffix}{reason}")
+
     return "```text\n" + "\n".join(lines) + "\n```"
 
 
@@ -7065,7 +7184,8 @@ def _power_map_parallel_edge_warnings(intent: PowerMapIntent) -> list[str]:
 def _power_map_plan_summary(intent: PowerMapIntent) -> str:
     return (
         f"计划包含 {len(intent.departments)} 个部门、{len(intent.people)} 个人员、"
-        f"{len(intent.report_edges)} 条关系线、{len(intent.update_nodes)} 个已有节点修改。"
+        f"{len(intent.report_edges)} 条关系线、{len(intent.update_nodes)} 个已有节点修改、"
+        f"{len(intent.delete_nodes)} 个节点删除。"
     )
 
 

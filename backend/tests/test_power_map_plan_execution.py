@@ -204,6 +204,60 @@ def test_radial_layout_wraps_wide_root_sibling_departments():
     assert ("ZhangShilei", "ZengYuhui") in _reports_to_pairs(ctx)
 
 
+def test_apply_power_map_intent_deletes_department_and_children_from_tool_batch():
+    ctx = _apply_plan({
+        "goal": "seed graph",
+        "departments": [
+            {"name": "大数据中心", "parent": ""},
+            {"name": "客户成功部", "parent": ""},
+        ],
+        "people": [
+            {"name": "吴建峰", "title": "负责人", "parent": "大数据中心"},
+            {"name": "客户成功负责人", "title": "部门经理", "parent": "客户成功部"},
+            {"name": "客户经理A", "title": "客户经理", "parent": "客户成功部"},
+            {"name": "客户经理B", "title": "客户经理", "parent": "客户成功部"},
+            {"name": "客户分析师", "title": "数据分析师", "parent": "客户成功部"},
+        ],
+        "report_edges": [
+            {"source": "客户成功负责人", "target": "吴建峰"},
+        ],
+    })
+
+    delete_plan = {
+        "goal": "删除客户成功部门及其下的所有人员",
+        "tool_batches": [
+            {
+                "phase": "delete_nodes",
+                "calls": [
+                    {
+                        "tool": "backend_intent",
+                        "args": {
+                            "action": "delete_department_recursive",
+                            "target": "客户成功部门",
+                            "include_children": True,
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    result = _apply_power_map_intent_to_context(
+        ctx,
+        _parse_power_map_intent(json.dumps(delete_plan, ensure_ascii=False)),
+    )
+
+    assert result["ok"] is True
+    assert result["deleted"] == 5
+    assert "客户成功部" not in ctx.nodes_by_name
+    assert "客户成功负责人" not in ctx.nodes_by_name
+    assert "客户经理A" not in ctx.nodes_by_name
+    assert "客户经理B" not in ctx.nodes_by_name
+    assert "客户分析师" not in ctx.nodes_by_name
+    assert ctx.edges == []
+    assert "大数据中心" in ctx.nodes_by_name
+    assert "吴建峰" in ctx.nodes_by_name
+
+
 def test_apply_power_map_intent_lifts_ceo_office_sibling_departments():
     ctx = MergeContext()
     plan = json.loads(json.dumps(HUANGYU_INTENT, ensure_ascii=False))

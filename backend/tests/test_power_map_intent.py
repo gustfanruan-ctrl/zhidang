@@ -105,6 +105,34 @@ def test_parse_power_map_intent_repairs_unclosed_json_object():
     assert warnings
 
 
+def test_parse_power_map_intent_extracts_delete_nodes_from_tool_batches():
+    plan = {
+        "goal": "删除客户成功部及其下属所有人员",
+        "tool_batches": [
+            {
+                "phase": "delete_nodes",
+                "calls": [
+                    {
+                        "tool": "backend_intent",
+                        "args": {
+                            "action": "delete_department_recursive",
+                            "target": "客户成功部",
+                            "include_children": True,
+                        },
+                    }
+                ],
+                "why": "删除客户成功部容器节点及其所有子节点",
+            }
+        ],
+    }
+
+    intent = _parse_power_map_intent(json.dumps(plan, ensure_ascii=False))
+
+    assert len(intent.delete_nodes) == 1
+    assert intent.delete_nodes[0].ref == "客户成功部"
+    assert intent.delete_nodes[0].cascade is True
+
+
 def test_parse_power_map_intent_accepts_compact_cleaning_schema():
     plan = {
         "g": "建立集团组织",

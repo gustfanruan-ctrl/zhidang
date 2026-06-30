@@ -225,6 +225,7 @@ def test_kimi_planning_prompt_separates_hierarchy_from_edges():
     assert "如果 parent 不在当前图结构中" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "必须先在 create_departments 中创建这个父容器" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "不要使用 root 作为 parent" in _KIMI_PLANNING_SYSTEM_PROMPT
+    assert "必须输出 delete_nodes" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "每个 source/target 必须能在 create_people/create_departments 或当前图结构中找到" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "你本人" in _KIMI_PLANNING_SYSTEM_PROMPT
     assert "部门对部门的 reports_to" in _KIMI_PLANNING_SYSTEM_PROMPT
