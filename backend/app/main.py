@@ -4108,12 +4108,11 @@ async def _proxy_live_power_map_request(
 
     normalized_path = proxy_path.strip("/").lower()
     if request.method.upper() != "GET" and normalized_path == "decision/url/power_map/upinfo":
-        logger.warning(
-            "blocked live power map write through iframe proxy: user=%s path=%s",
+        logger.info(
+            "forwarding live power map iframe write: user=%s path=%s",
             current_user.get("username") or current_user.get("user_name") or "",
             proxy_path,
         )
-        raise HTTPException(status_code=403, detail="原版权力地图页面为只读预览，请使用右侧维护面板执行写入。")
 
     api_cfg = _get_power_map_config(cfg)
     headers, cookies = await _get_live_power_map_auth(cfg, current_user)
