@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.services.power_map_service import (
     PERSON_W,
     PERSON_H,
+    POWER_MAP_PLACEHOLDER_PHONE,
     DEPT_DEFAULT_W,
     DEPT_DEFAULT_H,
     DEPT_MIN_W,
@@ -35,6 +36,7 @@ from app.services.power_map_service import (
     _generate_node_id,
     _make_person_node,
     _make_dept_node,
+    _enrich_users_from_upinfo,
     _build_merge_context,
     _apply_delta,
     _build_dept_forest,
@@ -266,6 +268,27 @@ class TestNodeIdGeneration:
         assert n.w == PERSON_W
         assert n.h == PERSON_H
         assert len(n.id) == 32
+
+    def test_make_person_node_defaults_missing_phone_to_placeholder(self):
+        n = _make_person_node("张三")
+
+        assert n.phone == POWER_MAP_PLACEHOLDER_PHONE
+
+    def test_crm_enrichment_treats_placeholder_phone_as_missing(self):
+        n = _make_person_node("张三")
+        ctx = _build_merge_context([n], [], "v1")
+        ctx.upinfo_users = [{
+            "name": "张三",
+            "cont_id": "crm-1",
+            "phone": "13800000000",
+            "position": "负责人",
+            "department": "信息部",
+        }]
+
+        _enrich_users_from_upinfo(ctx)
+
+        assert n.cont_id == "crm-1"
+        assert n.phone == "13800000000"
 
     def test_make_dept_node(self):
         n = _make_dept_node("技术部")

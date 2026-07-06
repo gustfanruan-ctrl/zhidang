@@ -43,6 +43,16 @@
             <div class="bg-primary text-primary-foreground rounded-2xl rounded-br-md px-4 py-2.5 max-w-[80%]">
               <div class="text-[11px] font-semibold mb-1 opacity-70">我</div>
               <div class="text-sm whitespace-pre-wrap break-words">{{ msg.content }}</div>
+              <div v-if="msg.imageUrls?.length" class="mt-2 flex flex-wrap gap-2">
+                <img
+                  v-for="(url, ui) in msg.imageUrls"
+                  :key="ui"
+                  :src="url"
+                  alt="attached org chart"
+                  class="h-16 w-24 rounded border border-primary-foreground/30 object-cover cursor-zoom-in"
+                  @click="openImage(url)"
+                />
+              </div>
             </div>
           </div>
 
@@ -176,6 +186,22 @@
         <div v-if="!chatStore.isLoading && doneSummary" class="text-[11px] text-muted-foreground/70">
           {{ doneSummary }}
         </div>
+        <div v-if="attachedImages.length" class="flex flex-wrap gap-2">
+          <div
+            v-for="(img, ii) in attachedImages"
+            :key="img.dataUrl"
+            class="relative h-16 w-24 overflow-hidden rounded-md border border-border bg-muted"
+          >
+            <img :src="img.dataUrl" :alt="img.name" class="h-full w-full object-cover" />
+            <button
+              type="button"
+              class="absolute right-1 top-1 rounded bg-background/90 p-0.5 text-muted-foreground shadow"
+              @click="removeAttachedImage(ii)"
+            >
+              <X class="h-3 w-3" />
+            </button>
+          </div>
+        </div>
         <div class="flex gap-2 items-end">
           <div ref="inputWrap" class="flex-1">
             <Textarea
@@ -185,8 +211,27 @@
               placeholder="输入指令，按 Ctrl/Cmd+Enter 发送"
               :disabled="chatStore.isLoading || !customerStore.currentCustomer"
               @keydown="onTextareaKeydown"
+              @paste="onPaste"
             />
           </div>
+          <input
+            ref="imageInput"
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            multiple
+            class="hidden"
+            @change="onImageInputChange"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-10 px-3"
+            :disabled="chatStore.isLoading || !customerStore.currentCustomer || attachedImages.length >= 3"
+            title="上传企业微信或钉钉组织图截图"
+            @click="onPickImages"
+          >
+            <ImagePlus class="h-4 w-4" />
+          </Button>
           <Button
             size="sm"
             class="h-10 px-4"
@@ -280,7 +325,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
-import { AlertTriangle, Check, Loader2, MessageSquare, RotateCcw, Send, Sparkles, User, X } from '@lucide/vue'
+import { AlertTriangle, Check, ImagePlus, Loader2, MessageSquare, RotateCcw, Send, Sparkles, User, X } from '@lucide/vue'
 import { useCustomerStore } from '../stores/customer'
 import { usePowerMapChatStore } from '../stores/powerMapChat'
 import { discardChatV2 } from '../services/powerMapChatV2'
@@ -303,6 +348,8 @@ const chatStore = usePowerMapChatStore()
 const input = ref('')
 const messagesEl = ref(null)
 const inputWrap = ref(null)
+const imageInput = ref(null)
+const attachedImages = ref([])
 const previewImage = ref('')
 
 const VAGUE_KEYWORDS = ['挤', '乱', '难看', '丑', '不好看', '重新整理', '看起来', '调整一下']
@@ -376,12 +423,54 @@ function onTextareaKeydown(event) {
   }
 }
 
+function readImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('read image failed'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function addImageFiles(files) {
+  const candidates = Array.from(files || []).filter((file) => file?.type?.startsWith('image/'))
+  for (const file of candidates) {
+    if (attachedImages.value.length >= 3) break
+    const dataUrl = await readImageFile(file)
+    if (dataUrl.startsWith('data:image/')) {
+      attachedImages.value.push({ name: file.name || 'org-chart', dataUrl })
+    }
+  }
+}
+
+function removeAttachedImage(index) {
+  attachedImages.value.splice(index, 1)
+}
+
+function onPickImages() {
+  imageInput.value?.click()
+}
+
+async function onImageInputChange(event) {
+  await addImageFiles(event.target?.files || [])
+  if (event.target) event.target.value = ''
+}
+
+async function onPaste(event) {
+  const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type?.startsWith('image/'))
+  if (!files.length) return
+  event.preventDefault()
+  await addImageFiles(files)
+}
+
 async function onSend() {
   const text = input.value.trim()
   if (!text) return
   if (!customerStore.currentCustomer) return
+  const images = attachedImages.value.map((img) => img.dataUrl)
   input.value = ''
-  await chatStore.sendMessage(customerStore.currentCustomer.company_id, text, { version: props.version })
+  attachedImages.value = []
+  await chatStore.sendMessage(customerStore.currentCustomer.company_id, text, { version: props.version, images })
 }
 
 async function onCommit() {
@@ -420,6 +509,7 @@ watch(
       discardChatV2({ companyId: oldId, sessionId: sid }).catch(() => {})
     }
     chatStore.reset()
+    attachedImages.value = []
   },
 )
 

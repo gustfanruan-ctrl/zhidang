@@ -209,6 +209,7 @@ class PowerMapChatPayload(BaseAPIModel):
     plan_id: str | None = None
     confirm: bool = False
     version: str | None = None
+    images: list[str] = Field(default_factory=list)
 
     @field_validator("message")
     @classmethod

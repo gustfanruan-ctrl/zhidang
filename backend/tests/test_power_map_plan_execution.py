@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.power_map_service import (  # noqa: E402
     MergeContext,
+    PowerNode,
     _apply_power_map_intent_to_context,
     _parse_power_map_intent,
 )
@@ -152,6 +153,37 @@ def test_apply_power_map_intent_creates_departments_people_edges_without_llm_too
     assert ctx.nodes_by_name["黄宇"].y < ctx.nodes_by_name["纪成"].y
     assert ctx.nodes_by_name["总裁办"].y < ctx.nodes_by_name["财务部"].y
     _assert_no_false_department_wrapping(ctx)
+
+
+def test_existing_graph_local_intent_preserves_existing_node_geometry():
+    root = PowerNode(id="root", node_type="dept", name="Fuda", x=120, y=80, w=820, h=420)
+    user = PowerNode(
+        id="u1",
+        node_type="user",
+        name="Alice",
+        parent_dept_id="root",
+        x=180,
+        y=180,
+        w=160,
+        h=72,
+    )
+    ctx = MergeContext()
+    ctx.all_nodes = [root, user]
+    ctx.nodes_by_id = {root.id: root, user.id: user}
+    ctx.nodes_by_name = {root.name: root, user.name: user}
+    ctx.depts_by_name = {root.name: root}
+    before = {node.id: (node.x, node.y, node.w, node.h) for node in ctx.all_nodes}
+    intent = _parse_power_map_intent(json.dumps({
+        "goal": "add one contact under Fuda",
+        "people": [{"name": "Bob", "title": "CS", "parent": "Fuda"}],
+    }, ensure_ascii=False))
+
+    result = _apply_power_map_intent_to_context(ctx, intent)
+
+    assert result["ok"] is True
+    assert result["radial_layout_used"] is False
+    assert {node.id: (node.x, node.y, node.w, node.h) for node in [root, user]} == before
+    assert ctx.nodes_by_name["Bob"].parent_dept_id == root.id
 
 
 def test_radial_layout_wraps_wide_root_sibling_departments():

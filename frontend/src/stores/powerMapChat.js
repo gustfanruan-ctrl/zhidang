@@ -83,7 +83,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
       this.sandboxRefreshKey = 0
     },
 
-    async sendMessage(companyId, message, { version = null } = {}) {
+    async sendMessage(companyId, message, { version = null, images = [] } = {}) {
       if (this.isLoading) return
       const trimmed = (message || '').trim()
       if (!trimmed) return
@@ -95,6 +95,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
       this.messages.push({
         role: 'user',
         content: trimmed,
+        imageUrls: Array.isArray(images) ? images.slice(0, 3) : [],
         toolCalls: [],
         graphState: null,
         screenshotUrl: null,
@@ -120,6 +121,7 @@ export const usePowerMapChatStore = defineStore('powerMapChat', {
           version,
           sessionId: this.currentSessionId,
           planId: this.currentPlanId,
+          images,
           onEvent: (eventType, data) => {
             switch (eventType) {
               case 'round_start': {

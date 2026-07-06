@@ -47,7 +47,7 @@ function parseSseChunk(buffer, onEvent) {
  * @param {AbortSignal} [options.signal]
  * @returns {Promise<{sessionId: string|null, done: any}>} resolves with last `done` event data
  */
-export async function startChatV2({ companyId, message, version = null, sessionId = null, planId = null, onEvent, signal }) {
+export async function startChatV2({ companyId, message, version = null, sessionId = null, planId = null, images = [], onEvent, signal }) {
   if (!companyId) throw new Error('companyId is required')
   if (!message || !message.trim()) throw new Error('message is required')
   if (typeof onEvent !== 'function') throw new Error('onEvent callback is required')
@@ -63,6 +63,7 @@ export async function startChatV2({ companyId, message, version = null, sessionI
   if (version) body.version = version
   if (sessionId) body.session_id = sessionId
   if (planId) body.plan_id = planId
+  if (Array.isArray(images) && images.length) body.images = images
 
   let receivedSessionId = null
   let lastDone = null

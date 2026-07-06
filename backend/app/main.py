@@ -3835,6 +3835,7 @@ async def power_map_chat_v2(
                 version=payload.version,
                 session_id=payload.session_id or "",
                 plan_id=payload.plan_id or "",
+                images=payload.images or [],
             ):
                 yield f"event: {event.type}\ndata: {json.dumps(event.data, ensure_ascii=False)}\n\n"
         except Exception as exc:

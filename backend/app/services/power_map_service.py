@@ -484,6 +484,20 @@ def _kimi_planning_progress_summary(reasoning_chars: int, plan_chars: int = 0) -
     return f"规划阶段：{phase}，已处理约 {approx}k 字规划信号..."
 
 
+def _power_map_image_blocks(images: list[str] | None, *, max_images: int = 3) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    for raw in images or []:
+        url = str(raw or "").strip()
+        if not url.startswith("data:image/"):
+            continue
+        if len(url) > 6_000_000:
+            continue
+        blocks.append({"type": "image_url", "image_url": {"url": url}})
+        if len(blocks) >= max_images:
+            break
+    return blocks
+
+
 _KIMI_PLANNING_SYSTEM_PROMPT = """你是权力地图 radial intent 规划器。你的任务不是复述 SOP，也不是猜坐标，而是把已清洗的权力地图事实转成后端 deterministic radial layout 可以直接消费的结构意图 JSON。
 
 要求：
@@ -756,20 +770,34 @@ async def _run_kimi_planning_round(
     graph_state_text: str,
     session_id: str,
     kimi_thinking: bool = True,
+    images: list[str] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream a Kimi-only thinking pass that turns cleaned instructions into a plan."""
     planning_text = (instruction_text or "").strip()
+    image_blocks = _power_map_image_blocks(images)
+    image_instruction = []
+    if image_blocks:
+        image_instruction.append({
+            "type": "text",
+            "text": (
+                "## 附图解析要求\n"
+                "用户附图可能是企业微信或钉钉组织架构截图。请直接读取图中层级、缩进、连线、左右同层关系、人员姓名和职位；"
+                "同一水平层通常表示平行组织，不要默认生成上下级或汇报线。若图中文字不清晰，把不确定项放入 constraints_or_notes。"
+            ),
+        })
     messages = [{
         "role": "user",
         "content": [
             {"type": "text", "text": f"## {instruction_label}\n{planning_text}"},
             {"type": "text", "text": graph_state_text},
+            *image_instruction,
+            *image_blocks,
         ],
     }]
     text_chars = sum(len(str(block.get("text", ""))) for block in messages[0]["content"])
     logger.info(
-        "[DEBUG-J] KIMI_PLAN_REQ session=%s model=%s thinking_enabled=%s msg_count=%d instruction_chars=%d total_chars=%d input_label=%s",
-        session_id, model, kimi_thinking, len(messages), len(planning_text), text_chars, instruction_label,
+        "[DEBUG-J] KIMI_PLAN_REQ session=%s model=%s thinking_enabled=%s msg_count=%d instruction_chars=%d total_chars=%d image_count=%d input_label=%s",
+        session_id, model, kimi_thinking, len(messages), len(planning_text), text_chars, len(image_blocks), instruction_label,
     )
     yield {
         "type": "progress",
@@ -881,6 +909,8 @@ DEPT_MIN_W = 300
 DEPT_MIN_H = 200
 DEPT_DEFAULT_W = 700
 DEPT_DEFAULT_H = 350
+POWER_MAP_PLACEHOLDER_PHONE = "999999999999"
+POWER_MAP_LEGACY_EMPTY_PHONE = "00000000000"
 
 # Safety margins (only for new node placement)
 MIN_GAP_BETWEEN_USERS = 20       # intra-dept user spacing
@@ -908,6 +938,16 @@ RIPPLE_WARN_THRESHOLD = {
 
 _TYPE_TO_BI = {"user": "person", "dept": "department"}
 _TYPE_FROM_BI = {"person": "user", "department": "dept"}
+
+
+def _is_missing_power_map_phone(phone: Any) -> bool:
+    value = str(phone or "").strip()
+    return value in {"", POWER_MAP_LEGACY_EMPTY_PHONE, POWER_MAP_PLACEHOLDER_PHONE}
+
+
+def _power_map_phone_or_placeholder(phone: Any) -> str:
+    value = str(phone or "").strip()
+    return POWER_MAP_PLACEHOLDER_PHONE if _is_missing_power_map_phone(value) else value
 
 # ═══════════════════════════════════════════════════════════
 #  Session store (in-memory, TTL'd)
@@ -1329,7 +1369,7 @@ def _power_node_to_bi_info_dict(node: PowerNode) -> dict[str, Any]:
         "par_id": node.parent_dept_id,
         "node_parent_dept": parent_dept,
         "position": node.position,
-        "phone": node.phone,
+        "phone": _power_map_phone_or_placeholder(node.phone) if node.node_type == "user" else node.phone,
         "cont_id": node.cont_id,
         "tagA": node.tagA,
         "tagB": node.tagB,
@@ -1491,7 +1531,7 @@ def _to_up_node(node: PowerNode) -> dict[str, Any]:
         "x": int(node.x),
         "y": int(node.y),
         "name": node.name,
-        "phone": node.phone or "",
+        "phone": _power_map_phone_or_placeholder(node.phone) if node.node_type == "user" else (node.phone or ""),
         "position": node.position or "",
         "department": node.department or "",
         "information": node.information or "",
@@ -1537,7 +1577,7 @@ def _make_person_node(
     name: str,
     department: str = "",
     position: str = "",
-    phone: str = "00000000000",
+    phone: str = POWER_MAP_PLACEHOLDER_PHONE,
     cont_id: str = "",
     pid: str = "",
     parent_dept_id: str = "",
@@ -1550,7 +1590,7 @@ def _make_person_node(
         name=name,
         department=department,
         position=position,
-        phone=phone,
+        phone=_power_map_phone_or_placeholder(phone),
         cont_id=cont_id,
         pid=pid,
         parent_dept_id=parent_dept_id,
@@ -1966,7 +2006,7 @@ def _apply_delta(
                 name=name,
                 department=dept_name,
                 position=str(item.get("position", "")),
-                phone=str(item.get("phone", "00000000000")),
+                phone=_power_map_phone_or_placeholder(item.get("phone")),
                 cont_id=str(item.get("cont_id", "")),
                 parent_dept_id=parent_dept_id,
             )
@@ -4979,6 +5019,7 @@ def _tool_create_node(
         if role:
             node.role = role
         node.position = str(attrs.pop("position", ""))
+        node.phone = _power_map_phone_or_placeholder(attrs.pop("phone", ""))
         if parent_node and parent_node.node_type == "dept":
             node.department = parent_node.name
     else:
@@ -5059,12 +5100,14 @@ def _enrich_users_from_upinfo(ctx: MergeContext) -> None:
     unmatched = 0
 
     for node in user_nodes:
-        # Only enrich nodes that look LLM-created: missing both cont_id and phone.
-        if node.cont_id or node.phone:
+        # Only enrich nodes that look LLM-created: missing cont_id and either
+        # missing phone or using one of our local empty-phone placeholders.
+        if node.cont_id or not _is_missing_power_map_phone(node.phone):
             continue
         total += 1
         u, idx = _match_user_to_upinfo(node.name, users, used_indices)
         if u is None:
+            node.phone = _power_map_phone_or_placeholder(node.phone)
             unmatched += 1
             logger.warning(
                 "[DEBUG-J crm_enrich_miss] name=%s reason=no_match_in_upinfo",
@@ -5072,7 +5115,7 @@ def _enrich_users_from_upinfo(ctx: MergeContext) -> None:
             )
             continue
         node.cont_id = str(u.get("cont_id", node.cont_id))
-        node.phone = str(u.get("phone", node.phone))
+        node.phone = _power_map_phone_or_placeholder(u.get("phone") or node.phone)
         if not node.position:
             node.position = str(u.get("position", ""))
         if not node.department:
@@ -6722,7 +6765,7 @@ def _compute_radial_org_layout(
             if len(row) <= 1:
                 return [row]
             widest = max((node_by_id[cid].w for cid in row), default=DEPT_MIN_W)
-            width_budget = max(1800.0, min(2600.0, widest + MIN_GAP_BETWEEN_DEPTS * 2))
+            width_budget = max(2200.0, min(2600.0, widest + MIN_GAP_BETWEEN_DEPTS * 2))
             if row_width <= width_budget:
                 return [row]
             wrapped: list[list[str]] = []
@@ -6869,6 +6912,7 @@ def _apply_power_map_intent_to_context(ctx: MergeContext, intent: PowerMapIntent
     snapshot_nodes = deepcopy(ctx.all_nodes)
     snapshot_edges = deepcopy(ctx.edges)
     snapshot_constraints = deepcopy(ctx.layout_constraints)
+    had_existing_nodes = bool(snapshot_nodes)
     try:
         created = 0
         updated = 0
@@ -6977,7 +7021,19 @@ def _apply_power_map_intent_to_context(ctx: MergeContext, intent: PowerMapIntent
                 if not result.get("ok"):
                     raise RuntimeError(str(result.get("error") or "set_parent failed"))
 
-        layout_result = _apply_radial_org_layout(ctx, intent)
+        if had_existing_nodes:
+            layout_result = {
+                "positions": {
+                    node.id: {"x": node.x, "y": node.y, "w": node.w, "h": node.h, "name": node.name}
+                    for node in ctx.all_nodes
+                },
+                "estimated_dept_sizes": {},
+                "radial_layout_used": False,
+                "preserved_existing_layout": True,
+            }
+        else:
+            layout_result = _apply_radial_org_layout(ctx, intent)
+            layout_result["radial_layout_used"] = True
 
         edge_created = 0
         existing_pairs = {
@@ -7008,7 +7064,7 @@ def _apply_power_map_intent_to_context(ctx: MergeContext, intent: PowerMapIntent
         logger.info(
             "[DEBUG-J] RADIAL_FAST_PATH ok intent_valid=%s radial_layout_used=%s estimated_dept_sizes=%s relayout_called=%s nodes=%d edges=%d created=%d updated=%d deleted=%d",
             True,
-            True,
+            bool(layout_result.get("radial_layout_used")),
             json.dumps(layout_result.get("estimated_dept_sizes", {}), ensure_ascii=False)[:1000],
             False,
             len(ctx.all_nodes),
@@ -7020,7 +7076,7 @@ def _apply_power_map_intent_to_context(ctx: MergeContext, intent: PowerMapIntent
         return {
             "ok": True,
             "intent_valid": True,
-            "radial_layout_used": True,
+            "radial_layout_used": bool(layout_result.get("radial_layout_used")),
             "relayout_called": False,
             "fallback_reason": "",
             "nodes": len(ctx.all_nodes),
@@ -7261,6 +7317,7 @@ async def plan_power_map_v2(
     version: str | None = None,
     session_id: str = "",
     plan_id: str = "",
+    images: list[str] | None = None,
 ) -> AsyncGenerator[HarnessEvent, None]:
     cfg = db.get(SystemConfig, 1)
     if not cfg:
@@ -7317,6 +7374,7 @@ async def plan_power_map_v2(
         graph_state_text=graph_state_text,
         session_id=draft_plan_id,
         kimi_thinking=_should_use_kimi_planning_thinking(mode=_power_map_kimi_mode()),
+        images=images,
     ):
         if planning_event.get("type") == "progress":
             yield HarnessEvent(type="thinking", data={"text_chunk": str(planning_event.get("text") or "")})
@@ -11506,7 +11564,7 @@ async def _run_llm_tool_loop(
                             "converged": True,
                             "exit_reason": "radial_fast_path",
                             "radial_fast_path": True,
-                            "radial_layout_used": True,
+                            "radial_layout_used": bool(radial_result.get("radial_layout_used")),
                             "relayout_called": False,
                         }),
                     )
