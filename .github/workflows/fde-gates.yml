@@ -1,0 +1,123 @@
+name: FDE Gates
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  go-quality-gate:
+    name: Go quality gate (final adjudicator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history for blame checks
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test (with -race for L2/L3)
+        run: go test -race ./...
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  manifest-check:
+    name: G4 manifest completeness
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify manifest exists for branch
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          MANIFEST=".fde/evidence/${BRANCH}/manifest.yaml"
+          if [ ! -f "${MANIFEST}" ]; then
+            echo "::error::G4 manifest missing: ${MANIFEST}"
+            exit 1
+          fi
+          echo "Manifest present: ${MANIFEST}"
+
+      - name: Verify required gates are signed
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          MANIFEST=".fde/evidence/${BRANCH}/manifest.yaml"
+
+          for gate in g1 g2; do
+            path=$(grep -E "^[[:space:]]*${gate}:" "${MANIFEST}" | head -n1 | sed -E "s/^[[:space:]]*${gate}:[[:space:]]*//; s/[\"']//g")
+            if [ -z "${path}" ] || [ ! -f "${path}" ]; then
+              echo "::error::${gate} approval file missing: ${path}"
+              exit 1
+            fi
+            if ! grep -q "^Approved-G[1-2]-" "${path}"; then
+              echo "::error::${gate} file ${path} has no Approved-G*-* trailer"
+              exit 1
+            fi
+          done
+
+      - name: Verify no agent-signed approvals
+        run: |
+          # Block commits whose author/committer is the agent and which contain Approved-G* trailers.
+          # Heuristic: if the commit author email matches the bot pattern AND the message has Approved-G,
+          # fail. Adapt the regex to your team's bot identity.
+          BAD=$(git log --pretty=format:'%H %ae %s' origin/${{ github.base_ref }}..HEAD \
+                | awk '/Approved-G[1-4]-/ {print}' \
+                | grep -Ei 'claude|agent|bot' || true)
+          if [ -n "${BAD}" ]; then
+            echo "::error::Commits with Approved-G* trailers authored by a bot/agent:"
+            echo "${BAD}"
+            exit 1
+          fi
+
+  pseudo-approval-scan:
+    name: Anti pseudo-approval scan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan diff for forbidden approval lines added by non-humans
+        run: |
+          # If the PR author is a bot account, refuse any diff that introduces Approved-G* / G3-Approver: lines.
+          if [ "${{ github.event.pull_request.user.type }}" = "Bot" ]; then
+            ADDED=$(git diff origin/${{ github.base_ref }}...HEAD -- '*.md' \
+                    | grep -E '^\+' \
+                    | grep -E '^\+[[:space:]]*(Approved-G[1-4]-|G3-Approver:)' || true)
+            if [ -n "${ADDED}" ]; then
+              echo "::error::Bot-authored PR introduces approval lines:"
+              echo "${ADDED}"
+              exit 1
+            fi
+          fi

@@ -7,6 +7,14 @@ export async function reviewCard(data) {
   return resp.data
 }
 
+export async function calibrateOperationType(transcriptId, cardId, operationType) {
+  const resp = await api.patch(
+    `/api/v1/operations/${transcriptId}/cards/${cardId}/operation-type`,
+    { operation_type: operationType },
+  )
+  return resp.data
+}
+
 export async function executeCards(data, companyId) {
   const body = { ...data }
   if (companyId) body.company_id = companyId

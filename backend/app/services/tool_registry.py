@@ -37,6 +37,7 @@ FIELD_ALIASES: dict[str, dict[str, str]] = {
         "第一价值实现": "是否第一价值实现预期",
         "isfirstvalue": "是否第一价值实现预期",
         "_widget_1770346583096": "是否第一价值实现预期",
+        "widget1770346583096": "是否第一价值实现预期",
         "推进想法": "推进想法",
         "推进思路": "推进想法",
         "promoteidea": "推进想法",
@@ -46,14 +47,31 @@ FIELD_ALIASES: dict[str, dict[str, str]] = {
         "title": "场景标题",
         "业务场景": "场景标题",
         "场景": "场景标题",
-        "解决什么问题": "解决什么问题",
-        "业务诉求": "解决什么问题",
-        "痛点分析": "解决什么问题",
-        "solvewhatques": "解决什么问题",
-        "怎样解决": "怎样解决",
-        "解决方案": "怎样解决",
-        "核心指标解决方案": "怎样解决",
-        "solvewhatans": "怎样解决",
+        "是否第一价值实现场景": "是否第一价值实现场景",
+        "第一价值实现场景": "是否第一价值实现场景",
+        "_widget_1744337240628": "是否第一价值实现场景",
+        "widget1744337240628": "是否第一价值实现场景",
+        "业务诉求痛点分析": "业务诉求/痛点分析",
+        "业务诉求/痛点分析": "业务诉求/痛点分析",
+        "解决什么问题": "业务诉求/痛点分析",
+        "业务诉求": "业务诉求/痛点分析",
+        "痛点分析": "业务诉求/痛点分析",
+        "solvewhatques": "业务诉求/痛点分析",
+        "核心指标解决方案": "核心指标&解决方案",
+        "核心指标&解决方案": "核心指标&解决方案",
+        "核心指标/解决方案": "核心指标&解决方案",
+        "怎样解决": "核心指标&解决方案",
+        "解决方案": "核心指标&解决方案",
+        "solvewhatans": "核心指标&解决方案",
+        "价值量化": "价值量化",
+        "_widget_1773296816191": "价值量化",
+        "widget1773296816191": "价值量化",
+        "总结沉淀": "总结沉淀",
+        "_widget_1773296816192": "总结沉淀",
+        "widget1773296816192": "总结沉淀",
+        "成果应用方式": "成果应用方式",
+        "_widget_1737340360281": "成果应用方式",
+        "widget1737340360281": "成果应用方式",
     },
 }
 
@@ -109,10 +127,24 @@ def _resolve_field_rule(target_form: str, raw_field_name: str, form_cfg: dict[st
     if target_form == "场景表":
         if ("标题" in raw_field_name or "场景" in raw_field_name) and "场景标题" in field_mapping:
             return "场景标题", field_mapping["场景标题"]
-        if ("问题" in raw_field_name or "痛点" in raw_field_name or "诉求" in raw_field_name) and "解决什么问题" in field_mapping:
-            return "解决什么问题", field_mapping["解决什么问题"]
-        if "怎样解决" in field_mapping:
-            return "怎样解决", field_mapping["怎样解决"]
+        if ("第一价值" in raw_field_name or "价值实现" in raw_field_name) and "是否第一价值实现场景" in field_mapping:
+            return "是否第一价值实现场景", field_mapping["是否第一价值实现场景"]
+        if ("问题" in raw_field_name or "痛点" in raw_field_name or "诉求" in raw_field_name):
+            if "业务诉求/痛点分析" in field_mapping:
+                return "业务诉求/痛点分析", field_mapping["业务诉求/痛点分析"]
+            if "解决什么问题" in field_mapping:
+                return "解决什么问题", field_mapping["解决什么问题"]
+        if ("指标" in raw_field_name or "方案" in raw_field_name or "解决" in raw_field_name):
+            if "核心指标&解决方案" in field_mapping:
+                return "核心指标&解决方案", field_mapping["核心指标&解决方案"]
+            if "怎样解决" in field_mapping:
+                return "怎样解决", field_mapping["怎样解决"]
+        if "价值量化" in raw_field_name and "价值量化" in field_mapping:
+            return "价值量化", field_mapping["价值量化"]
+        if "总结沉淀" in raw_field_name and "总结沉淀" in field_mapping:
+            return "总结沉淀", field_mapping["总结沉淀"]
+        if ("成果应用" in raw_field_name or "应用方式" in raw_field_name) and "成果应用方式" in field_mapping:
+            return "成果应用方式", field_mapping["成果应用方式"]
 
     return None, {}
 
@@ -402,6 +434,7 @@ async def exec_compare_ops_llm(params: dict[str, Any]) -> dict[str, Any]:
 
     grouped: dict[str, dict[str, Any]] = {}
     last_group_key_by_form: dict[str, str] = {}
+    group_keys_by_form: dict[str, list[str]] = {"预期表": [], "场景表": []}
 
     for fact in facts:
         raw_field_name = str(fact.get("field_name") or "").strip()
@@ -442,9 +475,18 @@ async def exec_compare_ops_llm(params: dict[str, Any]) -> dict[str, Any]:
                     "primary_value": new_value,
                     "item_by_field": {},
                 }
+                group_keys_by_form[target_form].append(group_key)
             last_group_key_by_form[target_form] = group_key
         else:
-            group_key = last_group_key_by_form.get(target_form)
+            group_key = _pick_group_key_for_non_primary_fact(
+                grouped=grouped,
+                group_keys=group_keys_by_form.get(target_form, []),
+                target_form=target_form,
+                canonical_field_name=canonical_field_name,
+                fact_value=new_value,
+                fact_quote=str(fact.get("source_quote") or ""),
+                last_group_key=last_group_key_by_form.get(target_form),
+            )
             if not group_key:
                 continue
 
@@ -562,6 +604,160 @@ def _grouped_card_text(card: dict[str, Any]) -> str:
         if val and val not in values:
             values.append(val)
     return " ".join(values)
+
+
+def _pick_group_key_for_non_primary_fact(
+    *,
+    grouped: dict[str, dict[str, Any]],
+    group_keys: list[str],
+    target_form: str,
+    canonical_field_name: str,
+    fact_value: str,
+    fact_quote: str,
+    last_group_key: str | None,
+) -> str | None:
+    if not group_keys:
+        return last_group_key
+
+    best_key: str | None = None
+    best_score: tuple[float, float, float, float] | None = None
+    clean_quote = str(fact_quote or "").strip()
+    clean_value = str(fact_value or "").strip()
+
+    for index, group_key in enumerate(group_keys):
+        current = grouped.get(group_key) or {}
+        if str(current.get("target_form") or "") != target_form:
+            continue
+
+        item_by_field = current.get("item_by_field") or {}
+        missing_flag = 1.0 if canonical_field_name not in item_by_field else 0.0
+        quote_score = 0.0
+        if clean_quote:
+            group_quote = str(current.get("source_quote") or "")
+            quote_score = max(
+                _text_similarity(clean_quote, group_quote),
+                _ngram_overlap_score(clean_quote, group_quote),
+            )
+        value_score = max(
+            _text_similarity(clean_value, current.get("primary_value") or ""),
+            _ngram_overlap_score(clean_value, current.get("primary_value") or ""),
+        )
+        progress_score = min(len(item_by_field), 8) / 10.0
+        # Prefer groups that still miss this field. When multiple groups are open,
+        # use quote/value similarity and already-filled progress to keep later facts
+        # attached to the most likely scene instead of blindly using the last title.
+        score = (missing_flag, quote_score + value_score, progress_score, -float(index))
+        if best_score is None or score > best_score:
+            best_key = group_key
+            best_score = score
+
+    return best_key or last_group_key
+
+
+def _comparison_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    replacements = (
+        ("审批流程", "审批"),
+        ("审批流", "审批流程"),
+        ("审批链路", "审批流程"),
+        ("审批环节", "审批流程"),
+        ("优化", "提升"),
+        ("提效", "提升效率"),
+        ("增效", "提升效率"),
+        ("提效能", "提升效率"),
+        ("流程效率", "流程效能"),
+        ("响应速度", "响应效率"),
+        ("看板", "分析看板"),
+        ("报表", "分析看板"),
+        ("仪表盘", "分析看板"),
+        ("当前", ""),
+        ("希望", ""),
+        ("需要", ""),
+        ("想要", ""),
+    )
+    for source, target in replacements:
+        text = text.replace(source, target)
+    return _normalize_key(text)
+
+
+def _text_similarity(left: Any, right: Any) -> float:
+    a = _comparison_text(left)
+    b = _comparison_text(right)
+    if not a or not b:
+        return 0.0
+    if a == b or a in b or b in a:
+        return 1.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _ngram_overlap_score(left: Any, right: Any) -> float:
+    a = _comparison_text(left)
+    b = _comparison_text(right)
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+
+    def _ngrams(text: str) -> set[str]:
+        grams: set[str] = set()
+        for size in (2, 3, 4):
+            if len(text) < size:
+                continue
+            for idx in range(len(text) - size + 1):
+                grams.add(text[idx : idx + size])
+        return grams
+
+    left_grams = _ngrams(a)
+    right_grams = _ngrams(b)
+    if not left_grams or not right_grams:
+        return 0.0
+    shared = left_grams & right_grams
+    return (2 * len(shared)) / (len(left_grams) + len(right_grams))
+
+
+def _row_compare_text(
+    row: dict[str, Any],
+    *,
+    primary_widget: str,
+    grouped_card: dict[str, Any],
+) -> str:
+    values: list[str] = []
+    primary_value = str(row.get(primary_widget) or "").strip()
+    if primary_value:
+        values.append(primary_value)
+    for item in (grouped_card.get("item_by_field") or {}).values():
+        widget_name = str(item.get("widget_name") or "").strip()
+        value = str(row.get(widget_name) or "").strip()
+        if value and value not in values:
+            values.append(value)
+    for fallback_key in ("detail_brief", "detail", "title", "solve_what_ques", "solve_what_ans", "yuqi_status", "status"):
+        value = str(row.get(fallback_key) or "").strip()
+        if value and value not in values:
+            values.append(value)
+    return " ".join(values)
+
+
+def _match_score(
+    *,
+    row: dict[str, Any],
+    primary_widget: str,
+    grouped_card: dict[str, Any],
+) -> float:
+    primary_value = str(grouped_card.get("primary_value") or "")
+    grouped_text = _grouped_card_text(grouped_card)
+    row_text = _row_compare_text(row, primary_widget=primary_widget, grouped_card=grouped_card)
+    primary_score = _text_similarity(row.get(primary_widget), primary_value)
+    combined_score = _text_similarity(row_text, grouped_text)
+    overlap_score = _ngram_overlap_score(row_text, grouped_text)
+    return max(primary_score, combined_score, overlap_score, (primary_score + overlap_score) / 2)
+
+
+def _has_meaningful_delta(matched_row: dict[str, Any], item_by_field: dict[str, Any]) -> bool:
+    for item in item_by_field.values():
+        widget_name = str(item.get("widget_name") or "")
+        new_value = str(item.get("new_value") or "")
+        old_value = matched_row.get(widget_name)
+        if _comparison_text(old_value) != _comparison_text(new_value):
+            return True
+    return False
 
 
 def _yuqi_row_summary(row: dict[str, Any], mapping: dict[str, Any]) -> str:
@@ -799,6 +995,15 @@ async def _call_llm_comparison(
         )
 
     system_prompt = f"{default_system_prompt}{custom_prompt_section}\n\n{association_prompt}"
+    system_prompt += (
+        "\n\n## Supplemental semantic matching guardrails\n"
+        "- Treat wording variants with the same business objective, pain point, or delivery intent as the same record.\n"
+        "- If the extracted item only restates an existing expectation or scenario without materially new status or progress, choose skip instead of create.\n"
+        "- If the extracted item is the same core record but contains a status change, new progress, owner, deadline, or execution detail, choose update instead of create.\n"
+        "- Only choose create when the business goal and context are clearly different from every existing record.\n"
+        "- Example: '提升审批效率' and '审批流程太慢，需要优化流程提效' should map to the same expectation.\n"
+        "- Example: '需要经营分析看板' and '希望有一个经营数据仪表盘看每日核心指标' should usually map to the same scenario.\n"
+    )
 
     url = f"{base_url}/chat/completions"
     messages = [
@@ -957,24 +1162,16 @@ def _build_cards_by_string_match(
     mapping: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """纯字符串相似度匹配（原 exec_compare_ops 逻辑保留作为回退）。"""
-    def _normalized(text: Any) -> str:
-        return _normalize_key(str(text or ""))
-
-    def _similarity(left: Any, right: Any) -> float:
-        a = _normalized(left)
-        b = _normalized(right)
-        if not a or not b:
-            return 0.0
-        if a in b or b in a:
-            return 1.0
-        return SequenceMatcher(None, a, b).ratio()
-
-    def _match_existing_row(target_form, primary_widget, primary_value):
-        threshold = 0.82
+    def _match_existing_row(target_form, primary_widget, grouped_card):
+        threshold = 0.72
         best_score = 0.0
         best_row = None
         for row in existing_rows_by_form.get(target_form, []):
-            score = _similarity(row.get(primary_widget), primary_value)
+            score = _match_score(
+                row=row,
+                primary_widget=primary_widget,
+                grouped_card=grouped_card,
+            )
             if score > best_score:
                 best_score = score
                 best_row = row
@@ -1013,7 +1210,10 @@ def _build_cards_by_string_match(
         best_score = 0.0
         best: dict[str, Any] | None = None
         for candidate in candidates:
-            score = _similarity(scene_text, candidate.get("text", ""))
+            score = max(
+                _text_similarity(scene_text, candidate.get("text", "")),
+                _ngram_overlap_score(scene_text, candidate.get("text", "")),
+            )
             if score > best_score:
                 best_score = score
                 best = candidate
@@ -1041,11 +1241,13 @@ def _build_cards_by_string_match(
         if not item_by_field or not primary_field or not primary_value:
             continue
 
-        matched_row = _match_existing_row(target_form, primary_widget, primary_value)
+        matched_row = _match_existing_row(target_form, primary_widget, grouped_card)
         op_type = "update" if matched_row else "create"
         data_id = str((matched_row or {}).get("_id") or "") or None
         if op_type == "update" and not data_id:
             op_type = "create"
+        if matched_row and not _has_meaningful_delta(matched_row, item_by_field):
+            continue
 
         change_items: list[dict[str, Any]] = []
         for field_name, item in item_by_field.items():

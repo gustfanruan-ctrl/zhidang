@@ -341,11 +341,21 @@
                     <Badge v-else-if="item.rejected" variant="outline" class="text-[10px] bg-red-50 text-red-700 border-red-200">已拒绝</Badge>
                     <Badge v-else variant="outline" class="text-[10px] bg-amber-50 text-amber-700 border-amber-200">待审核</Badge>
                     <Badge v-if="item.confidence" variant="outline" class="text-[10px] bg-purple-50 text-purple-700 border-purple-200">置信度 {{ (item.confidence * 100).toFixed(0) }}%</Badge>
-                    <Badge variant="outline" class="text-[10px]" :class="{
-                      'bg-emerald-50 text-emerald-700 border-emerald-200': item.operationType === 'create',
-                      'bg-amber-50 text-amber-700 border-amber-200': item.operationType === 'update',
-                      'bg-red-50 text-red-700 border-red-200': item.operationType === 'skip',
-                    }">{{ item.operationType === 'create' ? '新增' : item.operationType === 'update' ? '更新' : item.operationType === 'skip' ? '跳过' : '手动' }}</Badge>
+                    <div class="inline-flex items-center gap-1">
+                      <SelectNative
+                        :model-value="item.operationType"
+                        class="h-7 px-2 py-0 text-xs w-auto"
+                        :class="operationTypeClass(item.operationType)"
+                        :disabled="operationTypeSaving.has(item.operationId)"
+                        @update:model-value="(v) => calibrateCardOperationType(item, v)"
+                      >
+                        <option value="create">新增</option>
+                        <option v-if="item.dataId" value="update">更新</option>
+                        <option value="skip">跳过</option>
+                      </SelectNative>
+                      <Loader2 v-if="operationTypeSaving.has(item.operationId)" class="h-3 w-3 animate-spin text-muted-foreground" />
+                      <Badge v-else-if="item.operationTypeCalibrated" variant="outline" class="text-[10px] bg-blue-50 text-blue-700 border-blue-200">人工校准</Badge>
+                    </div>
                   </div>
                   <div class="flex gap-1 shrink-0">
                     <Button variant="outline" size="sm" class="h-7 text-xs" @click="toggleEdit('expectation', index)">编辑</Button>
@@ -358,6 +368,9 @@
                   </div>
                 </div>
                 <div class="text-sm">
+                  <p v-if="item.convertedFrom" class="text-[10px] text-amber-600 mb-2">
+                    已由{{ item.convertedFrom === '预期表' ? '预期' : '场景' }}转换，请重点检查标题、详情和解决方案。
+                  </p>
                   <div v-if="isEditing('expectation', index)" class="mb-2">
                     <Label class="text-xs">标题</Label>
                     <Input
@@ -388,6 +401,57 @@
                       <option value="否">否</option>
                     </SelectNative>
                   </div>
+                  <div class="mt-2 rounded-lg border border-border/60 p-2.5">
+                    <div class="flex items-center justify-between gap-2 mb-2">
+                      <span class="text-xs font-medium text-muted-foreground">绑定干系人</span>
+                      <Badge v-if="item.stakeholderContactNames.length" variant="secondary" class="text-[10px]">
+                        {{ item.stakeholderContactNames.length }}
+                      </Badge>
+                    </div>
+                    <div v-if="item.stakeholderContactNames.length" class="flex flex-wrap gap-1.5 mb-2">
+                      <button
+                        v-for="contact in item.stakeholderContacts"
+                        :key="contact.cont_id || contact.cont_name"
+                        type="button"
+                        class="inline-flex items-center gap-1 rounded-md border border-primary/20 bg-primary/5 px-2 py-1 text-[11px] text-primary"
+                        @click="toggleExpectationStakeholder(item.operationId, contact)"
+                      >
+                        {{ contact.cont_name }}
+                        <X class="h-3 w-3" />
+                      </button>
+                    </div>
+                    <Input
+                      v-model="stakeholderKeyword"
+                      class="h-8 text-xs mb-2"
+                      placeholder="搜索干系人"
+                      @input="stakeholderContactPage = 1"
+                    />
+                    <div class="rounded-md border border-border/50 max-h-[132px] overflow-y-auto">
+                      <div v-if="stakeholderContactsLoading" class="text-xs text-muted-foreground py-3 text-center flex items-center justify-center gap-1">
+                        <Loader2 class="h-3 w-3 animate-spin" />加载中
+                      </div>
+                      <div v-else-if="!pagedStakeholderContacts.length" class="text-xs text-muted-foreground py-3 text-center">
+                        暂无匹配干系人
+                      </div>
+                      <button
+                        v-for="contact in pagedStakeholderContacts"
+                        v-show="!stakeholderContactsLoading && pagedStakeholderContacts.length"
+                        :key="contact.cont_id || contact.cont_name"
+                        type="button"
+                        class="w-full px-3 py-1.5 text-left text-xs border-b border-border/30 last:border-0 hover:bg-muted/40"
+                        :class="{ 'bg-primary/5 text-primary': isExpectationStakeholderSelected(item, contact) }"
+                        @click="toggleExpectationStakeholder(item.operationId, contact)"
+                      >
+                        <span class="font-medium">{{ contact.cont_name }}</span>
+                        <span v-if="contact.cont_id" class="ml-2 text-[10px] text-muted-foreground font-mono">{{ contact.cont_id }}</span>
+                      </button>
+                    </div>
+                    <div v-if="filteredStakeholderContacts.length > stakeholderPageSize" class="flex items-center justify-between gap-1 mt-1.5">
+                      <Button variant="ghost" size="sm" class="h-6 text-[10px]" :disabled="stakeholderContactPage <= 1" @click="stakeholderContactPage--">上一页</Button>
+                      <span class="text-[10px] text-muted-foreground">{{ stakeholderContactPage }} / {{ Math.ceil(filteredStakeholderContacts.length / stakeholderPageSize) }}</span>
+                      <Button variant="ghost" size="sm" class="h-6 text-[10px]" :disabled="stakeholderContactPage >= Math.ceil(filteredStakeholderContacts.length / stakeholderPageSize)" @click="stakeholderContactPage++">下一页</Button>
+                    </div>
+                  </div>
                   <div v-if="item.source_quote" class="bg-muted/50 rounded-lg p-2.5 mt-2 text-xs">
                     <p class="text-muted-foreground mb-1">原文引用：</p>
                     <p class="italic break-words">"{{ item.source_quote }}"</p>
@@ -417,11 +481,21 @@
                     <Badge v-else-if="item.rejected" variant="outline" class="text-[10px] bg-red-50 text-red-700 border-red-200">已拒绝</Badge>
                     <Badge v-else variant="outline" class="text-[10px] bg-amber-50 text-amber-700 border-amber-200">待审核</Badge>
                     <Badge v-if="item.confidence" variant="outline" class="text-[10px] bg-purple-50 text-purple-700 border-purple-200">置信度 {{ (item.confidence * 100).toFixed(0) }}%</Badge>
-                    <Badge variant="outline" class="text-[10px]" :class="{
-                      'bg-emerald-50 text-emerald-700 border-emerald-200': item.operationType === 'create',
-                      'bg-amber-50 text-amber-700 border-amber-200': item.operationType === 'update',
-                      'bg-red-50 text-red-700 border-red-200': item.operationType === 'skip',
-                    }">{{ item.operationType === 'create' ? '新增' : item.operationType === 'update' ? '更新' : item.operationType === 'skip' ? '跳过' : '手动' }}</Badge>
+                    <div class="inline-flex items-center gap-1">
+                      <SelectNative
+                        :model-value="item.operationType"
+                        class="h-7 px-2 py-0 text-xs w-auto"
+                        :class="operationTypeClass(item.operationType)"
+                        :disabled="operationTypeSaving.has(item.operationId)"
+                        @update:model-value="(v) => calibrateCardOperationType(item, v)"
+                      >
+                        <option value="create">新增</option>
+                        <option v-if="item.dataId" value="update">更新</option>
+                        <option value="skip">跳过</option>
+                      </SelectNative>
+                      <Loader2 v-if="operationTypeSaving.has(item.operationId)" class="h-3 w-3 animate-spin text-muted-foreground" />
+                      <Badge v-else-if="item.operationTypeCalibrated" variant="outline" class="text-[10px] bg-blue-50 text-blue-700 border-blue-200">人工校准</Badge>
+                    </div>
                   </div>
                   <div class="flex gap-1 shrink-0">
                     <Button variant="outline" size="sm" class="h-7 text-xs" @click="toggleEdit('scenario', index)">编辑</Button>
@@ -434,6 +508,9 @@
                   </div>
                 </div>
                 <div class="text-sm">
+                  <p v-if="item.convertedFrom" class="text-[10px] text-amber-600 mb-2">
+                    已由{{ item.convertedFrom === '预期表' ? '预期' : '场景' }}转换，请重点检查标题、详情和解决方案。
+                  </p>
                   <div v-if="isEditing('scenario', index)" class="mb-2">
                     <Label class="text-xs">标题</Label>
                     <Input
@@ -457,7 +534,7 @@
                       </SelectNative>
                     </div>
                     <div>
-                      <Label class="text-xs">解决什么问题</Label>
+                      <Label class="text-xs">业务诉求/痛点分析</Label>
                       <Textarea
                         :model-value="item.question"
                         rows="3"
@@ -466,7 +543,7 @@
                       />
                     </div>
                     <div>
-                      <Label class="text-xs">怎样解决</Label>
+                      <Label class="text-xs">核心指标&解决方案</Label>
                       <Textarea
                         :model-value="item.answer"
                         rows="3"
@@ -509,8 +586,8 @@
                   </div>
                   <div v-else class="text-muted-foreground mb-2 break-words space-y-1">
                     <p v-if="item.scene_first_value">是否第一价值实现场景：{{ item.scene_first_value }}</p>
-                    <p>解决什么问题：{{ item.question || '暂无问题描述' }}</p>
-                    <p>怎样解决：{{ item.answer || '暂无解决方案' }}</p>
+                    <p>业务诉求/痛点分析：{{ item.question || '暂无问题描述' }}</p>
+                    <p>核心指标&解决方案：{{ item.answer || '暂无解决方案' }}</p>
                     <p v-if="item.value_quantification">价值量化：{{ item.value_quantification }}</p>
                     <p v-if="item.summary_sedimentation">总结沉淀：{{ item.summary_sedimentation }}</p>
                     <p v-if="item.application_mode">成果应用方式：{{ item.application_mode }}</p>
@@ -630,7 +707,7 @@ import { api } from '../api'
 import { useCustomerStore } from '../stores/customer'
 import { uploadTranscript, startTranscriptAnalysis, fetchTranscripts, fetchTranscriptDetail } from '../api/operation'
 import { fetchFollowupRecords, triggerFollowupFetch, fetchFollowupRecordDetail, startFollowupAnalysis } from '../api/followup-records'
-import { reviewCard, executeCards } from '../api/operation'
+import { calibrateOperationType, reviewCard, executeCards } from '../api/operation'
 import Card from '../components/ui/Card.vue'
 import CardHeader from '../components/ui/CardHeader.vue'
 import CardTitle from '../components/ui/CardTitle.vue'
@@ -665,6 +742,7 @@ function toggleSourceMode(mode) {
   sourceMode.value = mode
   selectedId.value = null
   selectedTranscript.value = null
+  currentPage.value = 1
   loadTranscripts()
 }
 
@@ -720,6 +798,7 @@ const uploading = ref(false)
 const analyzingIds = ref(new Set())
 const submitting = ref(false)
 const cardMarking = ref(new Set())
+const operationTypeSaving = ref(new Set())
 
 const canUpload = computed(() => (selectedFiles.value.length > 0 || manualText.value.trim()) && !!customerStore.currentCustomer && !uploading.value)
 
@@ -803,6 +882,7 @@ function goPage(n) { currentPage.value = Math.max(1, Math.min(n, totalPages.valu
 
 async function loadTranscripts() {
   try {
+    const previousPage = currentPage.value
     let data
     if (sourceMode.value === 'followup') {
       const cid = customerStore.currentCustomer?.company_id || ''
@@ -811,7 +891,8 @@ async function loadTranscripts() {
       data = await fetchTranscripts()
     }
     transcripts.value = data.items || []
-    currentPage.value = 1
+    const nextTotalPages = Math.max(1, Math.ceil(transcripts.value.length / pageSize))
+    currentPage.value = Math.min(Math.max(previousPage, 1), nextTotalPages)
     startPollIfNeeded()
   } catch (e) {
     console.warn('加载列表失败', e)
@@ -855,6 +936,7 @@ async function batchAnalyzeSelected() {
     showMessage(`已合并 ${parts.length} 条记录并启动分析`, 'success')
     selectedIds.value = new Set()
     sourceMode.value = 'transcript'
+    currentPage.value = 1
     await triggerAnalysis(result.transcript_id)
     await loadTranscripts()
   } catch (e) {
@@ -970,14 +1052,20 @@ const cardGroups = computed(() => {
       const ci = items.find(i => i.field_name === name || i.widget_name === name)
       return ci ? ci.new_value : ''
     }
+    const rawQuestion = tf === '场景表' ? (getVal('业务诉求/痛点分析') || getVal('解决什么问题') || getVal('solve_what_ques') || '') : ''
+    const rawAnswer = tf === '场景表' ? (getVal('核心指标&解决方案') || getVal('核心指标/解决方案') || getVal('怎样解决') || getVal('solve_what_ans') || '') : ''
+    const parsedScenarioFields = tf === '场景表'
+      ? parseScenarioStructuredFields(rawQuestion, rawAnswer)
+      : null
+    const stakeholders = normalizeStakeholderContacts(card)
     const item = {
       summary: getVal('预期简述') || getVal('detail_brief'),
-      scene_first_value: tf === '场景表' ? (getVal('是否第一价值实现场景') || '') : '',
-      question: tf === '场景表' ? (getVal('解决什么问题') || getVal('solve_what_ques') || '') : '',
-      answer: tf === '场景表' ? (getVal('怎样解决') || getVal('solve_what_ans') || '') : '',
-      value_quantification: tf === '场景表' ? (getVal('价值量化') || '') : '',
-      summary_sedimentation: tf === '场景表' ? (getVal('总结沉淀') || '') : '',
-      application_mode: tf === '场景表' ? (getVal('成果应用方式') || '') : '',
+      scene_first_value: tf === '场景表' ? (getVal('是否第一价值实现场景') || parsedScenarioFields?.scene_first_value || '') : '',
+      question: tf === '场景表' ? (parsedScenarioFields?.question || rawQuestion) : '',
+      answer: tf === '场景表' ? (parsedScenarioFields?.answer || rawAnswer) : '',
+      value_quantification: tf === '场景表' ? (getVal('价值量化') || parsedScenarioFields?.value_quantification || '') : '',
+      summary_sedimentation: tf === '场景表' ? (getVal('总结沉淀') || parsedScenarioFields?.summary_sedimentation || '') : '',
+      application_mode: tf === '场景表' ? (getVal('成果应用方式') || parsedScenarioFields?.application_mode || '') : '',
       description: tf === '场景表' ? '' : (getVal('预期详情') || getVal('detail')),
       title: getVal('场景标题') || getVal('title'),
       status: (() => {
@@ -989,10 +1077,18 @@ const cardGroups = computed(() => {
       source_quote: card.source_quote || '',
       operationId: card.card_id,
       operationType: card.operation_type || 'create',
+      originalOperationType: card.original_operation_type || card.operation_type || 'create',
+      operationTypeCalibrated: !!card.operation_type_calibrated,
+      dataId: card.data_id || '',
       approved: reviewState.get(card.card_id) === 'approved',
       rejected: reviewState.get(card.card_id) === 'rejected',
       customerId: card.customer_id || '',
       _targetForm: tf,
+      stakeholderContacts: stakeholders,
+      stakeholderContactNames: stakeholderNames(stakeholders),
+      stakeholderContactIds: stakeholderIds(stakeholders),
+      stakeholderTouched: !!card.stakeholder_contacts_touched,
+      convertedFrom: card.converted_from_form || '',
       relatedYuqiId: card.related_yuqi_id || '',
       relatedYuqiCardId: card.related_yuqi_card_id || '',
       relatedYuqiSource: card.related_yuqi_card_id ? 'generated' : (card.related_yuqi_id ? 'existing' : ''),
@@ -1044,6 +1140,28 @@ const pagedReviewCustomers = computed(() => {
 const yuqiLoading = ref(false)
 const yuqiWarning = ref('')
 const customerYuqiItems = ref([])
+const stakeholderContacts = ref([])
+const stakeholderContactsLoading = ref(false)
+const stakeholderContactsWarning = ref('')
+const stakeholderKeyword = ref('')
+const stakeholderContactPage = ref(1)
+const stakeholderPageSize = 12
+
+const filteredStakeholderContacts = computed(() => {
+  const k = stakeholderKeyword.value.trim().toLowerCase()
+  const contacts = stakeholderContacts.value || []
+  if (!k) return contacts
+  return contacts.filter(c => {
+    const name = String(c.cont_name || '').toLowerCase()
+    const id = String(c.cont_id || '').toLowerCase()
+    return name.includes(k) || id.includes(k)
+  })
+})
+
+const pagedStakeholderContacts = computed(() => {
+  const start = (stakeholderContactPage.value - 1) * stakeholderPageSize
+  return filteredStakeholderContacts.value.slice(start, start + stakeholderPageSize)
+})
 
 function truncateLabel(text, limit = 32) {
   const value = String(text || '').trim()
@@ -1052,6 +1170,44 @@ function truncateLabel(text, limit = 32) {
 
 function yuqiSummary(row) {
   return String(row?.detail_brief || row?.['预期简述'] || row?.detail || row?._id || '').trim()
+}
+
+function splitStakeholderValue(value) {
+  if (!value) return []
+  if (Array.isArray(value)) return value.map(v => String(v || '').trim()).filter(Boolean)
+  return String(value)
+    .split(/[,\n，、；;]/)
+    .map(v => v.trim())
+    .filter(Boolean)
+}
+
+function normalizeStakeholderContacts(card) {
+  const byKey = new Map()
+  const rawContacts = Array.isArray(card?.stakeholder_contacts) ? card.stakeholder_contacts : []
+  for (const c of rawContacts) {
+    const id = String(c?.cont_id || c?.id || '').trim()
+    const name = String(c?.cont_name || c?.name || '').trim()
+    if (!id && !name) continue
+    byKey.set(id || name, { cont_id: id, cont_name: name || id })
+  }
+  const ids = splitStakeholderValue(card?.stakeholder_contact_ids || card?.cont_id)
+  const names = splitStakeholderValue(card?.stakeholder_contact_names || card?.cont_name_array)
+  const count = Math.max(ids.length, names.length)
+  for (let i = 0; i < count; i++) {
+    const id = ids[i] || ''
+    const name = names[i] || id
+    if (!id && !name) continue
+    byKey.set(id || name, { cont_id: id, cont_name: name })
+  }
+  return [...byKey.values()]
+}
+
+function stakeholderNames(contacts) {
+  return (contacts || []).map(c => String(c?.cont_name || '').trim()).filter(Boolean)
+}
+
+function stakeholderIds(contacts) {
+  return (contacts || []).map(c => String(c?.cont_id || '').trim()).filter(Boolean)
 }
 
 const relatedYuqiOptions = computed(() => {
@@ -1113,6 +1269,54 @@ function findSelectedCard(cardId) {
   return selectedCards.value.find(c => c.card_id === cardId)
 }
 
+function operationTypeClass(operationType) {
+  return {
+    'bg-emerald-50 text-emerald-700 border-emerald-200': operationType === 'create',
+    'bg-amber-50 text-amber-700 border-amber-200': operationType === 'update',
+    'bg-red-50 text-red-700 border-red-200': operationType === 'skip',
+  }
+}
+
+function setOperationTypeSaving(cardId, saving) {
+  const next = new Set(operationTypeSaving.value)
+  if (saving) next.add(cardId)
+  else next.delete(cardId)
+  operationTypeSaving.value = next
+}
+
+async function calibrateCardOperationType(item, operationType) {
+  const card = findSelectedCard(item.operationId)
+  if (!card || operationTypeSaving.value.has(item.operationId)) return
+  const nextType = String(operationType || '')
+  if (nextType === card.operation_type) return
+  if (nextType === 'update' && !card.data_id) {
+    showMessage('该卡片没有匹配记录，不能校准为更新', 'error')
+    return
+  }
+
+  const previous = {
+    operation_type: card.operation_type,
+    original_operation_type: card.original_operation_type,
+    operation_type_calibrated: card.operation_type_calibrated,
+  }
+  card.operation_type = nextType
+  setOperationTypeSaving(item.operationId, true)
+  try {
+    const result = await calibrateOperationType(selectedId.value, item.operationId, nextType)
+    card.operation_type = result.operation_type
+    card.original_operation_type = result.original_operation_type
+    card.operation_type_calibrated = !!result.operation_type_calibrated
+    showMessage('操作类型已保存', 'success')
+  } catch (e) {
+    card.operation_type = previous.operation_type
+    card.original_operation_type = previous.original_operation_type
+    card.operation_type_calibrated = previous.operation_type_calibrated
+    showMessage(e?.response?.data?.detail || '操作类型保存失败', 'error')
+  } finally {
+    setOperationTypeSaving(item.operationId, false)
+  }
+}
+
 function upsertChangeItem(card, fieldName, widgetName, value) {
   if (!card) return
   const items = [...(card.change_items || [])]
@@ -1127,6 +1331,31 @@ function upsertChangeItem(card, fieldName, widgetName, value) {
   card.change_items = items
 }
 
+function serializableChangeItems(card) {
+  return (card?.change_items || [])
+    .filter(item => item && item.field_name && item.widget_name)
+    .map(item => ({
+      field_name: item.field_name,
+      widget_name: item.widget_name,
+      old_value: item.old_value ?? null,
+      new_value: item.new_value ?? '',
+    }))
+}
+
+function deriveReviewCardTitle(value, maxLen = 30) {
+  let text = String(value ?? '').trim()
+  if (!text) return ''
+  for (const marker of ['\n', '。', '；', ';', '，', ',']) {
+    const index = text.indexOf(marker)
+    if (index >= 0) {
+      text = text.slice(0, index).trim()
+      break
+    }
+  }
+  text = text.replace(/^[【\[\(（:：\s]+|[】\]\)）:：\s]+$/g, '')
+  return text.length > maxLen ? text.slice(0, maxLen).trim() : text
+}
+
 function splitScenarioDescription(value) {
   const text = String(value ?? '').trim()
   const marker = ' — '
@@ -1135,6 +1364,36 @@ function splitScenarioDescription(value) {
   }
   const [question, ...rest] = text.split(marker)
   return { question: question.trim(), answer: rest.join(marker).trim() }
+}
+
+function extractScenarioSection(text, label) {
+  const source = String(text ?? '').trim()
+  if (!source) return ''
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`【${escapedLabel}】([\\s\\S]*?)(?=【[^】]+】|$)`)
+  const match = source.match(pattern)
+  return match?.[1]?.trim() || ''
+}
+
+function parseScenarioStructuredFields(questionText, answerText) {
+  const questionSource = String(questionText ?? '').trim()
+  const answerSource = String(answerText ?? '').trim()
+
+  const sceneFirstValue = extractScenarioSection(questionSource, '是否第一价值实现场景')
+  const question = extractScenarioSection(questionSource, '业务诉求/痛点分析') || questionSource
+  const valueQuantification = extractScenarioSection(questionSource, '价值量化')
+  const summarySedimentation = extractScenarioSection(questionSource, '总结沉淀')
+  const answer = extractScenarioSection(answerSource, '核心指标&解决方案') || answerSource
+  const applicationMode = extractScenarioSection(answerSource, '成果应用方式')
+
+  return {
+    scene_first_value: sceneFirstValue,
+    question,
+    answer,
+    value_quantification: valueQuantification,
+    summary_sedimentation: summarySedimentation,
+    application_mode: applicationMode,
+  }
 }
 
 function updateExpectationField(cardId, field, value) {
@@ -1162,9 +1421,9 @@ function updateScenarioField(cardId, field, value) {
   } else if (field === 'scene_first_value') {
     upsertChangeItem(card, '是否第一价值实现场景', '_widget_1744337240628', valueText)
   } else if (field === 'question') {
-    upsertChangeItem(card, '解决什么问题', 'solve_what_ques', valueText)
+    upsertChangeItem(card, '业务诉求/痛点分析', 'solve_what_ques', valueText)
   } else if (field === 'answer') {
-    upsertChangeItem(card, '怎样解决', 'solve_what_ans', valueText)
+    upsertChangeItem(card, '核心指标&解决方案', 'solve_what_ans', valueText)
   } else if (field === 'value_quantification') {
     upsertChangeItem(card, '价值量化', '_widget_1773296816191', valueText)
   } else if (field === 'summary_sedimentation') {
@@ -1173,8 +1432,8 @@ function updateScenarioField(cardId, field, value) {
     upsertChangeItem(card, '成果应用方式', '_widget_1737340360281', valueText)
   } else if (field === 'description') {
     const { question, answer } = splitScenarioDescription(valueText)
-    upsertChangeItem(card, '解决什么问题', 'solve_what_ques', question)
-    upsertChangeItem(card, '怎样解决', 'solve_what_ans', answer)
+    upsertChangeItem(card, '业务诉求/痛点分析', 'solve_what_ques', question)
+    upsertChangeItem(card, '核心指标&解决方案', 'solve_what_ans', answer)
   }
 }
 
@@ -1198,8 +1457,64 @@ async function loadCustomerYuqiOptions(companyId) {
   }
 }
 
+async function loadStakeholderContacts(companyId) {
+  const id = String(companyId || '').trim()
+  if (!id || id === 'demo') {
+    stakeholderContacts.value = []
+    stakeholderContactsWarning.value = ''
+    return
+  }
+  stakeholderContactsLoading.value = true
+  try {
+    const selectedCustomer = customerStore.customers.find(c => c.company_id === id)
+      || reviewSearchResults.value.find(c => c.company_id === id)
+      || customerStore.currentCustomer
+    const params = selectedCustomer?.com_id ? { com_id: selectedCustomer.com_id } : {}
+    const resp = await api.get(`/api/v1/customers/${id}/contacts`, { params })
+    stakeholderContacts.value = resp.data?.contacts || []
+    stakeholderContactsWarning.value = resp.data?.warning || resp.data?.error || ''
+    stakeholderContactPage.value = 1
+  } catch (e) {
+    stakeholderContacts.value = []
+    stakeholderContactsWarning.value = e?.response?.data?.detail || '干系人加载失败'
+  } finally {
+    stakeholderContactsLoading.value = false
+  }
+}
+
+function isExpectationStakeholderSelected(item, contact) {
+  const id = String(contact?.cont_id || '').trim()
+  const name = String(contact?.cont_name || '').trim()
+  return (item.stakeholderContacts || []).some(c => {
+    const cid = String(c?.cont_id || '').trim()
+    const cname = String(c?.cont_name || '').trim()
+    return (id && cid === id) || (!id && name && cname === name)
+  })
+}
+
+function toggleExpectationStakeholder(cardId, contact) {
+  const card = findSelectedCard(cardId)
+  if (!card || !contact) return
+  const id = String(contact.cont_id || '').trim()
+  const name = String(contact.cont_name || '').trim()
+  if (!id && !name) return
+  const contacts = normalizeStakeholderContacts(card)
+  const existingIndex = contacts.findIndex(c => {
+    const cid = String(c?.cont_id || '').trim()
+    const cname = String(c?.cont_name || '').trim()
+    return (id && cid === id) || (!id && name && cname === name)
+  })
+  if (existingIndex >= 0) contacts.splice(existingIndex, 1)
+  else contacts.push({ cont_id: id, cont_name: name || id })
+  card.stakeholder_contacts = contacts
+  card.stakeholder_contact_ids = stakeholderIds(contacts).join(',')
+  card.stakeholder_contact_names = stakeholderNames(contacts).join('，')
+  card.stakeholder_contacts_touched = true
+}
+
 watch(effectiveCompanyId, (id) => {
   loadCustomerYuqiOptions(id)
+  loadStakeholderContacts(id)
 })
 
 async function searchReviewCustomers() {
@@ -1247,6 +1562,7 @@ function loadCardsFromTranscript() {
     }
   }
   loadCustomerYuqiOptions(effectiveCompanyId.value)
+  loadStakeholderContacts(effectiveCompanyId.value)
 }
 
 async function addManualCard(targetForm) {
@@ -1261,8 +1577,8 @@ async function addManualCard(targetForm) {
     : [
         { field_name: '场景标题', widget_name: 'title', new_value: '' },
         { field_name: '是否第一价值实现场景', widget_name: '_widget_1744337240628', new_value: '' },
-        { field_name: '解决什么问题', widget_name: 'solve_what_ques', new_value: '' },
-        { field_name: '怎样解决', widget_name: 'solve_what_ans', new_value: '' },
+        { field_name: '业务诉求/痛点分析', widget_name: 'solve_what_ques', new_value: '' },
+        { field_name: '核心指标&解决方案', widget_name: 'solve_what_ans', new_value: '' },
         { field_name: '价值量化', widget_name: '_widget_1773296816191', new_value: '' },
         { field_name: '总结沉淀', widget_name: '_widget_1773296816192', new_value: '' },
         { field_name: '成果应用方式', widget_name: '_widget_1737340360281', new_value: '' },
@@ -1272,6 +1588,8 @@ async function addManualCard(targetForm) {
     target_form: targetForm,
     _targetForm: targetForm,
     operation_type: 'create',
+    original_operation_type: 'create',
+    operation_type_calibrated: false,
     operationType: 'create',
     change_items: changeItems,
     confidence: 0,
@@ -1318,22 +1636,24 @@ function switchCardType(type, index, event) {
       const newItems = []
       if (oldTarget === '场景表' && newTarget === '预期表') {
         const title = getVal('场景标题') || getVal('title')
-        const ques = getVal('解决什么问题') || getVal('solve_what_ques')
-        const ans  = getVal('怎样解决') || getVal('solve_what_ans')
+        const ques = getVal('业务诉求/痛点分析') || getVal('解决什么问题') || getVal('solve_what_ques')
+        const ans  = getVal('核心指标&解决方案') || getVal('核心指标/解决方案') || getVal('怎样解决') || getVal('solve_what_ans')
         const desc = [ques, ans].filter(Boolean).join('；')
         if (title) newItems.push({ field_name: '预期简述', widget_name: 'detail_brief', new_value: title })
         if (desc) newItems.push({ field_name: '预期详情', widget_name: 'detail', new_value: desc })
       } else if (oldTarget === '预期表' && newTarget === '场景表') {
         const brief = getVal('预期简述') || getVal('detail_brief')
         const detail = getVal('预期详情') || getVal('detail')
-        if (brief) newItems.push({ field_name: '场景标题', widget_name: 'title', new_value: brief })
-        if (detail) newItems.push({ field_name: '解决什么问题', widget_name: 'solve_what_ques', new_value: detail })
+        const title = brief || deriveReviewCardTitle(detail)
+        if (title) newItems.push({ field_name: '场景标题', widget_name: 'title', new_value: title })
+        if (detail) newItems.push({ field_name: '业务诉求/痛点分析', widget_name: 'solve_what_ques', new_value: detail })
         newItems.push({ field_name: '是否第一价值实现场景', widget_name: '_widget_1744337240628', new_value: '' })
         newItems.push({ field_name: '价值量化', widget_name: '_widget_1773296816191', new_value: '' })
         newItems.push({ field_name: '总结沉淀', widget_name: '_widget_1773296816192', new_value: '' })
         newItems.push({ field_name: '成果应用方式', widget_name: '_widget_1737340360281', new_value: '' })
       }
       card.change_items = newItems
+      card.converted_from_form = oldTarget
       break
     }
   }
@@ -1353,15 +1673,32 @@ async function markCard(type, index, action) {
   const key = `${type}_${index}_${action}`
   if (cardMarking.value.has(key)) return
   cardMarking.value.add(key)
+  const previousApproved = !!item.approved
+  const previousRejected = !!item.rejected
+  const previousReviewState = reviewState.get(item.operationId)
   if (action === 'approve') { item.approved = true; item.rejected = false; reviewState.set(item.operationId, 'approved') }
   else { item.approved = false; item.rejected = true; reviewState.set(item.operationId, 'rejected') }
   try {
-    await reviewCard({
+    const resp = await reviewCard({
       transcript_id: selectedId.value,
       card_id: item.operationId,
       action: action,
     })
-  } catch (e) { console.warn('同步审核状态失败', e) }
+    if (!resp?.success) {
+      item.approved = previousApproved
+      item.rejected = previousRejected
+      if (previousReviewState) reviewState.set(item.operationId, previousReviewState)
+      else reviewState.delete(item.operationId)
+      showMessage('审批状态同步失败，请刷新后重试', 'error')
+    }
+  } catch (e) {
+    item.approved = previousApproved
+    item.rejected = previousRejected
+    if (previousReviewState) reviewState.set(item.operationId, previousReviewState)
+    else reviewState.delete(item.operationId)
+    console.warn('同步审核状态失败', e)
+    showMessage(e?.response?.data?.detail || '审批状态同步失败，请重试', 'error')
+  }
   cardMarking.value.delete(key)
 }
 
@@ -1386,11 +1723,13 @@ async function submitCards() {
       up['预期详情'] = item.description || ''
       if (item.status) up['预期状态'] = item.status
       if (item.is_first_value) up['是否第一价值实现预期'] = item.is_first_value
+      if (item.stakeholderContactNames.length || item.stakeholderTouched) up['关联干系人'] = item.stakeholderContactNames.join('，')
+      if (item.stakeholderContactIds.length || item.stakeholderTouched) up['干系人id'] = item.stakeholderContactIds.join(',')
     } else if (item._targetForm === '场景表') {
       up['场景标题'] = item.title || ''
       if (item.scene_first_value) up['是否第一价值实现场景'] = item.scene_first_value
-      up['解决什么问题'] = item.question || splitScenarioDescription(item.description || '').question
-      up['怎样解决'] = item.answer || splitScenarioDescription(item.description || '').answer
+      up['业务诉求/痛点分析'] = item.question || splitScenarioDescription(item.description || '').question
+      up['核心指标&解决方案'] = item.answer || splitScenarioDescription(item.description || '').answer
       if (item.value_quantification) up['价值量化'] = item.value_quantification
       if (item.summary_sedimentation) up['总结沉淀'] = item.summary_sedimentation
       if (item.application_mode) up['成果应用方式'] = item.application_mode
@@ -1398,6 +1737,15 @@ async function submitCards() {
     if (Object.keys(up).length) fieldUpdates[item.operationId] = up
     // 始终带 target_form，后端用它覆盖 OPERATION_CARD_STORE 中的旧值
     const override = { target_form: item._targetForm }
+    const sourceCard = findSelectedCard(item.operationId)
+    const changeItems = serializableChangeItems(sourceCard)
+    if (changeItems.length) override.change_items = changeItems
+    if (item._targetForm === '预期表') {
+      override.stakeholder_contact_names = item.stakeholderContactNames.join('，')
+      override.stakeholder_contact_ids = item.stakeholderContactIds.join(',')
+      override.stakeholder_contacts = item.stakeholderContacts
+      override.stakeholder_contacts_touched = item.stakeholderTouched
+    }
     if (item._targetForm === '场景表') {
       override.related_yuqi_id = item.relatedYuqiId || ''
       override.related_yuqi_card_id = item.relatedYuqiCardId || ''
@@ -1415,8 +1763,9 @@ async function submitCards() {
     )
     const results = resp.results || []
     const ok = results.filter(r => r.execute_status === 'success').length
-    const fail = results.length - ok
-    showMessage(`提交完成：成功 ${ok}，失败 ${fail}`, ok > 0 ? 'success' : 'error')
+    const skipped = results.filter(r => r.execute_status === 'skipped').length
+    const fail = results.filter(r => r.execute_status === 'failed').length
+    showMessage(`提交完成：成功 ${ok}，跳过 ${skipped}，失败 ${fail}`, fail === 0 ? 'success' : 'error')
   } catch (e) {
     showMessage(e?.response?.data?.detail || '提交失败', 'error')
   } finally {

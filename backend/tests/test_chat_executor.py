@@ -8,6 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.services.chat_executor import (  # noqa: E402
     ChatPayloadValidationError,
     build_jiandaoyun_payload,
+    build_preview_text,
+    normalize_chat_tool_input,
     normalize_expectation_status_value,
 )
 
@@ -93,8 +95,8 @@ def test_chat_scene_create_payload_includes_customer_helper_fields():
     ("raw_value", "expected"),
     [
         ("完成", "已达成"),
-        ("已结束", "已作废"),
-        ("结束", "已作废"),
+        ("已结束", "已达成"),
+        ("结束", "已达成"),
         ("作废", "已作废"),
         ("未开始", "未启动"),
         ("处理中", "进行中"),
@@ -124,3 +126,75 @@ def test_build_jiandaoyun_payload_rejects_blank_expectation_status():
             },
             _form_config(),
         )
+
+
+def test_normalize_chat_tool_input_maps_expectation_status_alias_for_preview_and_write():
+    tool_input = normalize_chat_tool_input(
+        {
+            "company_id": "company-1",
+            "target_form": "预期表",
+            "data_id": "exp-1",
+            "fields": {
+                "预期简述": "为一线销售提供移动端数据查看工具",
+                "预期状态": "已关闭",
+            },
+        }
+    )
+
+    assert tool_input["fields"]["预期状态"] == "已作废"
+
+
+def test_normalize_chat_tool_input_promotes_data_ids_and_deduplicates():
+    tool_input = normalize_chat_tool_input(
+        {
+            "company_id": "company-1",
+            "target_form": "预期表",
+            "data_id": "exp-1",
+            "data_ids": ["exp-1", "exp-2", " ", "exp-2"],
+            "fields": {
+                "预期状态": "作废",
+            },
+        }
+    )
+
+    assert tool_input["data_id"] == "exp-1"
+    assert tool_input["data_ids"] == ["exp-1", "exp-2"]
+    assert tool_input["fields"]["预期状态"] == "已作废"
+
+
+def test_build_preview_text_uses_canonical_expectation_status():
+    preview = build_preview_text(
+        "update_customer_record",
+        {
+            "company_id": "company-1",
+            "target_form": "预期表",
+            "data_id": "exp-1",
+            "fields": {
+                "预期简述": "为一线销售提供移动端数据查看工具",
+                "预期状态": "已关闭",
+            },
+        },
+    )
+
+    assert "已作废" in preview
+    assert "已关闭" not in preview
+
+
+def test_build_preview_text_lists_multiple_target_ids():
+    preview = build_preview_text(
+        "update_customer_record",
+        {
+            "company_id": "company-1",
+            "target_form": "预期表",
+            "data_ids": ["exp-1", "exp-2"],
+            "fields": {
+                "预期简述": "实现集团经营驾驶舱快速产出",
+                "预期状态": "已关闭",
+            },
+        },
+    )
+
+    assert "目标记录数" in preview
+    assert "2" in preview
+    assert "exp-1" in preview
+    assert "exp-2" in preview

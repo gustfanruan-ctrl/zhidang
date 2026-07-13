@@ -47,7 +47,7 @@ function parseSseChunk(buffer, onEvent) {
  * @param {AbortSignal} [options.signal]
  * @returns {Promise<{sessionId: string|null, done: any}>} resolves with last `done` event data
  */
-export async function startChatV2({ companyId, message, version = null, onEvent, signal }) {
+export async function startChatV2({ companyId, message, version = null, sessionId = null, planId = null, images = [], onEvent, signal }) {
   if (!companyId) throw new Error('companyId is required')
   if (!message || !message.trim()) throw new Error('message is required')
   if (typeof onEvent !== 'function') throw new Error('onEvent callback is required')
@@ -61,8 +61,11 @@ export async function startChatV2({ companyId, message, version = null, onEvent,
 
   const body = { message: message.trim(), confirm: false }
   if (version) body.version = version
+  if (sessionId) body.session_id = sessionId
+  if (planId) body.plan_id = planId
+  if (Array.isArray(images) && images.length) body.images = images
 
-  let sessionId = null
+  let receivedSessionId = null
   let lastDone = null
 
   const response = await fetch(
@@ -93,7 +96,7 @@ export async function startChatV2({ companyId, message, version = null, onEvent,
 
   const wrappedOnEvent = (eventType, data) => {
     if (data && typeof data === 'object' && data.session_id) {
-      sessionId = data.session_id
+      receivedSessionId = data.session_id
     }
     if (eventType === 'done') {
       lastDone = data
@@ -115,7 +118,7 @@ export async function startChatV2({ companyId, message, version = null, onEvent,
     parseSseChunk(buffer + '\n\n', wrappedOnEvent)
   }
 
-  return { sessionId, done: lastDone }
+  return { sessionId: receivedSessionId, done: lastDone }
 }
 
 function buildHeaders() {
@@ -152,6 +155,28 @@ export async function commitChatV2({ companyId, sessionId }) {
     ok: data?.ok === true,
     error: data?.error || (response.ok ? null : data?.detail || `http_${response.status}`),
     result: data?.result ?? null,
+  }
+}
+
+export async function confirmPlanChatV2({ companyId, planId }) {
+  if (!companyId) throw new Error('companyId is required')
+  if (!planId) throw new Error('planId is required')
+
+  const response = await fetch(
+    `/api/v1/power-map/${encodeURIComponent(companyId)}/chat_v2/confirm-plan`,
+    {
+      method: 'POST',
+      headers: buildHeaders(),
+      body: JSON.stringify({ plan_id: planId }),
+    },
+  )
+  let data = null
+  try { data = await response.json() } catch { /* may be empty body */ }
+  return {
+    status: response.status,
+    ok: data?.ok === true,
+    error: data?.error || (response.ok ? null : data?.detail || `http_${response.status}`),
+    data,
   }
 }
 

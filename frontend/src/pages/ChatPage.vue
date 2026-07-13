@@ -230,6 +230,30 @@ const needsConfirm = ref(false)
 const loadingProfile = ref(false)
 const sending = ref(false)
 
+function buildWelcomeMessage() {
+  return {
+    role: 'assistant',
+    text: [
+      '开始对话后，我可以帮你维护当前客户的预期和场景。',
+      '这个页面目前支持：查询、新增、修改、删除预期；查询、新增、修改、删除场景。',
+      '你下指令时请尽量提供关键信息：',
+      '1. 查询：说明你要查预期还是场景，想看哪条记录或全部记录。',
+      '2. 修改/删除：请提供目标记录名称，例如预期简述或场景标题；如果是改状态，请直接说明目标状态。',
+      '3. 新增预期：请提供预期简述、预期详情，必要时提供预期状态。',
+      '4. 新增场景：请提供场景标题、业务诉求/痛点、解决方案；如果要挂到某条预期下，请说明关联哪条预期。',
+      '5. 预期状态只支持这四个值：未启动、进行中、已达成、已作废。',
+      '涉及新增、修改、删除时，我会先生成待确认操作，确认后才会真正写入。',
+    ].join('\n'),
+  }
+}
+
+function resetChatState(withWelcome = true) {
+  messages.value = withWelcome && customerStore.currentCustomer ? [buildWelcomeMessage()] : []
+  input.value = ''
+  needsConfirm.value = false
+  chatSessionId.value = safeUUID()
+}
+
 const profileMetaGrid = computed(() => {
   const p = profile.value || {}
   return [
@@ -341,14 +365,25 @@ async function send(confirm) {
 }
 
 watch(() => customerStore.resetVersion, () => {
-  messages.value = []
-  input.value = ''
-  needsConfirm.value = false
+  resetChatState(false)
   profile.value = null
   yuqiList.value = []
   changjingList.value = []
-  chatSessionId.value = safeUUID()
 })
+
+watch(
+  () => customerStore.currentCustomer?.company_id || '',
+  (companyId, previousCompanyId) => {
+    if (!companyId) {
+      resetChatState(false)
+      return
+    }
+    if (companyId !== previousCompanyId || messages.value.length === 0) {
+      resetChatState(true)
+    }
+  },
+  { immediate: true },
+)
 
 onMounted(async () => {
   await customerStore.fetchCustomers()

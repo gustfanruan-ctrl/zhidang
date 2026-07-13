@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-
-from .tracing import emit, emit_llm
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
+
+from .tracing import emit, emit_llm
 
 
 class AgentPhase(str, Enum):
@@ -106,15 +106,33 @@ class AgentRunner:
                     usage = getattr(response, "usage", None)
                     inp = getattr(usage, "input_tokens", 0) if usage else 0
                     out = getattr(usage, "output_tokens", 0) if usage else 0
-                    emit_llm(event="llm_done", segment_index=iterations, model=self.model_name,
-                             attempt_no=iterations + 1, input_tokens=inp, output_tokens=out,
-                             total_ms=t_elapsed, status="ok", total_attempts=1, final_status="ok")
+                    emit_llm(
+                        event="llm_done",
+                        segment_index=iterations,
+                        model=self.model_name,
+                        attempt_no=iterations + 1,
+                        input_tokens=inp,
+                        output_tokens=out,
+                        total_ms=t_elapsed,
+                        status="ok",
+                        total_attempts=1,
+                        final_status="ok",
+                    )
                 except Exception:
                     t_elapsed = (time.monotonic() - t_llm) * 1000
-                    emit_llm(event="llm_error", segment_index=iterations, model=self.model_name,
-                             attempt_no=iterations + 1, total_ms=t_elapsed,
-                             error_type="agent_llm_exception", error_msg=str(Exception),
-                             will_retry=False, total_attempts=1, final_status="error", degraded=True)
+                    emit_llm(
+                        event="llm_error",
+                        segment_index=iterations,
+                        model=self.model_name,
+                        attempt_no=iterations + 1,
+                        total_ms=t_elapsed,
+                        error_type="agent_llm_exception",
+                        error_msg=str(Exception),
+                        will_retry=False,
+                        total_attempts=1,
+                        final_status="error",
+                        degraded=True,
+                    )
                     raise
 
                 self._emit(f"第 {iterations + 1} 轮：模型返回 {response.stop_reason}")
@@ -170,7 +188,13 @@ class AgentRunner:
         if self.output_validator and final_data is not None:
             try:
                 validated = self.output_validator(final_data)
-                return AgentResult(status="success", data=validated, turns_used=iterations + 1, final_text=final_text, message=final_text)
+                return AgentResult(
+                    status="success",
+                    data=validated,
+                    turns_used=iterations + 1,
+                    final_text=final_text,
+                    message=final_text,
+                )
             except Exception as exc:
                 return AgentResult(
                     status="validation_error",
@@ -181,7 +205,13 @@ class AgentRunner:
                     errors=[str(exc)],
                 )
 
-        return AgentResult(status="success", data=final_data, turns_used=iterations + 1, final_text=final_text, message=final_text)
+        return AgentResult(
+            status="success",
+            data=final_data,
+            turns_used=iterations + 1,
+            final_text=final_text,
+            message=final_text,
+        )
 
     def _extract_text(self, response: Any) -> str:
         texts: list[str] = []
@@ -211,8 +241,13 @@ class AgentRunner:
                 allowed = mapping.get("allowed_values", []) or []
                 if allowed and value not in allowed:
                     errors.append(f"字段 '{field_name}' 的值 '{value}' 不在允许范围内，可选：{allowed}")
-        if tool_name in {"update_customer_record", "delete_customer_record"} and not tool_input.get("data_id"):
-            errors.append("缺少 data_id，请先调用 query_customer_records 查询目标记录")
+
+        target_ids = list(tool_input.get("data_ids") or [])
+        if tool_input.get("data_id") and not target_ids:
+            target_ids = [tool_input.get("data_id")]
+        if tool_name in {"update_customer_record", "delete_customer_record"} and not target_ids:
+            errors.append("缺少 data_id/data_ids，请先调用 query_customer_records 查询目标记录")
+
         if errors:
             return {"status": "recall", "errors": errors, "hint": "请根据以上错误修正参数后重新调用"}
         return {"status": "ok"}
@@ -251,6 +286,7 @@ class AgentRunner:
                     },
                     ensure_ascii=False,
                 )
+
             executor = self.tool_executors.get(tool_name)
             if not executor:
                 return json.dumps(
@@ -279,7 +315,7 @@ class AgentRunner:
                 {
                     "status": "error",
                     "error": "execution_failed",
-                    "message": f"执行 {tool_name} 时出错: {exc}",
+                    "message": f"执行 {tool_name} 时出错：{exc}",
                     "hint": "请检查输入参数是否正确。",
                 },
                 ensure_ascii=False,

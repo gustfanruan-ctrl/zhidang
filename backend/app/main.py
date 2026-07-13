@@ -21,14 +21,14 @@ import httpx
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .auth import create_jwt, get_current_user, get_current_user_for_sse, require_superadmin
+from .auth import create_jwt, decode_jwt, get_current_user, get_current_user_for_sse, require_superadmin
 from .config import settings
 from .crypto_utils import decrypt_secret, encrypt_secret
 from .database import Base, engine, get_db
 from .models import AnalyticsEvent, ConfigChangeLog, FollowupRecord, OperationLog, Superadmin, SystemConfig, Transcript, User
 from .progress import build_progress
-from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, PowerMapChatPayload, PowerMapConfirmPayload, PowerMapRelayoutPayload, PowerMapPreviewPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptAnalyzeResponse, TranscriptUploadResponse
-from .schemas.operation import OperationExecuteRequest, ReviewAction
+from .schemas import AdminFetchWidgetsPayload, AgentComparisonPayload, AgentExtractionPayload, ChatPayload, CompanySearchQuery, ConfigPayload, CustomerSwitchPayload, DingtalkFetchPayload, ExecuteOperationsPayload, LlmConfigPayload, LlmTestPayload, LoginPayload, PowerMapChatPayload, PowerMapConfirmPayload, PowerMapConfirmPlanPayload, PowerMapRelayoutPayload, PowerMapPreviewPayload, ReviewActionPayload, ReviewSessionPayload, SsoEntryQuery, SsoGeneratePayload, SystemInitPayload, TranscriptAnalyzeResponse, TranscriptUploadResponse
+from .schemas.operation import OperationExecuteRequest, OperationTypeCalibrationRequest, ReviewAction
 from .schemas.agent_output import validate_comparison_output, validate_extraction_output
 from .services.agent_runner import AgentPhase, AgentRunner
 from .services.field_safety import check_operation_cards
@@ -44,8 +44,14 @@ from .services.followup_review_template import (
     render_followup_review_record,
     save_followup_review_template,
 )
+from .services.followup_push import (
+    build_followup_push_payload,
+    extract_created_data_id,
+    get_followup_push_config,
+    push_followup_to_travel_server,
+)
 from .services.followup_yuqi import apply_followup_yuqi_fields, extract_followup_yuqi_id
-from .services.power_map_service import _build_merge_context, _ctx_to_getinfo_response, _drop_session, _execute_harness_stream, _fetch_from_external, _get_power_map_config, _get_session, _new_session_id, _node_from_bi_dict, _split_bi_auth, _store_session, chat_power_map, chat_power_map_v2, commit_power_map_session, confirm_power_map, discard_power_map_session, get_power_map, preview_power_map, relayout_power_map
+from .services.power_map_service import _build_merge_context, _ctx_to_getinfo_response, _drop_session, _execute_harness_stream, _fetch_from_external, _get_power_map_config, _get_session, _new_session_id, _node_from_bi_dict, _split_bi_auth, _store_session, chat_power_map, chat_power_map_v2, commit_power_map_session, confirm_power_map, confirm_power_map_plan, discard_power_map_session, get_power_map, plan_power_map_v2, preview_power_map, relayout_power_map
 from .services import sandbox_infra
 from .services.sandbox_infra import (
     SANDBOX_DIR,
@@ -61,6 +67,7 @@ from .services.chat_executor import (
     build_jiandaoyun_payload,
     build_preview_text,
     get_entry_id,
+    normalize_chat_tool_input,
     log_operation,
 )
 from .services.tool_registry import build_chat_executors, get_chat_tools, get_executors, get_tools
@@ -275,6 +282,7 @@ def _save_shared_cache(data: dict[str, Any]) -> None:
         logger.warning(f"写入共享缓存文件失败: {exc}")
 
 OPERATION_CARD_STORE: dict[str, list[dict[str, Any]]] = {}
+CHAT_SESSION_MESSAGES: dict[str, list[dict[str, str]]] = {}
 
 
 def _append_llm_line(transcript_id: str, line: str) -> None:
@@ -336,15 +344,43 @@ def _allowed_followup_stmt(user: dict[str, Any]):
 
 
 def _is_affirmative(text: str) -> bool:
-    normalized = text.strip().lower()
-    words = ["是", "确认", "好的", "执行", "ok", "yes", "y"]
-    return any(word in normalized for word in words)
+    normalized = re.sub(r"[\s,，。.!！?？:：;；'\"“”‘’()\[\]（）【】、\-_\/]+", "", text.strip().lower())
+    if not normalized or len(normalized) > 12:
+        return False
+    phrases = {
+        "是",
+        "是的",
+        "好",
+        "好的",
+        "可以",
+        "行",
+        "确认",
+        "确认执行",
+        "执行",
+        "ok",
+        "okay",
+        "yes",
+    }
+    return normalized in phrases
 
 
 def _is_negative(text: str) -> bool:
-    normalized = text.strip().lower()
-    words = ["否", "取消", "算了", "no", "n"]
-    return any(word in normalized for word in words)
+    normalized = re.sub(r"[\s,，。.!！?？:：;；'\"“”‘’()\[\]（）【】、\-_\/]+", "", text.strip().lower())
+    if not normalized or len(normalized) > 12:
+        return False
+    phrases = {
+        "否",
+        "不是",
+        "取消",
+        "取消吧",
+        "先取消",
+        "算了",
+        "不执行",
+        "不执行了",
+        "先不执行",
+        "no",
+    }
+    return normalized in phrases
 
 
 def _cleanup_pending_operations(now: datetime) -> None:
@@ -358,6 +394,19 @@ def _cleanup_pending_operations(now: datetime) -> None:
             expired.append(session_id)
     for key in expired:
         PENDING_CHAT_ACTIONS.pop(key, None)
+
+
+def _get_chat_session_history(session_id: str) -> list[dict[str, str]]:
+    return list(CHAT_SESSION_MESSAGES.get(session_id, []))
+
+
+def _append_chat_session_message(session_id: str, role: str, text: str) -> None:
+    cleaned = str(text or "").strip()
+    if not session_id or role not in {"user", "assistant"} or not cleaned:
+        return
+    history = list(CHAT_SESSION_MESSAGES.get(session_id, []))
+    history.append({"role": role, "text": cleaned})
+    CHAT_SESSION_MESSAGES[session_id] = history[-10:]
 
 
 _CHAT_WRITE_PLACEHOLDERS = ("需要补充", "待补充", "待确认", "暂缺", "未知")
@@ -399,7 +448,7 @@ def _build_missing_field_prompt(tool_name: str, tool_input: dict[str, Any], form
         required_widgets = {
             "title": "场景标题",
             "solve_what_ques": "业务诉求/痛点分析",
-            "solve_what_ans": "核心指标/解决方案",
+            "solve_what_ans": "核心指标&解决方案",
         }
     else:
         return None
@@ -424,6 +473,44 @@ def _build_missing_field_prompt(tool_name: str, tool_input: dict[str, Any], form
     if target_form == "预期表":
         return f"这条预期还缺少这些关键信息：{joined}。请先补充，我再帮你生成待确认写入。"
     return f"这个场景还缺少这些关键信息：{joined}。请先补充，我再帮你生成待确认写入。"
+
+
+def _build_chat_user_message(
+    company_id: str,
+    msg: str,
+    history: list[dict[str, Any]] | None,
+    pending_action: dict[str, Any] | None = None,
+) -> str:
+    lines = [f"company_id={company_id}", "用户请求：", msg.strip()]
+    normalized_history: list[str] = []
+    for item in list(history or [])[-8:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        text = str(item.get("text") or item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not text:
+            continue
+        speaker = "用户" if role == "user" else "助手"
+        normalized_history.append(f"{speaker}: {text}")
+    if normalized_history:
+        lines.extend(["", "最近对话历史：", *normalized_history])
+    if isinstance(pending_action, dict) and pending_action:
+        pending_tool_name = str(pending_action.get("tool_name") or "").strip()
+        pending_tool_input = normalize_chat_tool_input(pending_action.get("tool_input", {}) or {})
+        pending_snapshot = {
+            "tool_name": pending_tool_name,
+            "target_form": str(pending_tool_input.get("target_form") or ""),
+            "related_yuqi_id": str(pending_tool_input.get("related_yuqi_id") or ""),
+            "fields": pending_tool_input.get("fields") or {},
+        }
+        lines.extend(
+            [
+                "",
+                "当前有一条待补全的写入操作，请优先在这条操作上补齐缺失信息，不要新建一条无关操作：",
+                json.dumps(pending_snapshot, ensure_ascii=False),
+            ]
+        )
+    return "\n".join(lines)
 
 
 def fetch_customers_for_user(db: Session, user: dict[str, Any]) -> list[dict[str, Any]]:
@@ -572,6 +659,22 @@ def _load_jiandaoyun_seed_mapping() -> dict[str, Any]:
         return {}
 
 
+def _merge_non_empty_mapping(base: Any, override: Any) -> Any:
+    if isinstance(base, dict):
+        result = dict(base)
+        if not isinstance(override, dict):
+            return result if override in (None, "", [], {}) else override
+        for key, value in override.items():
+            if key in result:
+                result[key] = _merge_non_empty_mapping(result[key], value)
+            elif value not in (None, "", [], {}):
+                result[key] = value
+        return result
+    if isinstance(base, list):
+        return list(override) if isinstance(override, list) and override else list(base)
+    return base if override in (None, "", [], {}) else override
+
+
 def seed_jiandaoyun_mapping_if_missing(cfg: SystemConfig, db: Session) -> None:
     field_mappings = dict(cfg.field_mappings or {})
     if field_mappings.get("jiandaoyun"):
@@ -588,7 +691,9 @@ def seed_jiandaoyun_mapping_if_missing(cfg: SystemConfig, db: Session) -> None:
 
 
 def get_jiandaoyun_runtime_config(cfg: SystemConfig) -> dict[str, Any]:
-    seed = dict((cfg.field_mappings or {}).get("jiandaoyun", {}) or {})
+    file_seed = _load_jiandaoyun_seed_mapping()
+    db_seed = dict((cfg.field_mappings or {}).get("jiandaoyun", {}) or {})
+    seed = _merge_non_empty_mapping(file_seed, db_seed)
     forms = dict(seed.get("forms") or {})
     main_form = dict(forms.get("客户主表") or {})
     mapping_entry_id = str(main_form.get("entry_id") or "").strip()
@@ -607,16 +712,67 @@ def get_jiandaoyun_runtime_config(cfg: SystemConfig) -> dict[str, Any]:
 _REFRESH_LOCK = asyncio.Lock()
 
 
-def _extract_csm_name(success_val: Any) -> str:
-    """从简道云成员(user)字段中提取显示名称用于CSM匹配。
+SERVICE_MANYI_FIELD_CANDIDATES = (
+    "satisfy_charger",
+    "服务侧满一",
+    "service_manyi",
+    "service_side_manyi",
+    "service_full_one",
+)
 
-    success 字段在简道云 API 返回中是 user 类型的对象：
-        {"name": "Gust-张小洋", "username": "Gust.Zhang", ...}
-    也可能为 None 或空。
-    """
-    if isinstance(success_val, dict):
-        return success_val.get("name", success_val.get("username", "")) or ""
-    return str(success_val or "")
+
+def _extract_user_names(value: Any) -> list[str]:
+    """Extract comparable names from Jiandaoyun user fields."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        names = [
+            str(value.get(key) or "").strip()
+            for key in ("name", "username", "nickname", "display_name")
+        ]
+        return [name for name in names if name]
+    if isinstance(value, list):
+        names: list[str] = []
+        for item in value:
+            names.extend(_extract_user_names(item))
+        return names
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _extract_csm_name(success_val: Any) -> str:
+    """从简道云成员(user)字段中提取显示名称用于CSM匹配。"""
+    names = _extract_user_names(success_val)
+    return names[0] if names else ""
+
+
+def _extract_customer_user_names(row: dict[str, Any], *field_names: str) -> list[str]:
+    names: list[str] = []
+    for field_name in field_names:
+        names.extend(_extract_user_names(row.get(field_name)))
+    return list(dict.fromkeys(names))
+
+
+def _customer_visible_to_user(customer: dict[str, Any], user_name: str) -> bool:
+    if not user_name:
+        return True
+    allowed_names = _extract_customer_user_names(customer, "csm", "service_manyi")
+    raw = customer.get("raw")
+    if isinstance(raw, dict):
+        allowed_names.extend(_extract_customer_user_names(raw, "success", *SERVICE_MANYI_FIELD_CANDIDATES))
+    return user_name in set(allowed_names)
+
+
+def _filter_customers_for_user_scope(customers: list[dict[str, Any]], user: dict[str, Any]) -> list[dict[str, Any]]:
+    if user.get("source") == "sso":
+        user_name = str(user.get("user_name") or "").strip()
+    elif user.get("source") == "user":
+        user_name = str(user.get("display_name") or "").strip()
+    else:
+        return customers
+    if not user_name:
+        return customers
+    return [customer for customer in customers if _customer_visible_to_user(customer, user_name)]
 
 
 GENJIN_TAG_META: dict[tuple[str, str, str], dict[str, str]] = {
@@ -792,15 +948,277 @@ RELATED_YUQI_OVERRIDE_FIELDS = {
     "related_yuqi_confidence",
 }
 
+EXPECTATION_STAKEHOLDER_OVERRIDE_FIELDS = {
+    "stakeholder_contacts",
+    "stakeholder_contact_names",
+    "stakeholder_contact_ids",
+    "stakeholder_contacts_touched",
+}
+
+EXPECTATION_TO_SCENE_FIELD_MAP = {
+    "预期简述": "场景标题",
+    "预期详情": "业务诉求/痛点分析",
+    "是否第一价值实现预期": "是否第一价值实现场景",
+    "推进想法": "核心指标&解决方案",
+}
+
+SCENE_TO_EXPECTATION_FIELD_MAP = {
+    "场景标题": "预期简述",
+    "是否第一价值实现场景": "是否第一价值实现预期",
+}
+
+
+def _operation_card_change_value(card: dict[str, Any], *field_or_widget_names: str) -> str:
+    wanted = {str(name or "").strip() for name in field_or_widget_names if str(name or "").strip()}
+    for item in card.get("change_items") or []:
+        if str(item.get("field_name") or "").strip() in wanted or str(item.get("widget_name") or "").strip() in wanted:
+            value = item.get("new_value")
+            return "" if value is None else str(value).strip()
+    return ""
+
+
+def _operation_card_mapped_item(field_name: str, value: Any, forms_cfg: dict[str, Any], target_form: str) -> dict[str, Any] | None:
+    mapped = (((forms_cfg.get(target_form) or {}).get("field_mapping") or {}).get(field_name) or {})
+    widget_name = str(mapped.get("widget") or "").strip()
+    if not widget_name:
+        return None
+    return {
+        "field_name": field_name,
+        "widget_name": widget_name,
+        "old_value": None,
+        "new_value": "" if value is None else str(value),
+    }
+
+
+def _derive_review_card_title(value: Any, *, max_len: int = 30) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for marker in ["\n", "。", "；", ";", "，", ","]:
+        if marker in text:
+            text = text.split(marker, 1)[0].strip()
+            break
+    text = text.strip("【】[]()（）:： ")
+    if len(text) <= max_len:
+        return text
+    return text[:max_len].rstrip()
+
+
+def _convert_operation_card_change_items(
+    card: dict[str, Any],
+    source_form: str,
+    target_form: str,
+    forms_cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Translate review-card fields when a human switches expectation/scenario."""
+    source_items = list(card.get("change_items") or [])
+    target_mapping = ((forms_cfg.get(target_form) or {}).get("field_mapping") or {})
+
+    def item_value(field_name: str, widget_name: str = "") -> str:
+        return _operation_card_change_value(card, field_name, widget_name)
+
+    converted: list[dict[str, Any]] = []
+    if source_form == "预期表" and target_form == "场景表":
+        converted_fields: set[str] = set()
+        for old_field, new_field in EXPECTATION_TO_SCENE_FIELD_MAP.items():
+            value = item_value(old_field)
+            if value:
+                mapped = _operation_card_mapped_item(new_field, value, forms_cfg, target_form)
+                if mapped:
+                    converted.append(mapped)
+                    converted_fields.add(new_field)
+        if "场景标题" not in converted_fields:
+            title = _derive_review_card_title(item_value("预期详情", "detail"))
+            if title:
+                mapped = _operation_card_mapped_item("场景标题", title, forms_cfg, target_form)
+                if mapped:
+                    converted.insert(0, mapped)
+        return converted
+
+    if source_form == "场景表" and target_form == "预期表":
+        title = item_value("场景标题", "title")
+        if title:
+            mapped = _operation_card_mapped_item("预期简述", title, forms_cfg, target_form)
+            if mapped:
+                converted.append(mapped)
+
+        detail_parts: list[str] = []
+        for label, field_name, widget_name in [
+            ("业务诉求/痛点分析", "业务诉求/痛点分析", "solve_what_ques"),
+            ("核心指标&解决方案", "核心指标&解决方案", "solve_what_ans"),
+            ("价值量化", "价值量化", "_widget_1773296816191"),
+            ("总结沉淀", "总结沉淀", "_widget_1773296816192"),
+            ("成果应用方式", "成果应用方式", "_widget_1737340360281"),
+        ]:
+            value = item_value(field_name, widget_name)
+            if value:
+                detail_parts.append(f"【{label}】{value}")
+        if detail_parts:
+            mapped = _operation_card_mapped_item("预期详情", "\n".join(detail_parts), forms_cfg, target_form)
+            if mapped:
+                converted.append(mapped)
+
+        first_value = item_value("是否第一价值实现场景", "_widget_1744337240628")
+        if first_value:
+            mapped = _operation_card_mapped_item("是否第一价值实现预期", first_value, forms_cfg, target_form)
+            if mapped:
+                converted.append(mapped)
+        return converted
+
+    normalized: list[dict[str, Any]] = []
+    for item in source_items:
+        field_name = str(item.get("field_name") or "").strip()
+        if field_name not in target_mapping:
+            continue
+        normalized_item = _operation_card_mapped_item(field_name, item.get("new_value"), forms_cfg, target_form)
+        if normalized_item:
+            normalized_item["old_value"] = item.get("old_value")
+            normalized.append(normalized_item)
+    return normalized
+
+
+def _apply_operation_card_change_items_override(
+    card: dict[str, Any],
+    raw_items: Any,
+    target_form: str,
+    forms_cfg: dict[str, Any],
+) -> None:
+    if not isinstance(raw_items, list):
+        return
+    target_mapping = (forms_cfg.get(target_form) or {}).get("field_mapping") or {}
+    normalized: list[dict[str, Any]] = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        field_name = str(raw.get("field_name") or "").strip()
+        if field_name not in target_mapping:
+            continue
+        item = _operation_card_mapped_item(field_name, raw.get("new_value"), forms_cfg, target_form)
+        if item:
+            item["old_value"] = raw.get("old_value")
+            normalized.append(item)
+    if normalized:
+        card["change_items"] = normalized
+
+
+def _refresh_operation_card_safety(card: dict[str, Any], forms_cfg: dict[str, Any]) -> None:
+    target_form = str(card.get("target_form") or "")
+    form_cfg = forms_cfg.get(target_form) or {}
+    if not form_cfg:
+        card["safety_status"] = "rejected"
+        card["safety_reason"] = f"form mapping missing: {target_form}"
+        return
+    safe = check_operation_cards([card], form_cfg)[0]
+    card.update(safe)
+
+
+def _join_operation_card_stakeholder_values(value: Any, *, name_key: str, fallback_key: str = "") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = str(item.get(name_key) or (item.get(fallback_key) if fallback_key else "") or "").strip()
+            else:
+                text = str(item or "").strip()
+            if text:
+                parts.append(text)
+        return "，".join(parts)
+    return str(value or "").strip()
+
+
+def _operation_card_stakeholder_values(card: dict[str, Any]) -> tuple[str, str, bool]:
+    names = _join_operation_card_stakeholder_values(card.get("stakeholder_contact_names"), name_key="cont_name")
+    ids = _join_operation_card_stakeholder_values(card.get("stakeholder_contact_ids"), name_key="cont_id")
+    contacts = card.get("stakeholder_contacts")
+    if not names:
+        names = _join_operation_card_stakeholder_values(contacts, name_key="cont_name", fallback_key="name")
+    if not ids:
+        ids = _join_operation_card_stakeholder_values(contacts, name_key="cont_id", fallback_key="id").replace("，", ",")
+    touched = bool(card.get("stakeholder_contacts_touched"))
+    return names, ids, touched
+
+
+def _apply_operation_card_field_updates(
+    card: dict[str, Any],
+    updates: dict[str, Any],
+    forms_cfg: dict[str, Any],
+) -> bool:
+    up = dict(updates or {})
+    if card.get("target_form") == "预期表":
+        stakeholder_names, stakeholder_ids, stakeholder_touched = _operation_card_stakeholder_values(card)
+        if stakeholder_names or stakeholder_touched:
+            up.setdefault("关联干系人", stakeholder_names)
+        if stakeholder_ids or stakeholder_touched:
+            up.setdefault("干系人id", stakeholder_ids)
+    if not up:
+        return False
+
+    change_items = card.get("change_items") or []
+    for item in change_items:
+        fn = item.get("field_name")
+        if fn in up:
+            item["new_value"] = up[fn]
+    form_cfg = forms_cfg.get(card.get("target_form", ""), {})
+    field_mapping = form_cfg.get("field_mapping") or {}
+    existing_fields = {it.get("field_name") for it in change_items}
+    fallback_field_mapping = {}
+    if card.get("target_form") == "预期表":
+        fallback_field_mapping = {
+            "关联干系人": {"widget": "cont_name_array"},
+            "干系人id": {"widget": "cont_id"},
+        }
+    for field_name, new_val in up.items():
+        if field_name in existing_fields:
+            continue
+        mapped = field_mapping.get(field_name) or fallback_field_mapping.get(field_name)
+        if mapped and isinstance(mapped, dict):
+            change_items.append({
+                "field_name": field_name,
+                "widget_name": str(mapped.get("widget", "")),
+                "old_value": None,
+                "new_value": new_val,
+            })
+    if change_items:
+        card["change_items"] = change_items
+        return True
+    return False
+
 
 def _apply_operation_card_override(card: dict[str, Any], override: dict[str, Any], forms_cfg: dict[str, Any]) -> None:
     if not override:
         return
+    old_target_form = str(card.get("target_form") or "").strip()
     target_form = str(override.get("target_form") or "").strip()
-    if target_form:
+    if target_form and target_form != old_target_form:
+        card["target_form"] = target_form
+        card["converted_from_form"] = old_target_form
+        new_fc = forms_cfg.get(target_form, {})
+        card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
+        card["change_items"] = _convert_operation_card_change_items(
+            card=card,
+            source_form=old_target_form,
+            target_form=target_form,
+            forms_cfg=forms_cfg,
+        )
+        card["data_id"] = None
+        card["operation_type"] = "create"
+        card["operation_type_calibrated"] = True
+    elif target_form:
         card["target_form"] = target_form
         new_fc = forms_cfg.get(target_form, {})
         card["lookup_widget"] = str((new_fc.get("lookup_customer") or {}).get("widget") or "")
+
+    if "change_items" in override:
+        _apply_operation_card_change_items_override(
+            card=card,
+            raw_items=override.get("change_items"),
+            target_form=str(card.get("target_form") or ""),
+            forms_cfg=forms_cfg,
+        )
 
     for key in RELATED_YUQI_OVERRIDE_FIELDS:
         if key not in override:
@@ -810,6 +1228,15 @@ def _apply_operation_card_override(card: dict[str, Any], override: dict[str, Any
 
     if card.get("target_form") != "场景表":
         for key in RELATED_YUQI_OVERRIDE_FIELDS:
+            card.pop(key, None)
+
+    for key in EXPECTATION_STAKEHOLDER_OVERRIDE_FIELDS:
+        if key not in override:
+            continue
+        card[key] = override.get(key)
+
+    if card.get("target_form") != "预期表":
+        for key in EXPECTATION_STAKEHOLDER_OVERRIDE_FIELDS:
             card.pop(key, None)
 
 
@@ -827,7 +1254,17 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
         return CUSTOMER_INDEX_CACHE
 
     display_fields = list(main_form.get("display_fields", []) or [])
-    for required_field in ["comname_01", "com_name", "com_type", "revenue_level", "if_access", "follow_form", "success", "com_id"]:
+    for required_field in [
+        "comname_01",
+        "com_name",
+        "com_type",
+        "revenue_level",
+        "if_access",
+        "follow_form",
+        "success",
+        *SERVICE_MANYI_FIELD_CANDIDATES,
+        "com_id",
+    ]:
         if required_field not in display_fields:
             display_fields.append(required_field)
     
@@ -916,6 +1353,7 @@ async def refresh_customer_index_cache(runtime_cfg: dict[str, Any]) -> dict[str,
             "if_access": row.get("if_access"),
             "follow_form": row.get("follow_form"),
             "csm": _extract_csm_name(row.get("success")),
+            "service_manyi": _extract_customer_user_names(row, *SERVICE_MANYI_FIELD_CANDIDATES),
             "com_id": row.get("com_id", ""),
             "raw": row,
         }
@@ -1031,6 +1469,68 @@ def _reload_cards_on_startup() -> None:
         logger.exception("startup: 恢复操作卡片失败")
     finally:
         db.close()
+
+
+def _restore_operation_cards_from_db(transcript_id: str, db: Session) -> list[dict[str, Any]]:
+    """当运行态内存丢失时，从 DB 中恢复指定 transcript/followup 的卡片。"""
+    transcript_id = str(transcript_id or "").strip()
+    if not transcript_id:
+        return []
+    record = db.get(Transcript, transcript_id) or db.get(FollowupRecord, transcript_id)
+    if not record or not record.agent_b_result:
+        return []
+    cards = (record.agent_b_result.get("result", {}) or {}).get("operation_cards", []) or []
+    restored = [dict(card) for card in cards if isinstance(card, dict)]
+    if restored:
+        OPERATION_CARD_STORE[transcript_id] = restored
+    return restored
+
+
+def _get_allowed_operation_record(
+    transcript_id: str,
+    db: Session,
+    user: dict[str, Any],
+) -> Transcript | FollowupRecord | None:
+    transcript = db.scalar(_allowed_transcript_stmt(user).where(Transcript.id == transcript_id))
+    if transcript:
+        return transcript
+    return db.scalar(_allowed_followup_stmt(user).where(FollowupRecord.id == transcript_id))
+
+
+def _calibrate_operation_card_type(card: dict[str, Any], operation_type: str) -> tuple[str, str]:
+    requested = str(operation_type or "").strip().lower()
+    if requested not in {"create", "update", "skip"}:
+        raise ValueError("operation_type 仅支持 create、update、skip")
+    if requested == "update" and not str(card.get("data_id") or "").strip():
+        raise ValueError("该卡片没有匹配记录，不能校准为更新")
+
+    current = str(card.get("operation_type") or "create").strip().lower()
+    original = str(card.get("original_operation_type") or current).strip().lower()
+    card["original_operation_type"] = original
+    card["operation_type"] = requested
+    card["operation_type_calibrated"] = requested != original
+    return current, requested
+
+
+def _persist_operation_cards(record: Transcript | FollowupRecord, cards: list[dict[str, Any]]) -> None:
+    agent_b_result = dict(record.agent_b_result or {})
+    result = dict(agent_b_result.get("result", {}) or {})
+    result["operation_cards"] = cards
+    record.agent_b_result = {**agent_b_result, "result": result}
+
+
+def _resolve_requested_operation_cards(cards: list[dict[str, Any]], requested_ids: set[str]) -> list[dict[str, Any]]:
+    """优先取已审批卡片；若运行态缺失审批态，则对本次明确提交的卡片做兜底批准。"""
+    if not requested_ids:
+        return []
+    requested_cards = [card for card in cards if str(card.get("card_id") or "") in requested_ids]
+    approved = [card for card in requested_cards if card.get("review_status") == "approved"]
+    if approved or not requested_cards:
+        return approved
+    for card in requested_cards:
+        card["review_status"] = "approved"
+    logger.warning("execute fallback: auto-approved %d requested cards because persisted review status was missing", len(requested_cards))
+    return requested_cards
 
 
 def _reset_stale_transcripts() -> None:
@@ -1423,6 +1923,7 @@ def get_llm_config(user: dict[str, Any] = Depends(require_superadmin), db: Sessi
         "agent_a_model": cfg.agent_a_model,
         "agent_b_model": cfg.agent_b_model,
         "nl_chat_model": cfg.nl_chat_model,
+        "power_map_llm_model": getattr(cfg, "power_map_llm_model", "") or "",
         "temperature": cfg.temperature,
         "max_tokens": cfg.max_tokens,
         "agent_a_prompt": cfg.agent_a_prompt,
@@ -1437,11 +1938,11 @@ def get_llm_config(user: dict[str, Any] = Depends(require_superadmin), db: Sessi
 @app.put("/api/v1/admin/llm-config")
 def save_llm_config(payload: LlmConfigPayload, user: dict[str, Any] = Depends(require_superadmin), db: Session = Depends(get_db)):
     cfg = ensure_system_config(db)
-    before = {k: getattr(cfg, k) for k in ["llm_provider", "llm_base_url", "agent_a_model", "agent_b_model", "nl_chat_model", "temperature", "max_tokens", "agent_a_prompt", "agent_b_prompt", "nl_query_prompt", "nl_modify_prompt"]}
+    before = {k: getattr(cfg, k) for k in ["llm_provider", "llm_base_url", "agent_a_model", "agent_b_model", "nl_chat_model", "power_map_llm_model", "temperature", "max_tokens", "agent_a_prompt", "agent_b_prompt", "nl_query_prompt", "nl_modify_prompt"]}
     if payload.api_key:
         cfg.llm_api_key_encrypted = encrypt_secret(payload.api_key)
     mapping = {"provider": "llm_provider", "base_url": "llm_base_url"}
-    for key in ["provider", "base_url", "agent_a_model", "agent_b_model", "nl_chat_model", "temperature", "max_tokens", "agent_a_prompt", "agent_b_prompt", "nl_query_prompt", "nl_modify_prompt"]:
+    for key in ["provider", "base_url", "agent_a_model", "agent_b_model", "nl_chat_model", "power_map_llm_model", "temperature", "max_tokens", "agent_a_prompt", "agent_b_prompt", "nl_query_prompt", "nl_modify_prompt"]:
         value = getattr(payload, key)
         if value is None:
             continue
@@ -2049,6 +2550,9 @@ async def customers_list(
                 display_fields.append("comname_01")
             if "com_name" not in display_fields:
                 display_fields.append("com_name")
+            for required_field in ["success", *SERVICE_MANYI_FIELD_CANDIDATES]:
+                if required_field not in display_fields:
+                    display_fields.append(required_field)
             client = JiandaoyunClient(api_key=runtime_cfg.get("api_key", ""))
             one_page = await client.query_data_list(
                 app_id=runtime_cfg.get("app_id", ""),
@@ -2063,6 +2567,7 @@ async def customers_list(
                     "comname_01": row.get("comname_01"),
                     "com_name": row.get("com_name"),
                     "csm": _extract_csm_name(row.get("success")),
+                    "service_manyi": _extract_customer_user_names(row, *SERVICE_MANYI_FIELD_CANDIDATES),
                     "com_id": row.get("com_id", ""),
                     "raw": row,
                 }
@@ -2085,6 +2590,7 @@ async def customers_list(
                     "comname_01": item.get("company_name"),
                     "com_name": item.get("company_name"),
                     "csm": "",
+                    "service_manyi": [],
                     "com_id": "",
                     "raw": item,
                 }
@@ -2094,15 +2600,8 @@ async def customers_list(
             if warning is None:
                 warning = "简道云客户索引拉取失败，已回退本地转写客户列表"
 
-    # 多租户：SSO / user 用户只显示自己负责的客户
-    if user.get("source") == "sso":
-        user_name = user.get("user_name", "")
-        if user_name:
-            cached_items = [c for c in cached_items if c.get("csm") == user_name]
-    elif user.get("source") == "user":
-        display_name = user.get("display_name", "")
-        if display_name:
-            cached_items = [c for c in cached_items if c.get("csm") == display_name]
+    # 多租户：SSO / user 用户可见责任客户成功或服务侧满一命中的客户
+    cached_items = _filter_customers_for_user_scope(cached_items, user)
 
     keyword_norm = keyword.strip().lower()
     if keyword_norm:
@@ -2159,15 +2658,7 @@ async def customers_list(
 async def company_search(query: CompanySearchQuery = Depends(), db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     keyword = query.q.strip().lower()
     customers = CUSTOMER_INDEX_CACHE.get("items", []) or fetch_customers_for_user(db, user)
-    # 多租户过滤
-    if user.get("source") == "sso":
-        user_name = user.get("user_name", "")
-        if user_name:
-            customers = [c for c in customers if c.get("csm") == user_name]
-    elif user.get("source") == "user":
-        display_name = user.get("display_name", "")
-        if display_name:
-            customers = [c for c in customers if c.get("csm") == display_name]
+    customers = _filter_customers_for_user_scope(customers, user)
     if keyword:
         customers = [item for item in customers if keyword in item["company_name"].lower()]
     return {"items": customers[:50], "status": "cache" if CUSTOMER_INDEX_CACHE.get("items") else "mock"}
@@ -2185,15 +2676,7 @@ async def search_customers(
     keyword_norm = keyword.strip().lower()
     cached_items = CUSTOMER_INDEX_CACHE.get("items", []) or []
 
-    # 多租户过滤
-    if user.get("source") == "sso":
-        user_name = user.get("user_name", "")
-        if user_name:
-            cached_items = [c for c in cached_items if c.get("csm") == user_name]
-    elif user.get("source") == "user":
-        display_name = user.get("display_name", "")
-        if display_name:
-            cached_items = [c for c in cached_items if c.get("csm") == display_name]
+    cached_items = _filter_customers_for_user_scope(cached_items, user)
 
     if not cached_items:
         # 缓存为空时回退到 customers_list 的逻辑刷新一次
@@ -2738,6 +3221,8 @@ def operations_add(payload: dict[str, Any], db: Session = Depends(get_db), user:
 @app.post("/api/v1/operations/review")
 def operations_review(payload: ReviewAction, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     cards = OPERATION_CARD_STORE.get(payload.transcript_id, [])
+    if not cards:
+        cards = _restore_operation_cards_from_db(payload.transcript_id, db)
     updated = False
     for card in cards:
         if card.get("card_id") == payload.card_id:
@@ -2748,7 +3233,7 @@ def operations_review(payload: ReviewAction, db: Session = Depends(get_db), user
             break
     # 同步写入 DB，防止重启丢失审批状态
     if updated:
-        t = db.get(Transcript, payload.transcript_id)
+        t = db.get(Transcript, payload.transcript_id) or db.get(FollowupRecord, payload.transcript_id)
         if t and t.agent_b_result:
             # 深拷贝避免引用问题
             result = dict(t.agent_b_result.get("result", {}) or {})
@@ -2767,13 +3252,75 @@ def operations_review(payload: ReviewAction, db: Session = Depends(get_db), user
     return {"success": updated}
 
 
+@app.patch("/api/v1/operations/{transcript_id}/cards/{card_id}/operation-type")
+def calibrate_operation_type(
+    transcript_id: str,
+    card_id: str,
+    payload: OperationTypeCalibrationRequest,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    record = _get_allowed_operation_record(transcript_id, db, user)
+    if not record:
+        raise HTTPException(status_code=404, detail="转写或跟进记录不存在")
+
+    cards = OPERATION_CARD_STORE.get(transcript_id, [])
+    if not cards:
+        cards = _restore_operation_cards_from_db(transcript_id, db)
+    card = next((item for item in cards if str(item.get("card_id") or "") == card_id), None)
+    if not card:
+        raise HTTPException(status_code=404, detail="操作卡片不存在")
+
+    try:
+        previous_type, calibrated_type = _calibrate_operation_card_type(card, payload.operation_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    OPERATION_CARD_STORE[transcript_id] = cards
+    _persist_operation_cards(record, cards)
+    db.commit()
+    emit_event(
+        db,
+        "card.operation_type_calibrated",
+        {
+            "user_name": user.get("username", "demo"),
+            "user_id": user.get("user_id") or user.get("username", "demo"),
+            "source": user.get("source", "superadmin"),
+        },
+        {
+            "transcript_id": transcript_id,
+            "company_id_hash": hash_company_id(record.company_id or transcript_id),
+            "session_id": str(uuid4()),
+        },
+        {
+            "card_id": card_id,
+            "previous_operation_type": previous_type,
+            "operation_type": calibrated_type,
+            "original_operation_type": card.get("original_operation_type"),
+            "operation_type_calibrated": bool(card.get("operation_type_calibrated")),
+        },
+        op_type="operation_type",
+        action="calibrate",
+    )
+    return {
+        "success": True,
+        "card_id": card_id,
+        "operation_type": calibrated_type,
+        "original_operation_type": card.get("original_operation_type"),
+        "operation_type_calibrated": bool(card.get("operation_type_calibrated")),
+    }
+
+
 @app.post("/api/v1/operations/execute")
 async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     # New flow: execute approved cards from in-memory review store.
     if "card_ids" in payload:
         req = OperationExecuteRequest.model_validate(payload)
+        requested_ids = {str(card_id) for card_id in req.card_ids if str(card_id).strip()}
         cards = OPERATION_CARD_STORE.get(req.transcript_id, [])
-        approved = [c for c in cards if c.get("review_status") == "approved" and c.get("card_id") in set(req.card_ids)]
+        if not cards:
+            cards = _restore_operation_cards_from_db(req.transcript_id, db)
+        approved = _resolve_requested_operation_cards(cards, requested_ids)
         runtime_cfg = get_jiandaoyun_runtime_config(ensure_system_config(db))
         forms_cfg = (((runtime_cfg.get("mapping") or {}).get("forms")) or {})
         api_key = runtime_cfg.get("api_key") or ""
@@ -2791,31 +3338,8 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
         for card in approved:
             cid = card.get("card_id")
             _apply_operation_card_override(card, req.card_overrides.get(cid, {}), forms_cfg)
-            # field_updates
-            up = req.field_updates.get(cid, {})
-            if up:
-                change_items = card.get("change_items") or []
-                for item in change_items:
-                    fn = item.get("field_name")
-                    if fn in up:
-                        item["new_value"] = up[fn]
-                # 对 change_items 中不存在的字段，从 field_mapping 查 widget 后追加
-                form_cfg = forms_cfg.get(card.get("target_form", ""), {})
-                field_mapping = form_cfg.get("field_mapping") or {}
-                existing_fields = {it.get("field_name") for it in change_items}
-                for field_name, new_val in up.items():
-                    if field_name in existing_fields:
-                        continue
-                    mapped = field_mapping.get(field_name)
-                    if mapped and isinstance(mapped, dict):
-                        change_items.append({
-                            "field_name": field_name,
-                            "widget_name": str(mapped.get("widget", "")),
-                            "old_value": None,
-                            "new_value": new_val,
-                        })
-                if change_items:
-                    card["change_items"] = change_items
+            _apply_operation_card_field_updates(card, req.field_updates.get(cid, {}), forms_cfg)
+            _refresh_operation_card_safety(card, forms_cfg)
 
         # ── 全部覆写落盘到 OPERATION_CARD_STORE + DB ──
         for card in cards:
@@ -2823,6 +3347,7 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
                 _apply_customer_write_context(card, req.company_id, customer_write_context)
             cid = card.get("card_id")
             _apply_operation_card_override(card, req.card_overrides.get(cid, {}), forms_cfg)
+            _refresh_operation_card_safety(card, forms_cfg)
         t = db.get(Transcript, req.transcript_id) or db.get(FollowupRecord, req.transcript_id)
         if t and t.agent_b_result:
             result = dict(t.agent_b_result.get("result", {}) or {})
@@ -2874,8 +3399,10 @@ async def execute_operations(payload: dict[str, Any], db: Session = Depends(get_
 
 @app.get("/api/v1/operations/{transcript_id}/status")
 def operations_status(transcript_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
-    _ = (db, user)
+    _ = user
     cards = OPERATION_CARD_STORE.get(transcript_id, [])
+    if not cards:
+        cards = _restore_operation_cards_from_db(transcript_id, db)
     return {"transcript_id": transcript_id, "cards": cards}
 
 
@@ -2889,6 +3416,16 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
     now = now_utc()
     _cleanup_pending_operations(now)
 
+    def _reply(reply_text: str, *, needs_confirmation: bool = False, **extra: Any) -> dict[str, Any]:
+        _append_chat_session_message(session_id, "user", msg)
+        _append_chat_session_message(session_id, "assistant", reply_text)
+        return {
+            "reply": reply_text,
+            "session_id": session_id,
+            "needs_confirmation": needs_confirmation,
+            **extra,
+        }
+
     if payload_data.get("confirm"):
         pending = PENDING_CHAT_ACTIONS.pop(session_id, None)
         if not pending:
@@ -2900,7 +3437,8 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         if not api_key or not app_id:
             return {"reply": "写入失败：请先配置简道云 API Key", "session_id": session_id, "needs_confirmation": False}
         tool_name = str(pending.get("tool_name") or "")
-        tool_input = pending.get("tool_input", {}) or {}
+        tool_input = normalize_chat_tool_input(pending.get("tool_input", {}) or {})
+        pending["tool_input"] = tool_input
         target_form = str(tool_input.get("target_form") or "")
         form_config = mapping_forms.get(target_form, {}) or {}
         missing_prompt = _build_missing_field_prompt(tool_name, tool_input, form_config)
@@ -2917,17 +3455,53 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
                 tool_input["customer_com_id"] = customer_write_context["customer_com_id"]
             if customer_write_context.get("customer_com_name"):
                 tool_input["customer_com_name"] = customer_write_context["customer_com_name"]
+        target_ids = list(tool_input.get("data_ids") or [])
+        if tool_input.get("data_id") and not target_ids:
+            target_ids = [str(tool_input.get("data_id") or "")]
         try:
             if tool_name == "create_customer_record":
                 result = await writer.create_record(entry_id=entry_id, data=build_jiandaoyun_payload(tool_input, form_config))
             elif tool_name == "update_customer_record":
-                result = await writer.update_record(
-                    entry_id=entry_id,
-                    data_id=str(tool_input.get("data_id") or ""),
-                    data=build_jiandaoyun_payload(tool_input, form_config),
-                )
+                payload = build_jiandaoyun_payload(tool_input, form_config)
+                if len(target_ids) > 1:
+                    results: list[dict[str, Any]] = []
+                    for data_id in target_ids:
+                        item_result = await writer.update_record(
+                            entry_id=entry_id,
+                            data_id=str(data_id or ""),
+                            data=payload,
+                        )
+                        results.append(item_result)
+                    failed = [item for item in results if not item.get("success")]
+                    result = {
+                        "success": not failed,
+                        "results": results,
+                        "data": {"_id": target_ids[0]} if target_ids else {},
+                        "detail": failed[0].get("detail") if failed else "",
+                        "error_code": failed[0].get("error_code") if failed else "",
+                    }
+                else:
+                    result = await writer.update_record(
+                        entry_id=entry_id,
+                        data_id=str(tool_input.get("data_id") or ""),
+                        data=payload,
+                    )
             elif tool_name == "delete_customer_record":
-                result = await writer.delete_record(entry_id=entry_id, data_id=str(tool_input.get("data_id") or ""))
+                if len(target_ids) > 1:
+                    results = []
+                    for data_id in target_ids:
+                        item_result = await writer.delete_record(entry_id=entry_id, data_id=str(data_id or ""))
+                        results.append(item_result)
+                    failed = [item for item in results if not item.get("success")]
+                    result = {
+                        "success": not failed,
+                        "results": results,
+                        "data": {"_id": target_ids[0]} if target_ids else {},
+                        "detail": failed[0].get("detail") if failed else "",
+                        "error_code": failed[0].get("error_code") if failed else "",
+                    }
+                else:
+                    result = await writer.delete_record(entry_id=entry_id, data_id=str(tool_input.get("data_id") or ""))
             else:
                 return {"reply": "未识别的待执行操作", "session_id": session_id, "needs_confirmation": False}
         except ChatPayloadValidationError as exc:
@@ -2979,37 +3553,43 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
             operator_id=str(user.get("user_id") or _user_name(user)),
         )
         op_label = OP_LABELS.get(tool_name, "写入")
+        result_count = len(target_ids) if target_ids else 1
+        count_suffix = f"{result_count}条记录" if result_count > 1 else f"到{target_form}"
         return {
-            "reply": f"已成功{op_label}到{target_form}",
+            "reply": f"已成功{op_label}{count_suffix}",
             "execute_result": {"status": "success", "jiandaoyun_id": (result.get("data") or {}).get("_id")},
             "session_id": session_id,
             "needs_confirmation": False,
             "refresh_profile": True,
         }
 
-    if _is_negative(msg):
+    existing_pending_action = PENDING_CHAT_ACTIONS.get(session_id)
+    has_pending_action = existing_pending_action is not None
+    if has_pending_action and _is_negative(msg):
         PENDING_CHAT_ACTIONS.pop(session_id, None)
-        return {"reply": "已取消当前待确认操作。", "session_id": session_id, "needs_confirmation": False}
+        return _reply("已取消当前待确认操作。", needs_confirmation=False)
+    if not has_pending_action and _is_negative(msg):
+        return _reply("当前没有待确认操作。", needs_confirmation=False)
 
     if not company_id:
-        return {"reply": "请先选择客户", "session_id": session_id, "needs_confirmation": False}
+        return _reply("请先选择客户", needs_confirmation=False)
     llm_cfg = _get_llm_runtime_config(cfg)
     provider = str(llm_cfg.get("provider") or "").strip().lower()
     if provider not in {"anthropic", "claude", "anthropic_compatible", "dashscope", "openai_compatible"}:
-        return {"reply": f"当前 provider={provider} 不支持 Chat Agent ToolCall", "session_id": session_id, "needs_confirmation": False}
+        return _reply(f"当前 provider={provider} 不支持 Chat Agent ToolCall", needs_confirmation=False)
     if not llm_cfg.get("api_key"):
-        return {"reply": "请先在配置页填写 LLM API Key", "session_id": session_id, "needs_confirmation": False}
+        return _reply("请先在配置页填写 LLM API Key", needs_confirmation=False)
     if provider in {"dashscope", "openai_compatible"} and not llm_cfg.get("base_url"):
-        return {"reply": "OpenAI-compatible 模式缺少 Base URL", "session_id": session_id, "needs_confirmation": False}
+        return _reply("OpenAI-compatible 模式缺少 Base URL", needs_confirmation=False)
     if provider in {"anthropic", "claude", "anthropic_compatible"} and AsyncAnthropic is None:
-        return {"reply": "当前环境不支持 Chat Agent ToolCall（缺少 anthropic SDK）", "session_id": session_id, "needs_confirmation": False}
+        return _reply("当前环境不支持 Chat Agent ToolCall（缺少 anthropic SDK）", needs_confirmation=False)
 
     runtime_cfg = get_jiandaoyun_runtime_config(cfg)
     forms_cfg = ((runtime_cfg.get("mapping") or {}).get("forms") or {})
     try:
         llm_client = _build_agent_llm_client(llm_cfg)
     except Exception as exc:
-        return {"reply": f"初始化 LLM 客户端失败：{exc}", "session_id": session_id, "needs_confirmation": False}
+        return _reply(f"初始化 LLM 客户端失败：{exc}", needs_confirmation=False)
     runner = AgentRunner(
         llm_client=llm_client,
         phase=AgentPhase.COMPARISON,
@@ -3024,9 +3604,17 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
         write_form_configs=forms_cfg,
         write_preview_builder=build_preview_text,
     )
-    result = await runner.run(session_id=session_id, user_message=f"company_id={company_id}\n用户请求：{msg}")
+    result = await runner.run(
+        session_id=session_id,
+        user_message=_build_chat_user_message(
+            company_id,
+            msg,
+            _get_chat_session_history(session_id),
+            existing_pending_action,
+        ),
+    )
     if result.status == "max_iterations":
-        return {"reply": "无法完成操作，请检查指令", "session_id": session_id, "needs_confirmation": False}
+        return _reply("无法完成操作，请检查指令", needs_confirmation=False)
     if result.status != "success":
         # LLM auth/runtime failure fallback: keep chat confirm workflow usable.
         err = (result.message or "").lower()
@@ -3058,43 +3646,33 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db), user: dict[s
                     "validated": False,
                     "created_at": now,
                 }
+                pending["tool_input"] = normalize_chat_tool_input(pending["tool_input"])
                 PENDING_CHAT_ACTIONS[session_id] = pending
                 preview = build_preview_text(pending["tool_name"], pending["tool_input"])
-                return {
-                    "reply": f"LLM 鉴权失败，已切换本地兜底预览。\n{preview}\n请点击“确认执行”继续。",
-                    "session_id": session_id,
-                    "needs_confirmation": True,
-                    "preview_data": pending["tool_input"],
-                }
-        return {"reply": result.message or f"处理失败：{result.status}", "session_id": session_id, "needs_confirmation": False}
+                return _reply(
+                    f"LLM 鉴权失败，已切换本地兜底预览。\n{preview}\n请点击“确认执行”继续。",
+                    needs_confirmation=True,
+                    preview_data=pending["tool_input"],
+                )
+        return _reply(result.message or f"处理失败：{result.status}", needs_confirmation=False)
     if runner.pending_write:
         pending = dict(runner.pending_write)
         pending_tool_name = str(pending.get("tool_name") or "")
-        pending_tool_input = pending.get("tool_input", {}) or {}
+        pending_tool_input = normalize_chat_tool_input(pending.get("tool_input", {}) or {})
+        pending["tool_input"] = pending_tool_input
         pending_target_form = str(pending_tool_input.get("target_form") or "")
         pending_form_config = forms_cfg.get(pending_target_form, {}) or {}
         missing_prompt = _build_missing_field_prompt(pending_tool_name, pending_tool_input, pending_form_config)
         if missing_prompt:
-            return {
-                "reply": missing_prompt,
-                "needs_confirmation": False,
-                "session_id": session_id,
-            }
+            pending["created_at"] = now
+            PENDING_CHAT_ACTIONS[session_id] = pending
+            return _reply(missing_prompt, needs_confirmation=False, preview_data=pending.get("tool_input"))
         pending["created_at"] = now
         PENDING_CHAT_ACTIONS[session_id] = pending
         preview = build_preview_text(pending["tool_name"], pending["tool_input"])
-        reply = result.final_text or f"{preview}\n请点击“确认执行”继续。"
-        return {
-            "reply": reply,
-            "needs_confirmation": True,
-            "preview_data": pending.get("tool_input"),
-            "session_id": session_id,
-        }
-    return {
-        "reply": result.final_text or "已完成查询。",
-        "needs_confirmation": False,
-        "session_id": session_id,
-    }
+        reply = preview
+        return _reply(reply, needs_confirmation=True, preview_data=pending.get("tool_input"))
+    return _reply(result.final_text or "已完成查询。", needs_confirmation=False)
 
 
 # ── 权利地图 API ──────────────────────────────────────
@@ -3110,7 +3688,7 @@ async def power_map_get(company_id: str, version: str | None = None, db: Session
 
 
 @app.get("/api/v1/power-map/{company_id}/bi-com-id")
-async def power_map_bi_com_id(company_id: str, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
+async def power_map_bi_com_id(company_id: str, request: Request, db: Session = Depends(get_db), user: dict[str, Any] = Depends(require_auth)):
     """返回 BI 系统的 com_id，前端用于构造 iframe URL"""
     cfg = db.get(SystemConfig, 1)
     if not cfg:
@@ -3136,15 +3714,12 @@ async def power_map_bi_com_id(company_id: str, db: Session = Depends(get_db), us
         pass
 
     api_cfg = _get_power_map_config(cfg)
-    # powerMap_v3.13.html is served from /WebReport/power_map/, not /WebReport/decision/
-    # Extract origin from base_url to construct the correct path
-    from urllib.parse import urlparse
-    origin = f"{urlparse(api_cfg['base_url']).scheme}://{urlparse(api_cfg['base_url']).netloc}"
+    iframe_token = create_jwt({k: v for k, v in user.items() if k != "exp"})
     return {
         "company_id": company_id,
         "bi_com_id": prj_id,
         "bi_base_url": api_cfg["base_url"],
-        "bi_iframe_url": f"{origin}/WebReport/power_map/powerMap_v3.13.html?com_id={prj_id}",
+        "bi_iframe_url": f"{_POWER_MAP_LIVE_PROXY_PREFIX}/WebReport/power_map/powerMap_v3.13.html?com_id={prj_id}&token={iframe_token}",
     }
 
 
@@ -3235,10 +3810,7 @@ async def power_map_chat_v2(
     db: Session = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user_for_sse),
 ):
-    """SSE streaming chat v2: vision LLM tool loop against the local sandbox renderer."""
-    # Reject resumed sessions — every chat starts fresh
-    if payload.session_id:
-        raise HTTPException(status_code=400, detail="session_id is no longer accepted; every chat starts a new session")
+    """SSE streaming chat v2: plan-preview first, execution after confirm-plan."""
 
     cfg = db.get(SystemConfig, 1)
     if not cfg:
@@ -3255,14 +3827,15 @@ async def power_map_chat_v2(
 
     async def event_generator():
         try:
-            async for event in chat_power_map_v2(
+            async for event in plan_power_map_v2(
                 db=db,
                 company_id=company_id,
                 message=payload.message,
                 current_user=user,
                 version=payload.version,
-                bi_credentials=bi_credentials,
-                # session_id removed — every chat starts fresh
+                session_id=payload.session_id or "",
+                plan_id=payload.plan_id or "",
+                images=payload.images or [],
             ):
                 yield f"event: {event.type}\ndata: {json.dumps(event.data, ensure_ascii=False)}\n\n"
         except Exception as exc:
@@ -3274,6 +3847,16 @@ async def power_map_chat_v2(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/v1/power-map/{company_id}/chat_v2/confirm-plan")
+async def power_map_chat_v2_confirm_plan(
+    company_id: str,
+    payload: PowerMapConfirmPlanPayload,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(require_auth),
+):
+    return await confirm_power_map_plan(db, company_id, payload.plan_id, current_user=user)
 
 
 @app.get("/api/v1/power-map/debug/dump_ctx")
@@ -3342,6 +3925,14 @@ _SANDBOX_REL_ASSET_RE = re.compile(
     re.IGNORECASE,
 )
 _BI_HTML_BASE = f"{_BI_HOST}/WebReport/power_map/"
+_POWER_MAP_LIVE_PROXY_PREFIX = "/api/power_map/live"
+_LIVE_PROXY_HTML_PATH = "power_map/powerMap_v3.13.html"
+_LIVE_PROXY_DEFAULT_VERSION_RE = re.compile(
+    r"let defaultVersion=null;.*?if\(version_data && version_data\[\"ver_name\"\]===\"【客户成功】数据\"\)\{\s*changeOpp\(version_data\.value,self\);\s*\}",
+    re.S,
+)
+_LIVE_PROXY_CFG_CACHE_TTL = 60.0
+_live_proxy_cfg_cache: dict[str, Any] = {"cfg": None, "loaded_at": 0.0}
 _SANDBOX_GETINFO_OLD = (
     "success: function(result){\n"
     "                    var obj = eval('(' + result + ')');\n"
@@ -3352,6 +3943,234 @@ _SANDBOX_GETINFO_NEW = (
     "                    var obj = window.__GRAPH_DATA__ || eval('(' + result + ')');\n"
     "                    switchVersion(ver_type,obj,self);"
 )
+
+
+def _power_map_proxy_headers(upstream: httpx.Response) -> dict[str, str]:
+    allowed = {"cache-control", "content-disposition", "etag", "last-modified"}
+    return {
+        key: value
+        for key, value in upstream.headers.items()
+        if key.lower() in allowed
+    }
+
+
+def _get_cached_power_map_system_config() -> SystemConfig:
+    now = time.time()
+    cached = _live_proxy_cfg_cache.get("cfg")
+    loaded_at = float(_live_proxy_cfg_cache.get("loaded_at") or 0.0)
+    if cached is not None and (now - loaded_at) < _LIVE_PROXY_CFG_CACHE_TTL:
+        return cached
+
+    with Session(engine) as db:
+        cfg = db.get(SystemConfig, 1)
+        if not cfg:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+        db.expunge(cfg)
+    _live_proxy_cfg_cache["cfg"] = cfg
+    _live_proxy_cfg_cache["loaded_at"] = now
+    return cfg
+
+
+def _power_map_proxy_query_params(request: Request) -> list[tuple[str, str]]:
+    return [(key, value) for key, value in request.query_params.multi_items() if key != "token"]
+
+
+def _get_current_user_for_live_proxy(request: Request) -> dict[str, Any]:
+    token = request.query_params.get("token") or request.cookies.get("power_map_live_token") or ""
+    if not token:
+        header = request.headers.get("authorization") or request.headers.get("Authorization")
+        if header and header.lower().startswith("bearer "):
+            token = header.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="未登录")
+    try:
+        return decode_jwt(token)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="登录已失效") from exc
+
+
+async def _get_live_power_map_auth(
+    cfg: SystemConfig,
+    current_user: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, str] | None]:
+    api_cfg = _get_power_map_config(cfg)
+    headers: dict[str, str] = {}
+    cookies: dict[str, str] | None = None
+    try:
+        bi_auth = await cas_auth_service.get_bi_session({
+            "user_id": current_user.get("user_id", ""),
+            "username": current_user.get("user_name", ""),
+            "bi_service": api_cfg["base_url"],
+            "login_mobile": getattr(cfg, "power_map_login_mobile", "") or "",
+            "login_password": decrypt_secret(getattr(cfg, "power_map_login_password_encrypted", None) or "") or "",
+        })
+        headers, cookies = _split_bi_auth(bi_auth)
+    except CasAuthError as exc:
+        logger.warning("power map live proxy CAS auth unavailable: %s", exc)
+    except Exception:
+        logger.exception("power map live proxy CAS auth unexpected error")
+
+    if not cookies and api_cfg["auth_token"]:
+        headers["Authorization"] = f"Bearer {api_cfg['auth_token']}"
+    return headers, cookies
+
+
+def _patch_live_power_map_html(html: str) -> str:
+    html = html.replace(
+        "let serverName=window.location.origin;",
+        f"let serverName=window.location.origin + '{_POWER_MAP_LIVE_PROXY_PREFIX}';",
+        1,
+    )
+    html = html.replace(
+        'serverName+"WebReport/decision/url/power_map/upFile',
+        'serverName+"/WebReport/decision/url/power_map/upFile',
+    )
+    html = html.replace(
+        """            var prj_type="opp";
+            if(ver_name.indexOf("【主】")>=0 || ver_name.indexOf("【体系】")>=0)
+                prj_type="company";
+            else
+            {
+                if(ver_name=="【客户成功】数据")
+                    ver_type="support";
+            }""",
+        """            var prj_type="opp";
+            if(ver_name=="【客户成功】数据")
+                ver_type="support";""",
+        1,
+    )
+    html = _LIVE_PROXY_DEFAULT_VERSION_RE.sub(
+        """let requestedVersion=getQueryString("ver_info") || "";
+                                let defaultVersion=null;
+                                if(requestedVersion){
+                                    for(let i=0;i<version_arr.length;i++){
+                                        let v=version_arr[i];
+                                        if(v && String(v["value"] || "")===requestedVersion){
+                                            defaultVersion=v;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if(defaultVersion==null){
+                                    for(let i=0;i<version_arr.length;i++){
+                                        let v=version_arr[i];
+                                        if(is_support && v && v["ver_name"]==="【客户成功】数据"){
+                                            defaultVersion=v;
+                                            break;
+                                        }
+                                        if(!is_support && v && (v["ver_name"] && (v["ver_name"].indexOf("【主】")>=0 || v["ver_name"].indexOf("【体系】")>=0))){
+                                            defaultVersion=v;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if(defaultVersion==null && version_arr.length>0){
+                                    defaultVersion=version_arr[0];
+                                }
+                                if(defaultVersion==null){
+                                    defaultVersion={value:"",text:"",ver_name:""};
+                                }
+                                version_data=defaultVersion;
+                                self.version_info.populate(version_arr);//版本下拉
+                                if(version_data && version_data.value!=undefined && version_data.value!="")
+                                    self.version_info.setValue(version_data.value);//版本当前值
+                                if(requestedVersion && version_data && String(version_data.value || "")===requestedVersion){
+                                    changeOpp(requestedVersion,self);
+                                }
+                                else if(version_data && version_data["ver_name"]==="【客户成功】数据"){
+                                    changeOpp(version_data.value,self);
+                                }""",
+        html,
+        count=1,
+    )
+    return html
+
+
+def _inject_live_proxy_token_cookie(html: str, token: str) -> str:
+    if not token:
+        return html
+    cookie_script = (
+        "<script>"
+        f"document.cookie='power_map_live_token={token}; Path={_POWER_MAP_LIVE_PROXY_PREFIX}/; SameSite=Lax';"
+        "</script>"
+    )
+    if "<head>" in html:
+        return html.replace("<head>", "<head>" + cookie_script, 1)
+    return cookie_script + html
+
+
+async def _proxy_live_power_map_request(
+    request: Request,
+    proxy_path: str,
+    cfg: SystemConfig,
+    current_user: dict[str, Any],
+) -> Response:
+    from urllib.parse import urlparse
+
+    normalized_path = proxy_path.strip("/").lower()
+    if request.method.upper() != "GET" and normalized_path == "decision/url/power_map/upinfo":
+        logger.info(
+            "forwarding live power map iframe write: user=%s path=%s",
+            current_user.get("username") or current_user.get("user_name") or "",
+            proxy_path,
+        )
+
+    api_cfg = _get_power_map_config(cfg)
+    headers, cookies = await _get_live_power_map_auth(cfg, current_user)
+    parsed = urlparse(api_cfg["base_url"])
+    upstream_base = f"{parsed.scheme}://{parsed.netloc}"
+    upstream_url = f"{upstream_base}/WebReport/{proxy_path.lstrip('/')}"
+
+    forward_headers = dict(headers)
+    content_type = request.headers.get("content-type")
+    if content_type:
+        forward_headers["Content-Type"] = content_type
+    x_requested_with = request.headers.get("x-requested-with")
+    if x_requested_with:
+        forward_headers["X-Requested-With"] = x_requested_with
+
+    body = await request.body() if request.method != "GET" else None
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+        upstream = await client.request(
+            request.method,
+            upstream_url,
+            params=_power_map_proxy_query_params(request),
+            headers=forward_headers,
+            cookies=cookies,
+            content=body,
+        )
+
+    if upstream.status_code in {301, 302, 303, 307, 308}:
+        logger.warning(
+            "power map live proxy upstream redirect: path=%s location=%s",
+            proxy_path,
+            upstream.headers.get("location", ""),
+        )
+    if upstream.status_code >= 400:
+        raise HTTPException(status_code=upstream.status_code, detail=f"上游 BI 响应异常: {proxy_path}")
+
+    response_headers = _power_map_proxy_headers(upstream)
+    if proxy_path == _LIVE_PROXY_HTML_PATH:
+        token = request.query_params.get("token") or ""
+        html = _inject_live_proxy_token_cookie(_patch_live_power_map_html(upstream.text), token)
+        response = HTMLResponse(content=html, headers=response_headers)
+        if token:
+            response.set_cookie(
+                key="power_map_live_token",
+                value=token,
+                path=f"{_POWER_MAP_LIVE_PROXY_PREFIX}/",
+                secure=False,
+                httponly=True,
+                samesite="lax",
+            )
+        return response
+
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type"),
+        headers=response_headers,
+    )
 
 
 @app.get("/api/power_map/sandbox")
@@ -3507,6 +4326,16 @@ async def power_map_sandbox_proxy(
         content_type = "application/octet-stream"
 
     return StreamingResponse(stream_body(), media_type=content_type)
+
+
+@app.api_route("/api/power_map/live/WebReport/{proxy_path:path}", methods=["GET", "POST"])
+async def power_map_live_proxy(
+    proxy_path: str,
+    request: Request,
+    user: dict[str, Any] = Depends(_get_current_user_for_live_proxy),
+):
+    cfg = _get_cached_power_map_system_config()
+    return await _proxy_live_power_map_request(request, proxy_path, cfg, user)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -4007,14 +4836,30 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
         jiandaoyun_data["contid"] = {"value": data["contid"]}
     if data.get("contact_names"):
         jiandaoyun_data["contname"] = {"value": data["contact_names"]}
+    client = JiandaoyunClient(api_key=jiandaoyun_api_key)
     # 预期状态：写入是否第一价值实现预期 和 关联预期
     yuqi_first_value = data.get("yuqi_first_value", "")
     if yuqi_first_value:
         jiandaoyun_data["_widget_1757578251950"] = {"value": yuqi_first_value}
+    yuqi_record: dict[str, Any] | None = None
+    yuqi_id = str(data.get("yuqi_id") or "").strip()
+    if yuqi_id:
+        yuqi_entry_id = (
+            field_mappings.get("jiandaoyun", {})
+            .get("forms", {})
+            .get("预期表", {})
+            .get("entry_id", "69e836f10bc8756eea476a1f")
+        )
+        try:
+            yuqi_resp = await client.query_single_data(jiandaoyun_app_id, yuqi_entry_id, yuqi_id)
+            yuqi_record = yuqi_resp.get("data", {}) or {}
+        except Exception as exc:
+            logger.warning("followup submit: failed to load yuqi record %s: %s", yuqi_id, exc)
     apply_followup_yuqi_fields(
         jiandaoyun_data,
         field_mappings=field_mappings,
-        yuqi_id=data.get("yuqi_id", ""),
+        yuqi_id=yuqi_id,
+        yuqi_record=yuqi_record,
     )
     # 跟进标签（关联触发式标签）
     relevent_tags = data.get("relevent_tag", [])
@@ -4074,6 +4919,7 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
 
     data_creator = user.get("integrate_id") or user.get("username", "")
     writer = JiandaoyunWriter(api_key=jiandaoyun_api_key, app_id=jiandaoyun_app_id, data_creator=data_creator)
+    followup_push_cfg = get_followup_push_config(field_mappings)
     t_jdy = time.monotonic()
     jdy_trace = new_trace("rwj")
     emit("review_jdy_write_attempt", attempt_no=1)
@@ -4086,7 +4932,55 @@ async def submit_review(data: dict[str, Any], user: dict[str, Any] = Depends(req
                  will_retry=False, final_status="error", degraded=True)
             raise HTTPException(status_code=500, detail=result.get("detail", "写入简道云失败"))
         emit("review_jdy_write_done", jdy_latency_ms=t_jdye, status="ok")
-        return {"message": "跟进记录已成功提交到简道云", "data": result.get("data")}
+        response_payload: dict[str, Any] = {
+            "message": "跟进记录已成功提交到简道云",
+            "data": result.get("data"),
+        }
+        if followup_push_cfg.get("enabled") and followup_push_cfg.get("url"):
+            created_data_id = extract_created_data_id(result)
+            if created_data_id:
+                try:
+                    created_record = await client.query_single_data(jiandaoyun_app_id, entry_id, created_data_id)
+                    push_payload = build_followup_push_payload(created_record.get("data", {}) or {})
+                    push_result = await push_followup_to_travel_server(
+                        url=str(followup_push_cfg.get("url") or ""),
+                        payload=push_payload,
+                        secret=str(followup_push_cfg.get("secret") or ""),
+                        timeout_seconds=float(followup_push_cfg.get("timeout_seconds") or 2.0),
+                    )
+                    response_payload["travel_push"] = push_result
+                    if push_result.get("ok"):
+                        emit("review_travel_push_done", status="ok", http_status=push_result.get("status_code", 0))
+                    else:
+                        emit(
+                            "review_travel_push_error",
+                            status="error",
+                            http_status=push_result.get("status_code", 0),
+                            error_msg=str(push_result.get("response_text", ""))[:200],
+                            degraded=True,
+                        )
+                        response_payload["warning"] = "简道云已写入成功，但出差库推送失败"
+                except Exception as push_exc:
+                    emit(
+                        "review_travel_push_error",
+                        status="error",
+                        error_type=type(push_exc).__name__,
+                        error_msg=str(push_exc)[:200],
+                        degraded=True,
+                    )
+                    response_payload["travel_push"] = {"ok": False, "error": str(push_exc)}
+                    response_payload["warning"] = "简道云已写入成功，但出差库推送失败"
+            else:
+                emit(
+                    "review_travel_push_error",
+                    status="error",
+                    error_type="missing_data_id",
+                    error_msg="create result missing data id",
+                    degraded=True,
+                )
+                response_payload["travel_push"] = {"ok": False, "error": "missing_data_id"}
+                response_payload["warning"] = "简道云已写入成功，但出差库推送失败"
+        return response_payload
     except Exception as exc:
         t_jdye = (time.monotonic() - t_jdy) * 1000
         if not isinstance(exc, HTTPException):

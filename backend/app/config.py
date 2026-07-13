@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     jwt_secret: str = Field(default="change-me", alias="JWT_SECRET")
     jwt_exp_hours: int = 24
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    db_pool_size: int = Field(default=16, alias="DB_POOL_SIZE")
+    db_pool_max_overflow: int = Field(default=16, alias="DB_POOL_MAX_OVERFLOW")
+    db_pool_timeout: int = Field(default=15, alias="DB_POOL_TIMEOUT")
+    db_pool_recycle: int = Field(default=1800, alias="DB_POOL_RECYCLE")
     static_dir: str = "frontend/dist"
     agent_a_max_rounds: int = 5
     agent_b_max_rounds: int = 5

@@ -63,6 +63,10 @@
               <span class="text-xs font-medium text-muted-foreground">对话模型</span>
               <Input v-model="form.nl_chat_model" />
             </label>
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-medium text-muted-foreground">权利地图模型</span>
+              <Input v-model="form.power_map_llm_model" placeholder="留空则回退到对话模型" />
+            </label>
           </div>
 
           <!-- Agent-A -->
@@ -180,11 +184,11 @@ const activeTab = ref('general')
 
 const DEFAULT_A = '你是一个专业的客户成功分析师。请从以下客户拜访会议转写中提取信息。'
 const DEFAULT_B = '你是一个客户档案管理专家。请将新提取的客户预期/场景与已有档案数据进行比对。'
-const form = reactive({ provider: 'dashscope', api_key: '', base_url: '', agent_a_model: '', agent_b_model: '', nl_chat_model: '', temperature: 0.3, max_tokens: 4096, agent_a_prompt: '', agent_b_prompt: '', nl_query_prompt: '', nl_modify_prompt: '' })
+const form = reactive({ provider: 'dashscope', api_key: '', base_url: '', agent_a_model: '', agent_b_model: '', nl_chat_model: '', power_map_llm_model: '', temperature: 0.3, max_tokens: 4096, agent_a_prompt: '', agent_b_prompt: '', nl_query_prompt: '', nl_modify_prompt: '' })
 const msg = ref('')
 const preview = ref('')
 const versions = reactive({ agent_a: '-', agent_b: '-' })
-const LLM_FIELDS = ['provider', 'api_key', 'base_url', 'agent_a_model', 'agent_b_model', 'nl_chat_model', 'temperature', 'max_tokens', 'agent_a_prompt', 'agent_b_prompt', 'nl_query_prompt', 'nl_modify_prompt']
+const LLM_FIELDS = ['provider', 'api_key', 'base_url', 'agent_a_model', 'agent_b_model', 'nl_chat_model', 'power_map_llm_model', 'temperature', 'max_tokens', 'agent_a_prompt', 'agent_b_prompt', 'nl_query_prompt', 'nl_modify_prompt']
 const saving = ref(false)
 const frontendTimeoutMs = ref(getApiTimeout())
 const backendTimeoutConfig = reactive(getBackendTimeoutConfig())

@@ -23,7 +23,8 @@ window.__SANDBOX_READY__ = false;
 (function() {
     var checkReady = function() {
         var svg = document.querySelector('.x6-graph-svg');
-        if (svg && svg.querySelectorAll('g.x6-node').length > 0) {
+        var container = document.getElementById('graphContainer');
+        if (svg && container && container.querySelectorAll('.x6-node').length > 0) {
             window.__SANDBOX_READY__ = true;
             window.dispatchEvent(new Event('sandbox-ready'));
             return true;
@@ -1714,13 +1715,8 @@ window.__SANDBOX_READY__ = false;
             var ver_type=""
 
             var prj_type="opp";
-            if(ver_name.indexOf("【主】")>=0 || ver_name.indexOf("【体系】")>=0)
-                prj_type="company";
-            else
-            {
-                if(ver_name=="【客户成功】数据")
-                    ver_type="support";
-            }
+            if(ver_name=="【客户成功】数据")
+                ver_type="support";
         
             $.ajax({
                 url:serverName+'/WebReport/decision/url/power_map/getInfo?prj_type='+prj_type+'&ver_info='+new_ver+"&prj_id="+com_id,

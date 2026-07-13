@@ -85,6 +85,27 @@ Side paths: Chat (NL query/modify), Followup records (meeting → structured rec
 - **Chinese punctuation in prompts must use full-width** (全角) — half-width marks can confuse model parsing.
 - **DB operations must use SQLAlchemy sessions** — no raw SQL outside of migration/init scripts.
 
+### Maintenance debugging
+- First look at `trace_id`, `session_id`, `_metric`, `TASK_PROGRESS`, and `OPERATION_CARD_STORE`.
+- For transcripts / review, search `review_generate_start`, `review_llm_attempt_start`, `extraction.completed`, and `comparison.completed`.
+- For Power Map, follow `_new_session_id()` -> `_store_session()` -> `_get_session()`, then inspect `[DEBUG-J]` and `harness-stream` logs.
+- Power Map v2 creates a fresh in-memory session on each chain; `commit` and `discard` clear it.
+- If a flow looks “stuck” but no DB row changed, check whether the state lives only in memory and was lost on restart.
+
+### Production server access
+- Server: `47.98.102.197`
+- Public URL: `https://47-98-102-197.sslip.io`
+- Containers: `zhidang-backend-1`, `zhidang-frontend-1`, `zhidang-postgres-1`
+- SSH key: `/opt/data/home/.ssh/id_rsa_sync`
+- Common path: `/opt/zhidang`
+- Useful checks:
+  - `ssh -i /opt/data/home/.ssh/id_rsa_sync root@47.98.102.197`
+  - `docker ps`
+  - `docker logs -f zhidang-backend-1`
+  - `docker exec -it zhidang-backend-1 bash`
+  - `docker compose restart backend`
+- For backend code updates on the server, remember the container does not use a source bind mount; copy files into the container first, then restart.
+
 ### Frontend deploy (Docker bind-mount)
 The `frontend/dist/` is bind-mounted into the nginx container. When deploying:
 - **Never** `rm -rf` + `mkdir` the `dist/` directory — this breaks the bind mount, container sees stale inode, nginx returns 500.

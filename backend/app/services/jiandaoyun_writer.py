@@ -30,6 +30,13 @@ class JiandaoyunWriter:
         except JiandaoyunClientError as exc:
             return _err("update_failed", str(exc))
 
+    async def read_record(self, entry_id: str, data_id: str) -> dict[str, Any]:
+        try:
+            result = await self.client.query_single_data(self.app_id, entry_id, data_id)
+            return {"success": True, **result}
+        except JiandaoyunClientError as exc:
+            return _err("read_failed", str(exc))
+
     async def delete_record(self, entry_id: str, data_id: str) -> dict[str, Any]:
         try:
             result = await self.client.delete_data(self.app_id, entry_id, data_id)

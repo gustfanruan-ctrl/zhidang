@@ -82,3 +82,23 @@ fix_*.txt
 
 # IDE internal
 .claude/
+
+# Local Codex / FDE working artifacts
+.codex_tmp_remote/
+.fde/evidence/
+.fde/memory/
+
+# Local debug dumps and screenshots
+_tmp_*
+_prod_*.log
+_remote_*.py
+backend-benchmark.*.log
+sandbox_debug.png
+sandbox_real.png
+
+# Local run/deploy artifacts
+/.tmp/
+/.tmp_*.py
+/e2e_output/
+/zhidang.db.bak_*
+*.b64

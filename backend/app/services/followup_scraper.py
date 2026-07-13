@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import FollowupRecord
+from .followup_yuqi import extract_followup_yuqi_id
 from .jiandaoyun_client import JiandaoyunClient, JiandaoyunClientError
 
 logger = logging.getLogger("zhidang.followup_scraper")
@@ -77,6 +78,11 @@ def row_to_followup_kwargs(row: dict[str, Any]) -> dict[str, Any] | None:
     raw_text = build_raw_text(row) or _stringify(row.get("review_record"))
     review_date = _stringify(row.get("review_date")).strip() or None
     follow_type = _stringify(row.get("follow_type")).strip() or None
+    yuqi_id = extract_followup_yuqi_id(row)
+    normalized_row = dict(row)
+    if yuqi_id:
+        normalized_row["yuqi_id"] = yuqi_id
+        normalized_row.setdefault("review_yuqi_id", yuqi_id)
     title_bits = [bit for bit in (company_name, review_date, follow_type) if bit]
     title = " · ".join(title_bits) if title_bits else (source_id[:24])
     return {
@@ -93,7 +99,7 @@ def row_to_followup_kwargs(row: dict[str, Any]) -> dict[str, Any] | None:
         "sso_user_id": None,
         "review_date": review_date,
         "follow_type": follow_type,
-        "raw_record": row,
+        "raw_record": normalized_row,
     }
 
 

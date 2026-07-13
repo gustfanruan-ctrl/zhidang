@@ -32,6 +32,10 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       ENVIRONMENT: ${ENVIRONMENT:-prod}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-16}
+      DB_POOL_MAX_OVERFLOW: ${DB_POOL_MAX_OVERFLOW:-16}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-15}
+      DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-1800}
     ports:
       - "0.0.0.0:8000:8000"
     volumes:
@@ -44,11 +48,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "4"
-          memory: "2g"
+          cpus: "6"
+          memory: "4g"
         reservations:
-          cpus: "0.5"
-          memory: "256m"
+          cpus: "1"
+          memory: "512m"
     restart: unless-stopped
     command:
       - uvicorn
