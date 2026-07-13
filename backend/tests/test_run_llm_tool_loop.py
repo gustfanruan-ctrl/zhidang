@@ -141,6 +141,7 @@ class TestRunLLMToolLoop:
         mock_cfg.nl_chat_model = model
         mock_cfg.power_map_llm_model = model
         fake_client = FakeLLMClient(queues)
+        tool_names = {"move_user", *tool_results.keys()}
 
         with (
             patch(
@@ -164,7 +165,10 @@ class TestRunLLMToolLoop:
                     ctx=ctx,
                     user_text=user_text or "请审视截图，必要时调用布局工具进行美化。",
                     system_prompt="You are a layout assistant.",
-                    tools=[{"type": "function", "function": {"name": "move_user", "parameters": {}}}],
+                    tools=[
+                        {"type": "function", "function": {"name": name, "parameters": {}}}
+                        for name in sorted(tool_names)
+                    ],
                     cfg=mock_cfg,
                     screenshot_fn=fake_screenshot_fn,
                     max_rounds=max_rounds,

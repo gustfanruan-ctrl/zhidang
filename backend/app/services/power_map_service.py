@@ -958,6 +958,8 @@ def _power_map_phone_or_placeholder(phone: Any) -> str:
 # of inactivity.
 _SESSION_STORE: "dict[str, MergeContext]" = {}
 _SESSION_LAST_ACCESS: dict[str, float] = {}
+_SESSION_REVISIONS: dict[str, int] = {}
+_SESSION_CLAIMS: dict[str, str] = {}
 _SESSION_TTL = 1800  # seconds
 
 
@@ -984,23 +986,27 @@ class PowerMapPlanDraft:
 
 
 _PLAN_STORE: dict[str, PowerMapPlanDraft] = {}
+_PLAN_CLAIMS: dict[str, str] = {}
+_PLAN_REVISIONS: dict[str, int] = {}
 
 
 def _cleanup_expired_sessions() -> None:
     now = time.time()
     expired = [
         sid for sid, ts in _SESSION_LAST_ACCESS.items()
-        if now - ts > _SESSION_TTL
+        if now - ts > _SESSION_TTL and sid not in _SESSION_CLAIMS
     ]
     for sid in expired:
         _SESSION_STORE.pop(sid, None)
         _SESSION_LAST_ACCESS.pop(sid, None)
+        _SESSION_REVISIONS.pop(sid, None)
     expired_plans = [
         pid for pid, draft in _PLAN_STORE.items()
-        if now - draft.last_access > _SESSION_TTL
+        if now - draft.last_access > _SESSION_TTL and pid not in _PLAN_CLAIMS
     ]
     for pid in expired_plans:
         _PLAN_STORE.pop(pid, None)
+        _PLAN_REVISIONS.pop(pid, None)
 
 
 def _touch_session(session_id: str) -> None:
@@ -1023,12 +1029,69 @@ def _get_session(session_id: str) -> "MergeContext | None":
 
 def _store_session(session_id: str, ctx: "MergeContext") -> None:
     _SESSION_STORE[session_id] = ctx
+    _SESSION_REVISIONS[session_id] = _SESSION_REVISIONS.get(session_id, 0) + 1
     _touch_session(session_id)
 
 
 def _drop_session(session_id: str) -> None:
     _SESSION_STORE.pop(session_id, None)
     _SESSION_LAST_ACCESS.pop(session_id, None)
+    _SESSION_REVISIONS.pop(session_id, None)
+    _SESSION_CLAIMS.pop(session_id, None)
+
+
+def _claim_session(
+    session_id: str,
+    claim_token: str,
+) -> tuple["MergeContext | None", int, str]:
+    if not session_id:
+        return None, 0, "session_not_found"
+    _cleanup_expired_sessions()
+    if session_id in _SESSION_CLAIMS:
+        return None, 0, "session_busy"
+    ctx = _SESSION_STORE.get(session_id)
+    if ctx is None:
+        return None, 0, "session_not_found"
+    _SESSION_CLAIMS[session_id] = claim_token
+    _touch_session(session_id)
+    return ctx, _SESSION_REVISIONS.get(session_id, 0), ""
+
+
+def _release_session_claim(session_id: str, claim_token: str) -> None:
+    if _SESSION_CLAIMS.get(session_id) == claim_token:
+        _SESSION_CLAIMS.pop(session_id, None)
+
+
+def _publish_claimed_session(
+    session_id: str,
+    ctx: "MergeContext",
+    *,
+    claim_token: str,
+    expected_revision: int,
+) -> bool:
+    if _SESSION_CLAIMS.get(session_id) != claim_token:
+        return False
+    if _SESSION_REVISIONS.get(session_id, 0) != expected_revision:
+        return False
+    _SESSION_STORE[session_id] = ctx
+    _SESSION_REVISIONS[session_id] = expected_revision + 1
+    _touch_session(session_id)
+    _SESSION_CLAIMS.pop(session_id, None)
+    return True
+
+
+def _drop_claimed_session(
+    session_id: str,
+    *,
+    claim_token: str,
+    expected_revision: int,
+) -> bool:
+    if _SESSION_CLAIMS.get(session_id) != claim_token:
+        return False
+    if _SESSION_REVISIONS.get(session_id, 0) != expected_revision:
+        return False
+    _drop_session(session_id)
+    return True
 
 
 def _new_plan_id() -> str:
@@ -1049,10 +1112,41 @@ def _store_plan(draft: PowerMapPlanDraft) -> None:
     _cleanup_expired_sessions()
     draft.last_access = time.time()
     _PLAN_STORE[draft.plan_id] = draft
+    _PLAN_REVISIONS[draft.plan_id] = _PLAN_REVISIONS.get(draft.plan_id, 0) + 1
 
 
 def _drop_plan(plan_id: str) -> None:
     _PLAN_STORE.pop(plan_id, None)
+    _PLAN_CLAIMS.pop(plan_id, None)
+    _PLAN_REVISIONS.pop(plan_id, None)
+
+
+def _claim_plan(plan_id: str, claim_token: str) -> bool:
+    if plan_id not in _PLAN_STORE or plan_id in _PLAN_CLAIMS:
+        return False
+    _PLAN_CLAIMS[plan_id] = claim_token
+    return True
+
+
+def _release_plan_claim(plan_id: str, claim_token: str) -> None:
+    if _PLAN_CLAIMS.get(plan_id) == claim_token:
+        _PLAN_CLAIMS.pop(plan_id, None)
+
+
+def _replace_unclaimed_plan(
+    draft: PowerMapPlanDraft,
+    *,
+    expected_revision: int,
+) -> str:
+    plan_id = draft.plan_id
+    if plan_id in _PLAN_CLAIMS:
+        return "plan_busy"
+    if plan_id not in _PLAN_STORE or _PLAN_REVISIONS.get(plan_id, 0) != expected_revision:
+        return "plan_revision_conflict"
+    draft.last_access = time.time()
+    _PLAN_STORE[plan_id] = draft
+    _PLAN_REVISIONS[plan_id] = expected_revision + 1
+    return ""
 
 # v3.1 legacy constants (still used by _v31_global_layout fallback)
 _SIBLING_GAP_H = 30
@@ -4619,7 +4713,7 @@ def _tool_check_geometry(ctx: MergeContext, node_ids: list[str]) -> dict[str, An
             return {"ok": False, "error": "check_geometry module unavailable"}
 
     ctx_nodes = [{"id": n.id, "name": n.name, "node_type": n.node_type,
-                  "parent_id": n.parent_id, "x": n.x, "y": n.y,
+                  "parent_dept_id": n.parent_dept_id, "x": n.x, "y": n.y,
                   "w": n.w, "h": n.h} for n in ctx.all_nodes]
     ctx_edges = [{"id": e.get("id", ""), "source_id": e.get("source_id", ""),
                   "target_id": e.get("target_id", "")} for e in ctx.edges]
@@ -7258,6 +7352,64 @@ def _power_map_plan_payload(draft: PowerMapPlanDraft) -> dict[str, Any]:
     }
 
 
+_EXPLICIT_LAYOUT_MARKERS = (
+    "排列",
+    "同层",
+    "同一层",
+    "分行",
+    "放大",
+    "缩小",
+    "移动",
+    "对齐",
+    "横向",
+    "纵向",
+    "错开",
+    "居中",
+    "间距",
+    "重排",
+    "重新排",
+    "美化",
+)
+
+
+def _intent_requests_layout(intent: PowerMapIntent) -> bool:
+    if intent.rank_groups or intent.layout_roots:
+        return True
+    text = "\n".join([intent.goal, *intent.constraints]).strip()
+    return any(marker in text for marker in _EXPLICIT_LAYOUT_MARKERS)
+
+
+def _build_layout_execution_instruction(intent: PowerMapIntent, ctx: MergeContext) -> str:
+    nodes = [
+        {
+            "id": node.id,
+            "name": node.name,
+            "type": node.node_type,
+            "parent_id": node.parent_dept_id,
+            "x": round(node.x),
+            "y": round(node.y),
+            "w": round(node.w),
+            "h": round(node.h),
+        }
+        for node in ctx.all_nodes
+    ]
+    payload = {
+        "goal": intent.goal,
+        "layout_roots": intent.layout_roots,
+        "rank_groups": intent.rank_groups,
+        "constraints": intent.constraints,
+        "nodes": nodes,
+    }
+    return (
+        "用户已确认结构计划。现在只执行布局微调，不新增、删除、改名或改关系。\n"
+        "优先满足用户原始目标，其次参考 rank_groups 和 constraints。\n"
+        "如果同一 rank_group 同时包含父容器和其子部门，应保持包含关系，"
+        "只把子部门在父容器内部排成同一水平层，并按目标放大或 fit 父容器。\n"
+        "每次移动部门必须连同其后代一起移动。完成后必须检查碰撞和几何。\n\n"
+        f"布局执行输入：\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
 async def _prepare_power_map_plan_context(
     db: Session,
     cfg: SystemConfig,
@@ -7324,7 +7476,14 @@ async def plan_power_map_v2(
         yield HarnessEvent(type="done", data={"skipped": True, "error": "系统未初始化", "phase": "planning"})
         return
 
+    if plan_id and plan_id in _PLAN_CLAIMS:
+        yield HarnessEvent(type="done", data={"error": "plan_busy", "phase": "planning"})
+        return
+
     existing_plan = _get_plan(plan_id) if plan_id else None
+    existing_plan_revision = (
+        _PLAN_REVISIONS.get(existing_plan.plan_id, 0) if existing_plan else 0
+    )
     if existing_plan:
         base_ctx = _get_session(existing_plan.base_session_id) if existing_plan.base_session_id else existing_plan.base_ctx
         if base_ctx is None:
@@ -7417,7 +7576,16 @@ async def plan_power_map_v2(
         bi_ver_info=meta.get("bi_ver_info"),
         upinfo_users=list(meta.get("upinfo_users") or []),
     )
-    _store_plan(draft)
+    if existing_plan:
+        publish_error = _replace_unclaimed_plan(
+            draft,
+            expected_revision=existing_plan_revision,
+        )
+        if publish_error:
+            yield HarnessEvent(type="done", data={"error": publish_error, "phase": "planning"})
+            return
+    else:
+        _store_plan(draft)
     yield HarnessEvent(type="plan_preview", data=_power_map_plan_payload(draft))
     yield HarnessEvent(
         type="done",
@@ -8415,16 +8583,23 @@ def _tool_arrange_vertically(ctx: MergeContext, node_ids: list[str], x: float, s
 
     g = float(gap)
     cursor = float(start_y)
+    moved_node_ids: list[str] = []
     for n in resolved:
-        n.x = float(x)
-        n.y = cursor
+        if n.node_type == "dept":
+            result = _tool_move_dept_with_children(ctx, dept_id=n.id, new_x=float(x), new_y=cursor)
+            if not result.get("ok"):
+                return result
+            moved_node_ids.extend(str(node_id) for node_id in result.get("moved_node_ids", []))
+        else:
+            n.x = float(x)
+            n.y = cursor
+            _recompute_edge_ports_for_node(ctx, n.id)
+            moved_node_ids.append(n.id)
         cursor += n.h + g
 
-    for n in resolved:
-        _recompute_edge_ports_for_node(ctx, n.id)
-
     return {"ok": True, "placed": len(resolved), "count": len(resolved), "end_y": round(cursor - g),
-            "node_ids": [n.id for n in resolved],
+            "node_ids": moved_node_ids,
+            "moved_node_ids": moved_node_ids,
             "positions": [{"id": n.id, "name": n.name, "x": round(n.x), "y": round(n.y)} for n in resolved]}
 
 
@@ -9671,6 +9846,29 @@ _HARNESS_TOOLS_OPENAI: list[dict[str, Any]] = [
 ]
 
 
+_LAYOUT_EXECUTION_TOOL_NAMES = frozenset({
+    "calculator",
+    "validate_structure",
+    "check_collisions",
+    "check_geometry",
+    "get_node_geometry",
+    "place_node",
+    "move_dept_with_children",
+    "resize_container",
+    "fit_container_to_children",
+    "arrange_horizontally",
+    "arrange_vertically",
+})
+
+
+def _layout_execution_tools() -> list[dict[str, Any]]:
+    return [
+        deepcopy(tool)
+        for tool in _HARNESS_TOOLS_OPENAI
+        if str(tool.get("function", {}).get("name") or "") in _LAYOUT_EXECUTION_TOOL_NAMES
+    ]
+
+
 HARNESS_SYSTEM_PROMPT = """你是权力地图布局 Agent。每轮对话都会自动附带一张沙箱渲染截图——不需要你调任何感知工具，看图即所得。
 
 ## 核心原则
@@ -9784,6 +9982,36 @@ HARNESS_FALLBACK_RESPONSE_HINT = """【可调用工具】
 """
 
 
+def _tool_name_allowlist(tools: list[dict[str, Any]]) -> frozenset[str]:
+    return frozenset(
+        str(tool.get("function", {}).get("name") or "").strip()
+        for tool in tools
+        if str(tool.get("function", {}).get("name") or "").strip()
+    )
+
+
+def _build_tool_fallback_response_hint(tools: list[dict[str, Any]]) -> str:
+    tool_specs: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+        name = str(function.get("name") or "").strip()
+        if not name:
+            continue
+        tool_specs.append({
+            "tool": name,
+            "description": str(function.get("description") or ""),
+            "args_schema": function.get("parameters") if isinstance(function.get("parameters"), dict) else {},
+        })
+    return (
+        "【文本工具协议】\n"
+        "只能调用下列工具；未列出的工具一律禁止，禁止自行扩展工具名。\n"
+        f"{json.dumps(tool_specs, ensure_ascii=False)}\n\n"
+        "【响应格式】仅返回 JSON 数组：\n"
+        "[{\"tool\": \"<允许的工具名>\", \"args\": {}}]\n"
+        "若无需操作返回 []。"
+    )
+
+
 def _parse_harness_tool_calls(text: str) -> list[dict[str, Any]]:
     """Parse a JSON array of tool calls from LLM text. Tolerant of code fences."""
     if not text:
@@ -9821,6 +10049,8 @@ async def _execute_harness_tool(
     ctx: MergeContext,
     name: str,
     args: dict[str, Any],
+    *,
+    allowed_tool_names: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Dispatch a harness tool call by name + arguments.
 
@@ -9830,6 +10060,8 @@ async def _execute_harness_tool(
     tool = str(name or "").strip()
     if not isinstance(args, dict):
         return {"ok": False, "error": "args must be object"}
+    if allowed_tool_names is not None and tool not in allowed_tool_names:
+        return {"ok": False, "error": f"tool_not_allowed: {tool}"}
 
     # --- Defense B: repeated failed call detection ---
     if tool == "fit_container_to_children":
@@ -11278,6 +11510,7 @@ async def _run_llm_tool_loop(
     max_rounds: int,
     session_id: str = "",
     sandbox_url: str = "",
+    planning_enabled: bool = True,
 ) -> AsyncGenerator[HarnessEvent, None]:
     """Generic vision-LLM tool-calling loop.
 
@@ -11339,6 +11572,8 @@ async def _run_llm_tool_loop(
     executed = 0
     rounds_completed = 0
     use_native_tools = True
+    allowed_tool_names = _tool_name_allowlist(tools)
+    fallback_response_hint = _build_tool_fallback_response_hint(tools)
     accumulated_messages: list[dict[str, Any]] = []
     ctx.harness_can_commit = False
     ctx.harness_last_error = ""
@@ -11377,7 +11612,7 @@ async def _run_llm_tool_loop(
         except Exception as exc:
             logger.warning("[DEBUG-J review] failed to queue: %s", exc)
 
-    if llm_profile == "kimi" and kimi_mode == "auto":
+    if planning_enabled and llm_profile == "kimi" and kimi_mode == "auto":
         planning_graph_state = _build_graph_state_text(ctx)
         kimi_cleaned_instruction_text = ""
         async for cleaning_event in _run_power_map_semantic_cleaning_round(
@@ -11644,7 +11879,7 @@ async def _run_llm_tool_loop(
             })
 
         active_system_prompt = system_prompt if use_native_tools else (
-            system_prompt + "\n\n" + HARNESS_FALLBACK_RESPONSE_HINT
+            system_prompt + "\n\n" + fallback_response_hint
         )
 
         legacy_text = ""
@@ -12011,7 +12246,10 @@ async def _run_llm_tool_loop(
                 rounds_completed, i, name, _tc_id_log, _args_str,
             )
             try:
-                result = await _execute_harness_tool(ctx, name, args)
+                if name not in allowed_tool_names:
+                    result = {"ok": False, "error": f"tool_not_allowed: {name}"}
+                else:
+                    result = await _execute_harness_tool(ctx, name, args)
             except Exception as exc:
                 logger.warning("llm-loop: tool %s raised: %s", name, exc)
                 logger.info(
@@ -13588,6 +13826,39 @@ Step 5：自然收敛
 """
 
 
+CONFIRMED_LAYOUT_EXECUTION_SYSTEM_PROMPT = """你是权力地图的视觉布局执行器。结构计划已经由用户确认，你只负责在当前沙箱中调整几何布局。
+
+强制边界：
+- 只能使用提供的读取、移动、排列、缩放和验证工具。
+- 禁止新增、删除、改名节点，禁止改变 parent_id，禁止增删关系线，禁止调用 save_state。
+- 部门容器移动必须使用 move_dept_with_children 或安全的 arrange 工具，不能只移动容器外壳。
+- 用户未提及的区域尽量保持不动。
+
+执行规则：
+- rank_groups 中同组节点应位于同一水平层；不同单独分组按用户目标分成不同的水平行。
+- 如果父容器与其子部门同时出现在一组，保持真实父子关系，把子部门在父容器内部横向排列，不把父容器塞进子部门行。
+- “放大”先读取当前尺寸；优先 fit_container_to_children 并增加留白，必要时再 resize_container。
+- 批量排列优先一次调用 arrange_horizontally 或 arrange_vertically，不逐个猜坐标。
+- 完成前必须调用 check_collisions、check_geometry 或 validate_structure 验证；发现问题继续修复。
+- 只有截图和用户目标都已经满足时才停止调用工具。
+"""
+
+
+def _validate_sandbox_render_state(
+    *,
+    expected_node_count: int,
+    rendered_node_count: int,
+    svg_count: int,
+) -> None:
+    if expected_node_count <= 0:
+        raise RuntimeError("sandbox_render_empty_context")
+    if svg_count <= 0 or rendered_node_count != expected_node_count:
+        raise RuntimeError(
+            "sandbox_render_node_mismatch: "
+            f"expected={expected_node_count} rendered={rendered_node_count} svg={svg_count}"
+        )
+
+
 async def _sandbox_screenshot(
     ctx: MergeContext,
     *,
@@ -13602,14 +13873,27 @@ async def _sandbox_screenshot(
     expects for screenshot_fn. ctx is unused here — the sandbox HTML reads the
     in-memory ctx through the X-Sandbox-Session header / mock BI endpoints.
     """
+    render_started_at = time.time()
     await page.goto(sandbox_url, wait_until="domcontentloaded")
     ready_result = await page.wait_for_function("window.__SANDBOX_READY__", timeout=10000)
+    expected_node_count = len(ctx.all_nodes)
+    if expected_node_count > 0:
+        await page.wait_for_function(
+            "expected => document.querySelectorAll('#graphContainer .x6-node').length === expected",
+            arg=expected_node_count,
+            timeout=10000,
+        )
     await page.wait_for_timeout(500)
     svg_count = await page.locator("#graphContainer .x6-graph-svg").count()
     node_count = await page.locator("#graphContainer .x6-node").count()
     logger.info(
         "[screenshot] ready=%s svg_count=%d node_count=%d session=%s",
         ready_result, svg_count, node_count, session_id,
+    )
+    _validate_sandbox_render_state(
+        expected_node_count=expected_node_count,
+        rendered_node_count=node_count,
+        svg_count=svg_count,
     )
     try:
         digest = await _extract_sandbox_layout_digest(page)
@@ -13650,7 +13934,262 @@ async def _sandbox_screenshot(
                      "w": round(svg_box["width"]), "h": round(svg_box["height"])}) if svg_box else "None",
     )
     png_bytes = await svg_el.screenshot(type="png")
+    if len(png_bytes) < 256:
+        raise RuntimeError(f"sandbox_render_png_too_small: bytes={len(png_bytes)}")
+    logger.info(
+        "[screenshot] complete expected_nodes=%d rendered_nodes=%d svg_count=%d png_bytes=%d render_ms=%d session=%s",
+        expected_node_count,
+        node_count,
+        svg_count,
+        len(png_bytes),
+        int((time.time() - render_started_at) * 1000),
+        session_id,
+    )
     return "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+
+def _layout_geometry_snapshot(ctx: MergeContext) -> dict[str, tuple[float, float, float, float]]:
+    return {
+        node.id: (float(node.x), float(node.y), float(node.w), float(node.h))
+        for node in ctx.all_nodes
+    }
+
+
+def _geometry_blocking_count(report: dict[str, Any]) -> int | None:
+    if not report.get("ok"):
+        return None
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    return int(summary.get("critical") or 0) + int(summary.get("high") or 0)
+
+
+async def _execute_confirmed_plan_preview(
+    *,
+    ctx: MergeContext,
+    intent: PowerMapIntent,
+    cfg: SystemConfig,
+    session_id: str,
+    execute_layout: bool,
+) -> dict[str, Any]:
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        return {"ok": False, "error": f"playwright_unavailable: {exc}"}
+
+    sandbox_base = (os.getenv("SANDBOX_BASE_URL") or "http://localhost:8000").rstrip("/")
+    sandbox_url = f"{sandbox_base}/sandbox/render?session_id={session_id}"
+    public_sandbox_url = f"/sandbox/render?session_id={session_id}"
+    started_at = time.time()
+    p = None
+    browser = None
+    context = None
+    page = None
+    try:
+        p = await async_playwright().start()
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+        page = await context.new_page()
+        await page.set_extra_http_headers({"X-Sandbox-Session": session_id})
+        screenshot_fn = functools.partial(
+            _sandbox_screenshot,
+            page=page,
+            session_id=session_id,
+            sandbox_url=sandbox_url,
+        )
+
+        screenshot_url = await screenshot_fn(ctx)
+        ctx.last_screenshot_url = screenshot_url
+        if not execute_layout:
+            final_collisions = _tool_check_collisions(ctx)
+            final_geometry = _tool_check_geometry(ctx, list(ctx.nodes_by_id))
+            final_blockers = _geometry_blocking_count(final_geometry)
+            if final_collisions.get("ok") is not True or final_geometry.get("ok") is not True:
+                ctx.harness_can_commit = False
+                ctx.harness_last_error = "confirm_geometry_validation_failed"
+                return {
+                    "ok": False,
+                    "error": "confirm_geometry_validation_failed",
+                    "layout_executed": False,
+                    "rounds": 0,
+                    "executed": 0,
+                    "sandbox_url": public_sandbox_url,
+                }
+            if final_blockers != 0:
+                ctx.harness_can_commit = False
+                ctx.harness_last_error = "confirm_geometry_blocked"
+                return {
+                    "ok": False,
+                    "error": "confirm_geometry_blocked",
+                    "layout_executed": False,
+                    "rounds": 0,
+                    "executed": 0,
+                    "final_blockers": final_blockers,
+                    "sandbox_url": public_sandbox_url,
+                }
+            ctx.harness_can_commit = True
+            ctx.harness_last_error = ""
+            return {
+                "ok": True,
+                "layout_executed": False,
+                "rounds": 0,
+                "executed": 0,
+                "converged": True,
+                "exit_reason": "plan_confirmed_without_layout",
+                "screenshot_url": screenshot_url,
+                "sandbox_url": public_sandbox_url,
+                "final_blockers": final_blockers,
+            }
+
+        before = _layout_geometry_snapshot(ctx)
+        baseline_collisions = _tool_check_collisions(ctx)
+        baseline_geometry = _tool_check_geometry(ctx, list(ctx.nodes_by_id))
+        last_done: dict[str, Any] = {}
+        tool_call_count = 0
+        async for event in _run_llm_tool_loop(
+            ctx=ctx,
+            user_text=_build_layout_execution_instruction(intent, ctx),
+            system_prompt=CONFIRMED_LAYOUT_EXECUTION_SYSTEM_PROMPT,
+            tools=_layout_execution_tools(),
+            cfg=cfg,
+            screenshot_fn=screenshot_fn,
+            max_rounds=12,
+            session_id=session_id,
+            sandbox_url=public_sandbox_url,
+            planning_enabled=False,
+        ):
+            if event.type == "tool_call":
+                tool_call_count += 1
+            elif event.type == "done":
+                last_done = dict(event.data)
+
+        executed = int(last_done.get("executed") or 0)
+        if last_done.get("error") or last_done.get("converged") is not True:
+            error = str(last_done.get("error") or last_done.get("exit_reason") or "layout_not_converged")
+            ctx.harness_can_commit = False
+            ctx.harness_last_error = error
+            return {
+                "ok": False,
+                "error": error,
+                "layout_executed": True,
+                "rounds": int(last_done.get("rounds") or 0),
+                "executed": executed,
+                "tool_calls": tool_call_count,
+                "sandbox_url": public_sandbox_url,
+            }
+
+        after = _layout_geometry_snapshot(ctx)
+        if executed <= 0 or before == after:
+            ctx.harness_can_commit = False
+            ctx.harness_last_error = "layout_geometry_unchanged"
+            return {
+                "ok": False,
+                "error": "layout_geometry_unchanged",
+                "layout_executed": True,
+                "rounds": int(last_done.get("rounds") or 0),
+                "executed": executed,
+                "tool_calls": tool_call_count,
+                "sandbox_url": public_sandbox_url,
+            }
+
+        final_collisions = _tool_check_collisions(ctx)
+        final_geometry = _tool_check_geometry(ctx, list(ctx.nodes_by_id))
+        baseline_collision_count = int(baseline_collisions.get("total_collisions") or 0)
+        final_collision_count = int(final_collisions.get("total_collisions") or 0)
+        baseline_blockers = _geometry_blocking_count(baseline_geometry)
+        final_blockers = _geometry_blocking_count(final_geometry)
+        if final_collisions.get("ok") is not True or final_geometry.get("ok") is not True:
+            ctx.harness_can_commit = False
+            ctx.harness_last_error = "layout_geometry_validation_failed"
+            return {
+                "ok": False,
+                "error": "layout_geometry_validation_failed",
+                "layout_executed": True,
+                "rounds": int(last_done.get("rounds") or 0),
+                "executed": executed,
+                "tool_calls": tool_call_count,
+                "baseline_collisions": baseline_collision_count,
+                "final_collisions": final_collision_count,
+                "baseline_blockers": baseline_blockers,
+                "final_blockers": final_blockers,
+                "sandbox_url": public_sandbox_url,
+            }
+        if final_collision_count > baseline_collision_count or final_blockers != 0:
+            ctx.harness_can_commit = False
+            ctx.harness_last_error = "layout_geometry_blocked"
+            return {
+                "ok": False,
+                "error": "layout_geometry_blocked",
+                "layout_executed": True,
+                "rounds": int(last_done.get("rounds") or 0),
+                "executed": executed,
+                "tool_calls": tool_call_count,
+                "baseline_collisions": baseline_collision_count,
+                "final_collisions": final_collision_count,
+                "baseline_blockers": baseline_blockers,
+                "final_blockers": final_blockers,
+                "sandbox_url": public_sandbox_url,
+            }
+
+        screenshot_url = await screenshot_fn(ctx)
+        ctx.last_screenshot_url = screenshot_url
+        ctx.harness_can_commit = True
+        ctx.harness_last_error = ""
+        logger.info(
+            "confirm-plan layout complete session=%s rounds=%d tools=%d collisions=%d->%d blockers=%d->%d elapsed_ms=%d",
+            session_id,
+            int(last_done.get("rounds") or 0),
+            tool_call_count,
+            baseline_collision_count,
+            final_collision_count,
+            baseline_blockers if baseline_blockers is not None else -1,
+            final_blockers,
+            int((time.time() - started_at) * 1000),
+        )
+        return {
+            "ok": True,
+            "layout_executed": True,
+            "rounds": int(last_done.get("rounds") or 0),
+            "executed": executed,
+            "tool_calls": tool_call_count,
+            "converged": True,
+            "exit_reason": str(last_done.get("exit_reason") or "layout_converged"),
+            "screenshot_url": screenshot_url,
+            "sandbox_url": public_sandbox_url,
+            "baseline_collisions": baseline_collision_count,
+            "final_collisions": final_collision_count,
+            "baseline_blockers": baseline_blockers,
+            "final_blockers": final_blockers,
+        }
+    except Exception as exc:
+        ctx.harness_can_commit = False
+        ctx.harness_last_error = f"confirm_preview_failed: {exc}"
+        logger.warning("confirm-plan session preview/layout failed: %s", exc)
+        return {
+            "ok": False,
+            "error": ctx.harness_last_error,
+            "layout_executed": execute_layout,
+            "sandbox_url": public_sandbox_url,
+        }
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                logger.debug("confirm-plan page close raised", exc_info=True)
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                logger.debug("confirm-plan context close raised", exc_info=True)
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:
+                logger.debug("confirm-plan browser close raised", exc_info=True)
+        if p is not None:
+            try:
+                await p.stop()
+            except Exception:
+                logger.debug("confirm-plan playwright stop raised", exc_info=True)
 
 
 async def confirm_power_map_plan(
@@ -13665,70 +14204,140 @@ async def confirm_power_map_plan(
     draft = _get_plan(plan_id)
     if draft is None or draft.company_id != company_id:
         return {"ok": False, "error": "plan_not_found"}
+    plan_claim_token = f"confirm:{uuid.uuid4().hex}"
+    if not _claim_plan(plan_id, plan_claim_token):
+        return {"ok": False, "error": "plan_busy"}
 
-    session_id = draft.base_session_id or _new_session_id()
-    base_ctx = _get_session(draft.base_session_id) if draft.base_session_id else draft.base_ctx
-    if base_ctx is None:
-        _drop_plan(plan_id)
-        return {"ok": False, "error": "plan_base_expired"}
-    ctx = deepcopy(base_ctx)
-
-    ctx.harness_session_id = session_id
-    ctx.harness_cfg = cfg
-    ctx.harness_current_user = current_user
-    ctx.harness_prj_id = draft.prj_id or await _resolve_prj_id(db, cfg, company_id)
-    ctx.harness_version_id = draft.version_id
-    ctx.bi_version = draft.bi_version
-    ctx.bi_prj_type = draft.bi_prj_type
-    ctx.bi_ver_info = draft.bi_ver_info
-    ctx.upinfo_users = draft.upinfo_users
-    ctx.harness_can_commit = False
-    ctx.harness_last_error = ""
-
-    result = _apply_power_map_intent_to_context(ctx, draft.current_intent)
-    if not result.get("ok"):
-        ctx.harness_can_commit = False
-        ctx.harness_last_error = str(result.get("fallback_reason") or result.get("error") or "apply_failed")
-        return {
-            "ok": False,
-            "error": ctx.harness_last_error,
-            "plan_id": plan_id,
-            "session_id": session_id,
-            "result": result,
-        }
-
-    _store_session(session_id, ctx)
-    screenshot_url = ""
+    public_session_id = draft.base_session_id or _new_session_id()
+    candidate_session_id = _new_session_id()
+    base_claim_token = ""
+    base_revision = 0
+    keep_candidate_session = False
     try:
-        screenshot_url = await _render_sandbox_preview(ctx)
-        ctx.last_screenshot_url = screenshot_url
-    except Exception as exc:
-        logger.warning("confirm-plan: sandbox preview failed: %s", exc)
-    graph_state = _tool_get_graph_state(ctx)
-    graph_state["session_id"] = session_id
-    graph_state["sandbox_url"] = f"/sandbox/render?session_id={session_id}"
-    ctx.harness_can_commit = True
-    ctx.harness_last_error = ""
-    _drop_plan(plan_id)
-    return {
-        "ok": True,
-        "plan_id": plan_id,
-        "session_id": session_id,
-        "sandbox_url": f"/sandbox/render?session_id={session_id}",
-        "screenshot_url": screenshot_url,
-        "graph_state": graph_state,
-        "done": {
-            "rounds": 1,
-            "executed": int(result.get("created", 0)) + int(result.get("edge_created", 0)) + int(result.get("updated", 0)),
-            "session_id": session_id,
-            "converged": True,
-            "exit_reason": "plan_confirmed",
-            "radial_fast_path": True,
-            "radial_layout_used": bool(result.get("radial_layout_used")),
-            "relayout_called": bool(result.get("relayout_called")),
-            "sandbox_url": f"/sandbox/render?session_id={session_id}",
-        },
-    }
+        if draft.base_session_id:
+            base_claim_token = f"confirm-session:{uuid.uuid4().hex}"
+            base_ctx, base_revision, claim_error = _claim_session(
+                draft.base_session_id,
+                base_claim_token,
+            )
+            if base_ctx is None:
+                if claim_error == "session_not_found":
+                    _drop_plan(plan_id)
+                return {"ok": False, "error": claim_error}
+        else:
+            base_ctx = draft.base_ctx
+        if base_ctx is None:
+            _drop_plan(plan_id)
+            return {"ok": False, "error": "plan_base_expired"}
+
+        had_existing_nodes = bool(base_ctx.all_nodes)
+        ctx = deepcopy(base_ctx)
+        ctx.harness_session_id = candidate_session_id
+        ctx.harness_cfg = cfg
+        ctx.harness_current_user = current_user
+        ctx.harness_prj_id = draft.prj_id or await _resolve_prj_id(db, cfg, company_id)
+        ctx.harness_version_id = draft.version_id
+        ctx.bi_version = draft.bi_version
+        ctx.bi_prj_type = draft.bi_prj_type
+        ctx.bi_ver_info = draft.bi_ver_info
+        ctx.upinfo_users = draft.upinfo_users
+        ctx.harness_can_commit = False
+        ctx.harness_last_error = ""
+
+        result = _apply_power_map_intent_to_context(ctx, draft.current_intent)
+        if not result.get("ok"):
+            ctx.harness_last_error = str(
+                result.get("fallback_reason") or result.get("error") or "apply_failed"
+            )
+            return {
+                "ok": False,
+                "error": ctx.harness_last_error,
+                "plan_id": plan_id,
+                "session_id": public_session_id,
+                "result": result,
+            }
+
+        _store_session(candidate_session_id, ctx)
+        preview_result = await _execute_confirmed_plan_preview(
+            ctx=ctx,
+            intent=draft.current_intent,
+            cfg=cfg,
+            session_id=candidate_session_id,
+            execute_layout=had_existing_nodes and _intent_requests_layout(draft.current_intent),
+        )
+        if not preview_result.get("ok") or not ctx.harness_can_commit:
+            ctx.harness_can_commit = False
+            ctx.harness_last_error = str(
+                preview_result.get("error") or "confirm_preview_not_committable"
+            )
+            return {
+                "ok": False,
+                "error": ctx.harness_last_error,
+                "plan_id": plan_id,
+                "session_id": public_session_id,
+                "result": result,
+                "layout": preview_result,
+            }
+
+        ctx.harness_session_id = public_session_id
+        if draft.base_session_id:
+            published = _publish_claimed_session(
+                public_session_id,
+                ctx,
+                claim_token=base_claim_token,
+                expected_revision=base_revision,
+            )
+            if not published:
+                return {
+                    "ok": False,
+                    "error": "session_revision_conflict",
+                    "plan_id": plan_id,
+                    "session_id": public_session_id,
+                }
+            base_claim_token = ""
+        else:
+            _store_session(public_session_id, ctx)
+            keep_candidate_session = public_session_id == candidate_session_id
+
+        screenshot_url = str(preview_result.get("screenshot_url") or "")
+        graph_state = _tool_get_graph_state(ctx)
+        graph_state["session_id"] = public_session_id
+        graph_state["sandbox_url"] = f"/sandbox/render?session_id={public_session_id}"
+        _drop_plan(plan_id)
+        plan_claim_token = ""
+        return {
+            "ok": True,
+            "plan_id": plan_id,
+            "session_id": public_session_id,
+            "sandbox_url": f"/sandbox/render?session_id={public_session_id}",
+            "screenshot_url": screenshot_url,
+            "graph_state": graph_state,
+            "done": {
+                "rounds": int(preview_result.get("rounds") or 0),
+                "executed": (
+                    int(result.get("created", 0))
+                    + int(result.get("edge_created", 0))
+                    + int(result.get("updated", 0))
+                    + int(preview_result.get("executed") or 0)
+                ),
+                "session_id": public_session_id,
+                "converged": bool(preview_result.get("converged")),
+                "exit_reason": str(preview_result.get("exit_reason") or "plan_confirmed"),
+                "radial_fast_path": True,
+                "radial_layout_used": bool(result.get("radial_layout_used")),
+                "relayout_called": bool(result.get("relayout_called")),
+                "layout_executed": bool(preview_result.get("layout_executed")),
+                "layout_tool_calls": int(preview_result.get("tool_calls") or 0),
+                "sandbox_url": f"/sandbox/render?session_id={public_session_id}",
+            },
+        }
+    finally:
+        if not keep_candidate_session:
+            _drop_session(candidate_session_id)
+        if base_claim_token:
+            _release_session_claim(draft.base_session_id, base_claim_token)
+        if plan_claim_token:
+            _release_plan_claim(plan_id, plan_claim_token)
 
 
 async def chat_power_map_v2(
@@ -13937,17 +14546,21 @@ async def commit_power_map_session(
     db: Session,
 ) -> dict[str, Any]:
     """Look up the in-memory session, submit ctx to BI, then drop the session."""
-    ctx = _get_session(session_id)
+    claim_token = f"commit:{uuid.uuid4().hex}"
+    ctx, revision, claim_error = _claim_session(session_id, claim_token)
     if ctx is None:
-        return {"ok": False, "error": "session_not_found"}
+        return {"ok": False, "error": claim_error}
 
     if not ctx.harness_cfg or not ctx.harness_prj_id:
+        _release_session_claim(session_id, claim_token)
         return {"ok": False, "error": "session_incomplete"}
 
     if not ctx.harness_can_commit:
         err = ctx.harness_last_error or "session_not_committable"
+        _release_session_claim(session_id, claim_token)
         return {"ok": False, "error": err}
 
+    submit_completed = False
     try:
         result = await _submit_to_bi(
             cfg=ctx.harness_cfg,
@@ -13958,15 +14571,43 @@ async def commit_power_map_session(
             current_user=ctx.harness_current_user,
             ctx=ctx,
         )
+        submit_completed = True
+    except asyncio.CancelledError:
+        ctx.harness_can_commit = False
+        ctx.harness_last_error = "commit_outcome_unknown"
+        logger.warning("commit: cancelled with unknown BI outcome session=%s", session_id)
+        raise
     except Exception as exc:
         logger.exception("commit: submit_to_bi failed")
         return {"ok": False, "error": f"submit_failed: {exc}"}
+    finally:
+        if not submit_completed:
+            _release_session_claim(session_id, claim_token)
 
-    _drop_session(session_id)
+    if not _drop_claimed_session(
+        session_id,
+        claim_token=claim_token,
+        expected_revision=revision,
+    ):
+        logger.critical("commit: session changed while BI submit was in flight session=%s", session_id)
+        _release_session_claim(session_id, claim_token)
+        return {"ok": False, "error": "session_revision_conflict_after_submit", "result": result}
     return {"ok": True, "result": result}
 
 
 def discard_power_map_session(session_id: str) -> dict[str, Any]:
     """Drop the in-memory session without submitting anything."""
-    _drop_session(session_id)
+    claim_token = f"discard:{uuid.uuid4().hex}"
+    ctx, revision, claim_error = _claim_session(session_id, claim_token)
+    if ctx is None:
+        if claim_error == "session_not_found":
+            return {"ok": True}
+        return {"ok": False, "error": claim_error}
+    if not _drop_claimed_session(
+        session_id,
+        claim_token=claim_token,
+        expected_revision=revision,
+    ):
+        _release_session_claim(session_id, claim_token)
+        return {"ok": False, "error": "session_revision_conflict"}
     return {"ok": True}

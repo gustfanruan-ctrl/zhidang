@@ -8,6 +8,8 @@ from app.services.power_map_service import (  # noqa: E402
     MergeContext,
     PowerNode,
     _apply_power_map_intent_to_context,
+    _build_layout_execution_instruction,
+    _intent_requests_layout,
     _parse_power_map_intent,
 )
 
@@ -184,6 +186,57 @@ def test_existing_graph_local_intent_preserves_existing_node_geometry():
     assert result["radial_layout_used"] is False
     assert {node.id: (node.x, node.y, node.w, node.h) for node in [root, user]} == before
     assert ctx.nodes_by_name["Bob"].parent_dept_id == root.id
+
+
+def test_existing_graph_rank_groups_and_resize_language_request_layout_execution():
+    nodes = [
+        PowerNode(id="d-platform", node_type="dept", name="数据中台", x=100, y=100, w=300, h=200),
+        PowerNode(id="d-product", node_type="dept", name="数据产品部", x=500, y=400, w=300, h=200),
+        PowerNode(id="d-dev", node_type="dept", name="数据开发部", x=900, y=700, w=300, h=200),
+        PowerNode(id="d-ops", node_type="dept", name="系统运维部", x=1300, y=1000, w=300, h=200),
+        PowerNode(id="d-other", node_type="dept", name="奇瑞", x=1700, y=1300, w=300, h=200),
+    ]
+    ctx = MergeContext(
+        all_nodes=nodes,
+        nodes_by_id={node.id: node for node in nodes},
+        nodes_by_name={node.name: node for node in nodes},
+        depts_by_name={node.name: node for node in nodes},
+    )
+    intent = _parse_power_map_intent(json.dumps({
+        "goal": "把数据中台放大，四个部门放到同一个层级，其他部门单独分行排列",
+        "layout_roots": ["数据中台"],
+        "rank_groups": [
+            ["数据中台", "数据产品部", "数据开发部", "系统运维部"],
+            ["奇瑞"],
+        ],
+        "constraints": ["同一组横向对齐，不同组纵向分行"],
+    }, ensure_ascii=False))
+
+    assert _intent_requests_layout(intent) is True
+    instruction = _build_layout_execution_instruction(intent, ctx)
+    assert "放大" in instruction
+    assert "数据中台" in instruction
+    assert "d-platform" in instruction
+    assert "数据产品部" in instruction
+    assert "同一组横向对齐" in instruction
+
+
+def test_existing_graph_structural_edit_without_layout_language_keeps_layout_executor_disabled():
+    intent = _parse_power_map_intent(json.dumps({
+        "goal": "在数据中台新增一名联系人",
+        "people": [{"name": "张三", "parent": "数据中台"}],
+    }, ensure_ascii=False))
+
+    assert _intent_requests_layout(intent) is False
+
+
+def test_existing_graph_layout_roots_alone_enable_layout_executor():
+    intent = _parse_power_map_intent(json.dumps({
+        "goal": "优化当前图形",
+        "layout_roots": ["数据中台"],
+    }, ensure_ascii=False))
+
+    assert _intent_requests_layout(intent) is True
 
 
 def test_radial_layout_wraps_wide_root_sibling_departments():
