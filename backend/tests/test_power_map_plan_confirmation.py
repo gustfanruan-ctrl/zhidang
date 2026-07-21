@@ -943,6 +943,29 @@ def test_commit_claim_drops_session_after_success(monkeypatch):
         _drop_session(session_id)
 
 
+def test_commit_business_rejection_keeps_session_for_retry(monkeypatch):
+    session_id = "commit-business-rejection-session"
+    ctx = _layout_ctx()
+    ctx.harness_cfg = object()
+    ctx.harness_prj_id = "project-1"
+    ctx.harness_can_commit = True
+    _store_session(session_id, ctx)
+
+    async def fake_submit(**kwargs):
+        return {"success": False}
+
+    monkeypatch.setattr(power_map_service, "_submit_to_bi", fake_submit)
+    try:
+        result = asyncio.run(commit_power_map_session(session_id, _FakeDb()))
+
+        assert result["ok"] is False
+        assert "success=false" in result["error"]
+        assert _get_session(session_id) is ctx
+        assert discard_power_map_session(session_id) == {"ok": True}
+    finally:
+        _drop_session(session_id)
+
+
 @pytest.mark.parametrize("failure", [RuntimeError("provider failed"), asyncio.CancelledError()])
 def test_commit_claim_is_released_after_submit_failure_or_cancellation(monkeypatch, failure):
     session_id = f"commit-failure-{type(failure).__name__}"

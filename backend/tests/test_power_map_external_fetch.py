@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services import power_map_service  # noqa: E402
@@ -85,6 +87,9 @@ def test_fetch_from_external_does_not_fallback_to_global_com_id_graph(monkeypatc
 
     assert data["company_name"] == "盐城市联鑫钢铁有限公司"
     assert data["version_info"][0]["value"] == "real-version"
+    assert data["resolved_version_id"] == "real-version"
+    assert data["requested_version_rejected"] is True
+    assert power_map_service._extract_version_id(data, "foreign-version") == "real-version"
     assert data["nodes"] == []
     assert {"com_id": "customer-1"} not in _FakeAsyncClient.calls
     assert {
@@ -92,3 +97,80 @@ def test_fetch_from_external_does_not_fallback_to_global_com_id_graph(monkeypatc
         "ver_info": "foreign-version",
         "prj_id": "customer-1",
     } not in _FakeAsyncClient.calls
+
+
+def test_submit_to_bi_rejects_http_200_business_failure(monkeypatch):
+    class _RejectedResponse:
+        status_code = 200
+        text = '{"success":false}'
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"success": False}
+
+    class _SubmitClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, *args, **kwargs):
+            return _RejectedResponse()
+
+    monkeypatch.setattr(power_map_service.httpx, "AsyncClient", _SubmitClient)
+
+    with pytest.raises(RuntimeError, match="success=false"):
+        asyncio.run(
+            power_map_service._submit_to_bi(
+                _cfg(),
+                "customer-1",
+                "real-version",
+                [],
+                [],
+                current_user=None,
+            )
+        )
+
+
+def test_plan_context_rejects_stale_requested_version(monkeypatch):
+    async def fake_resolve(*args, **kwargs):
+        return "customer-1"
+
+    async def fake_fetch(*args, **kwargs):
+        return {
+            "nodes": [],
+            "edges": [],
+            "resolved_version_id": "real-version",
+            "requested_version_rejected": True,
+        }
+
+    monkeypatch.setattr(power_map_service, "_resolve_prj_id", fake_resolve)
+    monkeypatch.setattr(power_map_service, "_fetch_from_external", fake_fetch)
+
+    with pytest.raises(ValueError, match="version_not_available"):
+        asyncio.run(
+            power_map_service._prepare_power_map_plan_context(
+                object(),
+                _cfg(),
+                "customer-1",
+                None,
+                "foreign-version",
+            )
+        )
+
+
+def test_to_up_node_preserves_node_expect():
+    node = power_map_service.PowerNode(
+        id="user-1",
+        node_type="user",
+        name="测试用户",
+        node_expect="linked-expectation",
+    )
+
+    assert power_map_service._to_up_node(node)["node_expect"] == "linked-expectation"

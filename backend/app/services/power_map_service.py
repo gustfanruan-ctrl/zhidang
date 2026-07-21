@@ -1649,6 +1649,10 @@ def _to_up_node(node: PowerNode) -> dict[str, Any]:
         "attitude_arr": node.attitude_arr or [],
         "type": node.node_type,
         "jdy_id": node.jdy_id or "",
+        # The BI editor submits the original node_info object and therefore
+        # preserves this field. Dropping it can make customer-success
+        # versions reject an otherwise valid full-graph update.
+        "node_expect": node.node_expect or "",
     }
 
     if is_dept:
@@ -4091,6 +4095,8 @@ async def _submit_to_bi(
             result = resp.json()
         except Exception:
             result = {"raw": resp.text}
+        if isinstance(result, dict) and result.get("success") is False:
+            raise RuntimeError("BI rejected power map update (success=false)")
 
     return result
 
@@ -7434,6 +7440,7 @@ async def _prepare_power_map_plan_context(
 
     prj_id = await _resolve_prj_id(db, cfg, company_id)
     current = await _fetch_from_external(cfg, prj_id, current_user, version=version)
+    _ensure_requested_version_available(current)
     nodes = [_node_from_bi_dict(n) for n in current.get("nodes", [])]
     _mark_geometry_anomalies(nodes)
     version_id = _extract_version_id(current, version)
@@ -12610,9 +12617,11 @@ async def _execute_harness_stream(
     else:
         try:
             current = await _fetch_from_external(cfg, prj_id, current_user, version=version)
+            _ensure_requested_version_available(current)
         except Exception as exc:
             logger.warning("harness-stream: failed to fetch current BI state: %s", exc)
-            yield HarnessEvent(type="done", data={"skipped": True, "error": "fetch_failed", "rounds": 0, "executed": 0})
+            error = "version_not_available" if str(exc) == "version_not_available" else "fetch_failed"
+            yield HarnessEvent(type="done", data={"skipped": True, "error": error, "rounds": 0, "executed": 0})
             return
 
         current_nodes_raw = current.get("nodes", [])
@@ -12763,6 +12772,7 @@ async def _fetch_from_external(
 
         result: dict[str, Any] = {"nodes": [], "edges": []}
         allowed_version_ids: set[str] = set()
+        requested_version_rejected = False
         if isinstance(meta, dict):
             for key in ("version_info", "contact_info", "company_name", "owner_info", "opp_info"):
                 if key in meta:
@@ -12774,6 +12784,7 @@ async def _fetch_from_external(
 
         ver_id = version
         if ver_id and allowed_version_ids and str(ver_id) not in allowed_version_ids:
+            requested_version_rejected = True
             logger.warning(
                 "BI getInfo ignored foreign version: prj_id=%s requested=%s allowed=%s",
                 company_id,
@@ -12811,6 +12822,12 @@ async def _fetch_from_external(
             ver_id or "",
             list(result.keys()),
         )
+        # Keep the effective BI version alongside the graph.  The caller may
+        # have requested a stale/foreign version which was rejected above; in
+        # that case persisting the original request would write to a graph the
+        # user can no longer see.
+        result["resolved_version_id"] = str(ver_id or "")
+        result["requested_version_rejected"] = requested_version_rejected
 
         if ver_id:
             params2 = {"prj_type": "opp", "ver_info": ver_id, "prj_id": company_id}
@@ -12872,12 +12889,24 @@ async def _resolve_prj_id(db: Session, cfg: SystemConfig, company_id: str) -> st
 
 def _extract_version_id(current_map_data: dict[str, Any], version: str | None = None) -> str:
     """Extract version_id from map data."""
-    ver_id = version or ""
+    # `_fetch_from_external` validates the requested version against the
+    # company-level version list.  Always bind the session to that resolved
+    # value; falling back to the raw request here reintroduces stale versions
+    # during commit.
+    ver_id = str(current_map_data.get("resolved_version_id") or "")
+    if not ver_id:
+        ver_id = version or ""
     if not ver_id:
         vi = current_map_data.get("version_info") or []
         if isinstance(vi, list) and vi:
             ver_id = vi[0].get("value") if isinstance(vi[0], dict) else str(vi[0])
     return ver_id
+
+
+def _ensure_requested_version_available(current_map_data: dict[str, Any]) -> None:
+    """Stop write-capable flows when the caller selected a stale BI version."""
+    if current_map_data.get("requested_version_rejected"):
+        raise ValueError("version_not_available")
 
 
 def _extract_version_name(current_map_data: dict[str, Any]) -> str:
@@ -13017,6 +13046,7 @@ async def confirm_power_map(
 
     # 1. Fetch current BI data
     current = await _fetch_from_external(cfg, prj_id, current_user, version=version)
+    _ensure_requested_version_available(current)
     current_nodes_raw = current.get("nodes", [])
     current_edges_raw = current.get("edges", [])
     version_id = _extract_version_id(current, version)
@@ -13157,6 +13187,7 @@ async def relayout_power_map(
 
     prj_id = await _resolve_prj_id(db, cfg, company_id)
     current = await _fetch_from_external(cfg, prj_id, current_user, version=version)
+    _ensure_requested_version_available(current)
     current_nodes_raw = current.get("nodes", [])
     current_edges_raw = current.get("edges", [])
     version_id = _extract_version_id(current, version)
@@ -14377,6 +14408,7 @@ async def chat_power_map_v2(
     _bi_fetch_ok = False
     try:
         current = await _fetch_from_external(cfg, prj_id, current_user, version=version)
+        _ensure_requested_version_available(current)
         _bi_fetch_ok = True
     except Exception as exc:
         _bi_fetch_ms = int((time.time() - _bi_fetch_start) * 1000)
@@ -14385,7 +14417,8 @@ async def chat_power_map_v2(
             "", False, 0, 0, _bi_fetch_ms,
         )
         logger.warning("chat_v2: failed to fetch current BI state: %s", exc)
-        yield HarnessEvent(type="done", data={"skipped": True, "error": "fetch_failed", "rounds": 0, "executed": 0})
+        error = "version_not_available" if str(exc) == "version_not_available" else "fetch_failed"
+        yield HarnessEvent(type="done", data={"skipped": True, "error": error, "rounds": 0, "executed": 0})
         return
     _bi_fetch_ms = int((time.time() - _bi_fetch_start) * 1000)
 
@@ -14571,6 +14604,11 @@ async def commit_power_map_session(
             current_user=ctx.harness_current_user,
             ctx=ctx,
         )
+        # BI reports business rejection in a HTTP 200 response.  Treat an
+        # explicit `success: false` as a failed commit so the session remains
+        # available for retry and the frontend cannot show a false success.
+        if isinstance(result, dict) and result.get("success") is False:
+            raise RuntimeError("BI rejected power map update (success=false)")
         submit_completed = True
     except asyncio.CancelledError:
         ctx.harness_can_commit = False

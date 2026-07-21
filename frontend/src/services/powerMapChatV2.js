@@ -150,10 +150,11 @@ export async function commitChatV2({ companyId, sessionId }) {
   )
   let data = null
   try { data = await response.json() } catch { /* may be empty body */ }
+  const biRejected = data?.result?.success === false
   return {
     status: response.status,
-    ok: data?.ok === true,
-    error: data?.error || (response.ok ? null : data?.detail || `http_${response.status}`),
+    ok: data?.ok === true && !biRejected,
+    error: data?.error || (biRejected ? 'BI 未保存本次修改' : (response.ok ? null : data?.detail || `http_${response.status}`)),
     result: data?.result ?? null,
   }
 }
