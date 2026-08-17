@@ -10,6 +10,14 @@
 - 自然语言维护客户权利地图（Power Map）
 - 生成跟进记录、审核卡片等交付物
 
+## 开发交接
+
+当前开发、调试、部署、回滚和近期 Power Map 变更的统一入口：
+
+- [开发交接说明](docs/DEVELOPMENT_HANDOFF.md)
+- [GitHub 仓库](https://github.com/gustfanruan-ctrl/zhidang)
+- [当前 master 提交 3e7bb5f](https://github.com/gustfanruan-ctrl/zhidang/commit/3e7bb5fccd37899ee194ba44a3750a463864fff0)
+
 ## 核心功能
 
 ### 1. 转写与图片结构化
